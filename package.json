@@ -1,0 +1,38 @@
+{
+  "name": "aivideostudio-backend",
+  "version": "1.0.0",
+  "description": "Fantasia AI Video Studio — Node.js/TypeScript backend",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "lint": "tsc --noEmit",
+    "db:push": "drizzle-kit push",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.817.0",
+    "@aws-sdk/s3-request-presigner": "^3.817.0",
+    "@neondatabase/serverless": "^1.0.0",
+    "@types/express": "^5.0.3",
+    "bullmq": "^5.56.7",
+    "dotenv": "^16.5.0",
+    "drizzle-orm": "^0.44.1",
+    "express": "^4.21.2",
+    "firebase-admin": "^13.4.0",
+    "ioredis": "^5.6.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.0",
+    "drizzle-kit": "^0.31.10",
+    "ts-node-dev": "^2.0.0",
+    "tsx": "^4.22.4",
+    "typescript": "^5.9.3"
+  }
+}

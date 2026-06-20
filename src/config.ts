@@ -1,0 +1,22 @@
+// src/config.ts
+
+function requireEnv(name: string): string {
+  const value = process.env[name];
+  if (!value) throw new Error(`Missing required environment variable: ${name}`);
+  return value;
+}
+
+export const config = {
+  port: parseInt(process.env.PORT ?? '3000', 10),
+  nodeEnv: process.env.NODE_ENV ?? 'development',
+  databaseUrl: requireEnv('DATABASE_URL'),
+  redisUrl: requireEnv('REDIS_URL'),
+  r2AccountId: requireEnv('R2_ACCOUNT_ID'),
+  r2AccessKeyId: requireEnv('R2_ACCESS_KEY_ID'),
+  r2SecretAccessKey: requireEnv('R2_SECRET_ACCESS_KEY'),
+  r2BucketName: requireEnv('R2_BUCKET_NAME'),
+  r2PublicDomain: process.env.R2_PUBLIC_DOMAIN ?? '',
+  firebaseProjectId: requireEnv('FIREBASE_PROJECT_ID'),
+  firebaseClientEmail: requireEnv('FIREBASE_CLIENT_EMAIL'),
+  firebasePrivateKey: requireEnv('FIREBASE_PRIVATE_KEY').replace(/\\n/g, '\n'),
+} as const;
