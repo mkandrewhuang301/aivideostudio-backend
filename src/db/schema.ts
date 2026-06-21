@@ -1,0 +1,129 @@
+// src/db/schema.ts
+import {
+  pgTable,
+  uuid,
+  text,
+  integer,
+  timestamp,
+  pgEnum,
+  jsonb,
+  uniqueIndex,
+  index,
+} from 'drizzle-orm/pg-core';
+import { sql } from 'drizzle-orm';
+
+// ─── Enums ────────────────────────────────────────────────────────────────────
+
+export const creditTransactionTypeEnum = pgEnum('credit_transaction_type', [
+  'subscription_grant',
+  'topup_grant',
+  'generation_deduct',
+  'generation_refund',
+  'refund_clawback',
+]);
+
+export const generationStatusEnum = pgEnum('generation_status', [
+  'pending',
+  'processing',
+  'completed',
+  'failed',
+  'refunded',
+]);
+
+// ─── users ────────────────────────────────────────────────────────────────────
+// Per D-12: id (UUID), firebase_uid (unique), email, credits_balance (integer default 0),
+//           created_at, updated_at
+// Note: credits_balance is a SIGNED integer (allows negative for bug detection).
+//       apns_device_token added here for Phase 4 (APNs) to avoid a future migration.
+
+export const users = pgTable(
+  'users',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    firebase_uid: text('firebase_uid').notNull().unique(),
+    email: text('email'),
+    credits_balance: integer('credits_balance').notNull().default(0),
+    apns_device_token: text('apns_device_token'),
+    created_at: timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+    updated_at: timestamp('updated_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+  },
+  (table) => ({
+    firebaseUidIdx: uniqueIndex('users_firebase_uid_idx').on(table.firebase_uid),
+  }),
+);
+
+// ─── credit_transactions ──────────────────────────────────────────────────────
+// Per D-13: append-only ledger. id, user_id, amount (positive=credit, negative=debit),
+//           type (enum), reference_id (fal request ID, RevenueCat transaction ID, etc.),
+//           created_at
+// NEVER update or delete rows from this table.
+
+export const creditTransactions = pgTable(
+  'credit_transactions',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    user_id: uuid('user_id')
+      .notNull()
+      .references(() => users.id),
+    amount: integer('amount').notNull(), // positive = credit, negative = debit
+    type: creditTransactionTypeEnum('type').notNull(),
+    reference_id: text('reference_id'), // fal request_id, RevenueCat transaction_id, etc.
+    created_at: timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+  },
+  (table) => ({
+    userIdIdx: index('credit_transactions_user_id_idx').on(table.user_id),
+    createdAtIdx: index('credit_transactions_created_at_idx').on(table.created_at),
+  }),
+);
+
+// ─── generations ──────────────────────────────────────────────────────────────
+// Per D-14: id (UUID), user_id, fal_request_id (unique, nullable until dispatched),
+//           model (varchar), status (enum), prompt, params (jsonb),
+//           cost_credits (integer), r2_key (nullable), created_at, completed_at
+// IMPORTANT: fal_request_id must have a unique index to prevent duplicate webhook processing.
+
+export const generations = pgTable(
+  'generations',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    user_id: uuid('user_id')
+      .notNull()
+      .references(() => users.id),
+    fal_request_id: text('fal_request_id').unique(), // nullable until dispatched; unique prevents duplicate webhook processing
+    model: text('model').notNull(), // e.g. 'bytedance/seedance-2.0/text-to-video'
+    status: generationStatusEnum('status').notNull().default('pending'),
+    prompt: text('prompt'),
+    params: jsonb('params'), // {resolution, duration, aspect_ratio, audio_enabled, ref_asset_key}
+    cost_credits: integer('cost_credits').notNull(),
+    r2_key: text('r2_key'), // nullable until video archived to R2
+    created_at: timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+    completed_at: timestamp('completed_at', { withTimezone: true }),
+  },
+  (table) => ({
+    userIdIdx: index('generations_user_id_idx').on(table.user_id),
+    statusIdx: index('generations_status_idx').on(table.status),
+    createdAtIdx: index('generations_created_at_idx').on(table.created_at),
+    falRequestIdUniqueIdx: uniqueIndex('generations_fal_request_id_unique_idx').on(
+      table.fal_request_id,
+    ),
+  }),
+);
+
+// ─── Type exports (used by services in Phases 2–4) ────────────────────────────
+
+export type User = typeof users.$inferSelect;
+export type NewUser = typeof users.$inferInsert;
+export type CreditTransaction = typeof creditTransactions.$inferSelect;
+export type NewCreditTransaction = typeof creditTransactions.$inferInsert;
+export type Generation = typeof generations.$inferSelect;
+export type NewGeneration = typeof generations.$inferInsert;
+export type GenerationStatus = (typeof generationStatusEnum.enumValues)[number];
+export type CreditTransactionType = (typeof creditTransactionTypeEnum.enumValues)[number];
