@@ -10,7 +10,12 @@
     "lint": "tsc --noEmit",
     "db:push": "drizzle-kit push",
     "db:generate": "drizzle-kit generate",
-    "db:migrate": "drizzle-kit migrate"
+    "db:migrate": "drizzle-kit migrate",
+    "smoke:queue": "tsx src/queue/testWorker.ts",
+    "smoke:r2": "tsx src/storage/smokeTest.ts"
+  },
+  "engines": {
+    "node": ">=22.0.0"
   },
   "keywords": [],
   "author": "",
