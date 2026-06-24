@@ -22,6 +22,24 @@ import {
 
 const mockDb = db as jest.Mocked<typeof db>;
 
+// Extract SQL string from a Drizzle sql`` tagged template object
+function extractSql(drizzleQuery: unknown): string {
+  if (typeof drizzleQuery === 'string') return drizzleQuery;
+  const q = drizzleQuery as { queryChunks?: Array<{ value?: string[] } | unknown> };
+  if (q.queryChunks) {
+    return q.queryChunks
+      .map((chunk) => {
+        if (chunk && typeof chunk === 'object' && 'value' in chunk) {
+          const c = chunk as { value: string[] };
+          return Array.isArray(c.value) ? c.value.join('') : '';
+        }
+        return ''; // scalar param — not SQL text
+      })
+      .join('');
+  }
+  return String(drizzleQuery);
+}
+
 // Helper to reset mocks between tests
 beforeEach(() => {
   jest.clearAllMocks();
@@ -43,7 +61,7 @@ describe('deductCredits', () => {
     expect(result).toBe(true);
     // Verify atomic UPDATE was called with correct WHERE clause
     const executeCall = (mockDb.execute as jest.Mock).mock.calls[0][0];
-    const sqlText: string = executeCall.sql ?? executeCall.queryChunks?.map((c: { value: unknown }) => (typeof c.value === 'string' ? c.value : '')).join('') ?? String(executeCall);
+    const sqlText = extractSql(executeCall);
     expect(sqlText).toMatch(/credits_balance >= /);
     // Verify ledger row was inserted
     expect(mockDb.insert).toHaveBeenCalledTimes(1);
@@ -81,7 +99,7 @@ describe('grantCredits', () => {
     expect(mockDb.execute).toHaveBeenCalledTimes(1);
     // subscription_grant must also reset subscription_allotment
     const executeCall = (mockDb.execute as jest.Mock).mock.calls[0][0];
-    const sqlText: string = executeCall.sql ?? String(executeCall);
+    const sqlText = extractSql(executeCall);
     expect(sqlText).toMatch(/subscription_allotment/);
     expect(mockDb.insert).toHaveBeenCalledTimes(1);
   });
@@ -94,7 +112,7 @@ describe('grantCredits', () => {
     expect(mockDb.execute).toHaveBeenCalledTimes(1);
     // topup_grant should NOT reset subscription_allotment
     const executeCall = (mockDb.execute as jest.Mock).mock.calls[0][0];
-    const sqlText: string = executeCall.sql ?? String(executeCall);
+    const sqlText = extractSql(executeCall);
     expect(sqlText).not.toMatch(/subscription_allotment/);
     expect(mockDb.insert).toHaveBeenCalledTimes(1);
   });
@@ -110,7 +128,7 @@ describe('clawbackCredits', () => {
 
     expect(mockDb.execute).toHaveBeenCalledTimes(1);
     const executeCall = (mockDb.execute as jest.Mock).mock.calls[0][0];
-    const sqlText: string = executeCall.sql ?? String(executeCall);
+    const sqlText = extractSql(executeCall);
     expect(sqlText).toMatch(/GREATEST/);
     expect(mockDb.insert).toHaveBeenCalledTimes(1);
   });
