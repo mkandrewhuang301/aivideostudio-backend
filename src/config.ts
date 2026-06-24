@@ -19,4 +19,5 @@ export const config = {
   firebaseProjectId: requireEnv('FIREBASE_PROJECT_ID'),
   firebaseClientEmail: requireEnv('FIREBASE_CLIENT_EMAIL'),
   firebasePrivateKey: requireEnv('FIREBASE_PRIVATE_KEY').replace(/\\n/g, '\n'),
+  revenueCatWebhookSecret: requireEnv('REVENUECAT_WEBHOOK_SECRET'),
 } as const;
