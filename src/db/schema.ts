@@ -44,6 +44,12 @@ export const users = pgTable(
     email: text('email'),
     credits_balance: integer('credits_balance').notNull().default(0),
     apns_device_token: text('apns_device_token'),
+    entitlement_level: text('entitlement_level'), // nullable: 'basic' | 'pro' | NULL (no active subscription)
+    subscription_allotment: integer('subscription_allotment').notNull().default(0), // credits granted in the current billing period (reset on RENEWAL)
+    revenuecat_customer_id: text('revenuecat_customer_id').unique(), // RevenueCat customer ID — O(1) webhook lookups without joining on firebase_uid
+    display_name: text('display_name'), // user display name for profile UI (Phase 6)
+    total_generations: integer('total_generations').notNull().default(0), // incremented on generation completion; avoids COUNT(*) on generations table
+    last_active_at: timestamp('last_active_at', { withTimezone: true }), // churn analytics and re-engagement push (Phase 7)
     created_at: timestamp('created_at', { withTimezone: true })
       .notNull()
       .default(sql`now()`),
@@ -71,7 +77,8 @@ export const creditTransactions = pgTable(
       .references(() => users.id),
     amount: integer('amount').notNull(), // positive = credit, negative = debit
     type: creditTransactionTypeEnum('type').notNull(),
-    reference_id: text('reference_id'), // fal request_id, RevenueCat transaction_id, etc.
+    reference_id: text('reference_id'), // Replicate prediction_id, RevenueCat transaction_id, etc.
+    expires_at: timestamp('expires_at', { withTimezone: true }), // nullable; set only for topup_grant rows (90-day expiry from purchase date)
     created_at: timestamp('created_at', { withTimezone: true })
       .notNull()
       .default(sql`now()`),
@@ -83,10 +90,10 @@ export const creditTransactions = pgTable(
 );
 
 // ─── generations ──────────────────────────────────────────────────────────────
-// Per D-14: id (UUID), user_id, fal_request_id (unique, nullable until dispatched),
+// Per D-14: id (UUID), user_id, replicate_prediction_id (unique, nullable until dispatched),
 //           model (varchar), status (enum), prompt, params (jsonb),
 //           cost_credits (integer), r2_key (nullable), created_at, completed_at
-// IMPORTANT: fal_request_id must have a unique index to prevent duplicate webhook processing.
+// IMPORTANT: replicate_prediction_id must have a unique index to prevent duplicate webhook processing.
 
 export const generations = pgTable(
   'generations',
@@ -95,8 +102,8 @@ export const generations = pgTable(
     user_id: uuid('user_id')
       .notNull()
       .references(() => users.id),
-    fal_request_id: text('fal_request_id').unique(), // nullable until dispatched; unique prevents duplicate webhook processing
-    model: text('model').notNull(), // e.g. 'bytedance/seedance-2.0/text-to-video'
+    replicate_prediction_id: text('replicate_prediction_id').unique(), // nullable until dispatched; unique prevents duplicate webhook processing
+    model: text('model').notNull(), // e.g. 'bytedance/seedance-2.0-fast'
     status: generationStatusEnum('status').notNull().default('pending'),
     prompt: text('prompt'),
     params: jsonb('params'), // {resolution, duration, aspect_ratio, audio_enabled, ref_asset_key}
@@ -111,13 +118,13 @@ export const generations = pgTable(
     userIdIdx: index('generations_user_id_idx').on(table.user_id),
     statusIdx: index('generations_status_idx').on(table.status),
     createdAtIdx: index('generations_created_at_idx').on(table.created_at),
-    falRequestIdUniqueIdx: uniqueIndex('generations_fal_request_id_unique_idx').on(
-      table.fal_request_id,
+    replicatePredictionIdUniqueIdx: uniqueIndex('generations_replicate_prediction_id_unique_idx').on(
+      table.replicate_prediction_id,
     ),
   }),
 );
 
-// ─── Type exports (used by services in Phases 2–4) ────────────────────────────
+// ─── Type exports (used by services in Phases 2–4) ───────────────────────────
 
 export type User = typeof users.$inferSelect;
 export type NewUser = typeof users.$inferInsert;
