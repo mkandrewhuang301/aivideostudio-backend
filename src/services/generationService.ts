@@ -12,8 +12,8 @@ const CREDITS_PER_DOLLAR = 50; // mirrors SUBSCRIPTION_CREDITS/TOPUP_CREDITS sca
 
 const MODEL_RATES: Record<string, { nonVideoIn: Record<string, number>; videoIn: Record<string, number> }> = {
   'bytedance/seedance-2.0-fast': {
-    nonVideoIn: { '480p': 0.075, '720p': 0.15 }, // 480p assumed 0.5x of 720p — confirm before Phase 6
-    videoIn:    { '480p': 0.075, '720p': 0.15 }, // video_in rate unconfirmed — same as non_video_in until Phase 6
+    nonVideoIn: { '480p': 0.07, '720p': 0.15 },
+    videoIn:    { '480p': 0.08, '720p': 0.17 },
   },
   'bytedance/seedance-2.0-mini': {
     nonVideoIn: { '480p': 0.04, '720p': 0.09 },
