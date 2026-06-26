@@ -20,4 +20,8 @@ export const config = {
   firebaseClientEmail: requireEnv('FIREBASE_CLIENT_EMAIL'),
   firebasePrivateKey: requireEnv('FIREBASE_PRIVATE_KEY').replace(/\\n/g, '\n'),
   revenueCatWebhookSecret: requireEnv('REVENUECAT_WEBHOOK_SECRET'),
+  apnsAuthKey: requireEnv('APNS_AUTH_KEY').replace(/\\n/g, '\n'),
+  apnsKeyId: requireEnv('APNS_KEY_ID'),
+  apnsTeamId: requireEnv('APNS_TEAM_ID'),
+  apnsBundleId: requireEnv('APNS_BUNDLE_ID'),
 } as const;
