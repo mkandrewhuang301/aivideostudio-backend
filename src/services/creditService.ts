@@ -115,6 +115,31 @@ export async function clawbackCredits(
 }
 
 /**
+ * Refunds credits to a user for a failed, orphaned, or stalled generation.
+ * Used by the Replicate webhook failure path and the BullMQ reaper.
+ * Appends a generation_refund ledger row (D-22: append-only).
+ */
+export async function refundCredits(
+  userId: string,
+  amount: number,
+  referenceId: string,
+): Promise<void> {
+  await db.execute(sql`
+    UPDATE users
+    SET credits_balance = credits_balance + ${amount},
+        updated_at = now()
+    WHERE id = ${userId}::uuid
+  `);
+
+  await db.insert(creditTransactions).values({
+    user_id: userId,
+    amount,
+    type: 'generation_refund',
+    reference_id: referenceId,
+  });
+}
+
+/**
  * Fetches user balance data for GET /api/me.
  * Before returning, expires any stale topup_grant rows (expires_at < now()).
  * Stale rows are expired by inserting a refund_clawback row of opposite amount and

@@ -18,6 +18,7 @@ import {
   grantCredits,
   clawbackCredits,
   getUserWithBalance,
+  refundCredits,
 } from '../../services/creditService';
 
 const mockDb = db as jest.Mocked<typeof db>;
@@ -131,6 +132,30 @@ describe('clawbackCredits', () => {
     const sqlText = extractSql(executeCall);
     expect(sqlText).toMatch(/GREATEST/);
     expect(mockDb.insert).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ─── refundCredits ────────────────────────────────────────────────────────────
+
+describe('refundCredits', () => {
+  it('issues an UPDATE crediting the balance and inserts a generation_refund ledger row', async () => {
+    (mockDb.execute as jest.Mock).mockResolvedValueOnce({ rows: [] });
+
+    await refundCredits('user-uuid', 45, 'gen-uuid-123');
+
+    expect(mockDb.execute).toHaveBeenCalledTimes(1);
+    const executeCall = (mockDb.execute as jest.Mock).mock.calls[0][0];
+    const sqlText = extractSql(executeCall);
+    expect(sqlText).toMatch(/credits_balance \+/);
+
+    expect(mockDb.insert).toHaveBeenCalledTimes(1);
+    const insertMock = (mockDb.insert as jest.Mock).mock.results[0].value.values as jest.Mock;
+    expect(insertMock).toHaveBeenCalledWith({
+      user_id: 'user-uuid',
+      amount: 45,
+      type: 'generation_refund',
+      reference_id: 'gen-uuid-123',
+    });
   });
 });
 
