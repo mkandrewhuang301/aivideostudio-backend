@@ -13,6 +13,9 @@ import {
   attachPredictionId,
 } from '../services/generationService';
 import { ReplicateProvider } from '../services/providers/ReplicateProvider';
+import { refundCredits } from '../services/creditService';
+import { markRefunded } from '../services/generationService';
+import { config } from '../config';
 import type { GenerationInput } from '../services/providers/ModelProvider';
 
 export const generationsRouter = Router();
@@ -97,7 +100,7 @@ generationsRouter.post('/', prepareCost, creditCheckMiddleware, async (req: Requ
       cost_credits: resolved.cost,
     });
 
-    const webhookUrl = `${process.env.PUBLIC_BASE_URL ?? ''}/webhooks/replicate`;
+    const webhookUrl = `${config.publicBaseUrl}/webhooks/replicate`;
     const input: GenerationInput = {
       prompt: resolved.prompt,
       durationSeconds: resolved.durationSeconds,
@@ -106,9 +109,18 @@ generationsRouter.post('/', prepareCost, creditCheckMiddleware, async (req: Requ
       audioEnabled: resolved.audioEnabled,
     };
 
-    const { providerPredictionId } = await provider.dispatch(input, webhookUrl);
-    await attachPredictionId(generationId, providerPredictionId);
+    let providerPredictionId: string;
+    try {
+      ({ providerPredictionId } = await provider.dispatch(input, webhookUrl));
+    } catch (dispatchError) {
+      console.error('[generations] Dispatch failed — refunding credits immediately:', dispatchError);
+      await markRefunded(generationId);
+      await refundCredits(req.user.dbUserId, resolved.cost, `dispatch-failure-${generationId}`);
+      res.status(502).json({ error: 'Generation provider unavailable. Credits have been refunded.' });
+      return;
+    }
 
+    await attachPredictionId(generationId, providerPredictionId);
     res.status(200).json({ generation_id: generationId, status: 'processing' });
   } catch (error) {
     console.error('[generations] Error dispatching generation:', error);
