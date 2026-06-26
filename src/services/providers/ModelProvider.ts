@@ -4,8 +4,9 @@
 
 export interface GenerationInput {
   prompt: string;
+  model: string;
   durationSeconds: number; // NEVER -1; resolved server-side before this call (CLAUDE.md Rule 7)
-  resolution: '480p' | '720p'; // Seedance 2.0 Fast only supports 480p and 720p
+  resolution: '480p' | '720p';
   aspectRatio: string;
   audioEnabled: boolean;
   referenceAssetKeys?: string[];

@@ -11,7 +11,7 @@ const replicate = new Replicate({ auth: config.replicateApiToken });
 export class ReplicateProvider implements ModelProvider {
   async dispatch(input: GenerationInput, webhookUrl: string): Promise<DispatchResult> {
     const prediction = await replicate.predictions.create({
-      model: 'bytedance/seedance-2.0-fast',
+      model: input.model as `${string}/${string}`,
       input: {
         prompt: input.prompt,
         duration: input.durationSeconds,

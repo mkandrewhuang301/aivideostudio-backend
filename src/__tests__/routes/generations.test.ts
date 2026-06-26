@@ -23,6 +23,7 @@ jest.mock('../../config', () => ({
     apnsBundleId: 'mock',
     replicateApiToken: 'mock-token',
     replicateWebhookSecret: 'whsec_mock',
+    publicBaseUrl: 'https://mock.example.com',
     port: 3000,
     nodeEnv: 'test',
   },
@@ -37,6 +38,7 @@ jest.mock('../../db/client', () => ({
 
 jest.mock('../../services/creditService', () => ({
   deductCredits: jest.fn(),
+  refundCredits: jest.fn(),
 }));
 
 jest.mock('../../services/generationService', () => ({
@@ -44,6 +46,8 @@ jest.mock('../../services/generationService', () => ({
   computeCostCredits: jest.fn(),
   createGeneration: jest.fn(),
   attachPredictionId: jest.fn(),
+  markRefunded: jest.fn(),
+  SUPPORTED_MODELS: ['bytedance/seedance-2.0-fast', 'bytedance/seedance-2.0-mini'],
 }));
 
 jest.mock('../../services/providers/ReplicateProvider', () => {

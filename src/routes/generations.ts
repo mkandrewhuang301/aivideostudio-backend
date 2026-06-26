@@ -11,6 +11,8 @@ import {
   computeCostCredits,
   createGeneration,
   attachPredictionId,
+  SUPPORTED_MODELS,
+  type SupportedModel,
 } from '../services/generationService';
 import { ReplicateProvider } from '../services/providers/ReplicateProvider';
 import { refundCredits } from '../services/creditService';
@@ -26,6 +28,7 @@ const VALID_RESOLUTIONS = ['480p', '720p'] as const;
 
 interface ResolvedGenerationRequest {
   prompt: string;
+  model: SupportedModel;
   durationSeconds: number;
   resolution: '480p' | '720p';
   aspectRatio: string;
@@ -44,10 +47,14 @@ declare global {
 // Step 1: validate + resolve duration/cost, attach cost_credits to req.body so
 // creditCheckMiddleware (mounted next) can read it per its existing contract.
 function prepareCost(req: Request, res: Response, next: NextFunction): void {
-  const { prompt, duration, resolution, aspect_ratio, audio_enabled } = req.body ?? {};
+  const { prompt, model = 'bytedance/seedance-2.0-fast', duration, resolution, aspect_ratio, audio_enabled } = req.body ?? {};
 
   if (!prompt || typeof prompt !== 'string') {
     res.status(400).json({ error: 'prompt is required', code: 'INVALID_PROMPT' });
+    return;
+  }
+  if (!SUPPORTED_MODELS.includes(model)) {
+    res.status(400).json({ error: `model must be one of: ${SUPPORTED_MODELS.join(', ')}`, code: 'INVALID_MODEL' });
     return;
   }
   if (!VALID_RESOLUTIONS.includes(resolution)) {
@@ -63,11 +70,12 @@ function prepareCost(req: Request, res: Response, next: NextFunction): void {
     return;
   }
 
-  const cost = computeCostCredits({ durationSeconds, resolution });
+  const cost = computeCostCredits({ durationSeconds, resolution, model: model as SupportedModel });
 
   req.body.cost_credits = cost;
   req._resolved = {
     prompt,
+    model: model as SupportedModel,
     durationSeconds,
     resolution,
     aspectRatio: aspect_ratio ?? '16:9',
@@ -88,7 +96,7 @@ generationsRouter.post('/', prepareCost, creditCheckMiddleware, async (req: Requ
   try {
     const { id: generationId } = await createGeneration({
       user_id: req.user.dbUserId,
-      model: 'bytedance/seedance-2.0-fast',
+      model: resolved.model,
       status: 'pending',
       prompt: resolved.prompt,
       params: {
@@ -103,6 +111,7 @@ generationsRouter.post('/', prepareCost, creditCheckMiddleware, async (req: Requ
     const webhookUrl = `${config.publicBaseUrl}/webhooks/replicate`;
     const input: GenerationInput = {
       prompt: resolved.prompt,
+      model: resolved.model,
       durationSeconds: resolved.durationSeconds,
       resolution: resolved.resolution,
       aspectRatio: resolved.aspectRatio,

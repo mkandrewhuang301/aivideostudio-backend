@@ -49,6 +49,7 @@ describe('ModelProvider substitutability (SC-3)', () => {
     const dispatchResult = await fake.dispatch(
       {
         prompt: 'a cat',
+        model: 'bytedance/seedance-2.0-fast',
         durationSeconds: 5,
         resolution: '720p',
         aspectRatio: '16:9',
@@ -75,6 +76,7 @@ describe('ReplicateProvider.dispatch', () => {
     const provider = new ReplicateProvider();
     const input: GenerationInput = {
       prompt: 'a dog running',
+      model: 'bytedance/seedance-2.0-fast',
       durationSeconds: 8,
       resolution: '720p',
       aspectRatio: '16:9',

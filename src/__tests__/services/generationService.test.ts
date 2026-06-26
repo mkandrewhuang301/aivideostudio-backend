@@ -69,15 +69,15 @@ describe('resolveDurationSeconds', () => {
 
 describe('computeCostCredits', () => {
   it('computes exact cost for 6s at 720p: ceil(6 * 0.15 * 50) = 45', () => {
-    const cost = computeCostCredits({ durationSeconds: 6, resolution: '720p' });
+    const cost = computeCostCredits({ durationSeconds: 6, resolution: '720p', model: 'bytedance/seedance-2.0-fast' });
     expect(cost).toBe(45);
   });
 
   it('returns a positive integer for 480p (half rate)', () => {
-    const cost = computeCostCredits({ durationSeconds: 6, resolution: '480p' });
+    const cost = computeCostCredits({ durationSeconds: 6, resolution: '480p', model: 'bytedance/seedance-2.0-fast' });
     expect(Number.isInteger(cost)).toBe(true);
     expect(cost).toBeGreaterThan(0);
-    expect(cost).toBeLessThan(computeCostCredits({ durationSeconds: 6, resolution: '720p' }));
+    expect(cost).toBeLessThan(computeCostCredits({ durationSeconds: 6, resolution: '720p', model: 'bytedance/seedance-2.0-fast' }));
   });
 });
 

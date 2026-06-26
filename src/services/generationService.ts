@@ -9,7 +9,17 @@ import { sql } from 'drizzle-orm';
 import type { GenerationStatus, NewGeneration } from '../db/schema';
 
 const CREDITS_PER_DOLLAR = 50; // mirrors SUBSCRIPTION_CREDITS/TOPUP_CREDITS scale in revenuecat.ts (500 credits ≈ $9.99)
-const RATE_PER_SECOND_720P = 0.15; // Replicate Seedance 2.0 Fast, 720p, non_video_in
+
+const MODEL_RATES: Record<string, { nonVideoIn: Record<string, number>; videoIn: Record<string, number> }> = {
+  'bytedance/seedance-2.0-fast': {
+    nonVideoIn: { '480p': 0.075, '720p': 0.15 }, // 480p assumed 0.5x of 720p — confirm before Phase 6
+    videoIn:    { '480p': 0.075, '720p': 0.15 }, // video_in rate unconfirmed — same as non_video_in until Phase 6
+  },
+  'bytedance/seedance-2.0-mini': {
+    nonVideoIn: { '480p': 0.04, '720p': 0.09 },
+    videoIn:    { '480p': 0.05, '720p': 0.11 },
+  },
+};
 
 export function resolveDurationSeconds(requested: number | 'auto'): number {
   if (requested === 'auto') {
@@ -22,11 +32,19 @@ export function resolveDurationSeconds(requested: number | 'auto'): number {
   return requested;
 }
 
-export function computeCostCredits(input: { durationSeconds: number; resolution: '480p' | '720p' }): number {
-  // Resolution multiplier: 480p=0.5x, 720p=1x (Seedance only supports these two resolutions).
-  const multiplier = input.resolution === '480p' ? 0.5 : 1;
-  const dollarCost = input.durationSeconds * RATE_PER_SECOND_720P * multiplier;
-  return Math.ceil(dollarCost * CREDITS_PER_DOLLAR);
+export const SUPPORTED_MODELS = ['bytedance/seedance-2.0-fast', 'bytedance/seedance-2.0-mini'] as const;
+export type SupportedModel = typeof SUPPORTED_MODELS[number];
+
+export function computeCostCredits(input: {
+  durationSeconds: number;
+  resolution: '480p' | '720p';
+  model: SupportedModel;
+  hasVideoReference?: boolean;
+}): number {
+  const rates = MODEL_RATES[input.model];
+  const rateSet = input.hasVideoReference ? rates.videoIn : rates.nonVideoIn;
+  const ratePerSec = rateSet[input.resolution];
+  return Math.ceil(input.durationSeconds * ratePerSec * CREDITS_PER_DOLLAR);
 }
 
 export async function createGeneration(row: NewGeneration): Promise<{ id: string }> {
