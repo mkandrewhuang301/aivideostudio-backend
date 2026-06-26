@@ -1,0 +1,117 @@
+// src/routes/generations.ts
+// POST /api/generations — validates request, resolves duration (CLAUDE.md Rule 7: never -1),
+// computes cost, gates on credits (creditCheckMiddleware), creates the generation row,
+// dispatches via the ModelProvider abstraction (CLAUDE.md Rule 6: no Replicate code here directly
+// beyond instantiating ReplicateProvider — all calls go through the interface).
+
+import { Router, Request, Response, NextFunction } from 'express';
+import { creditCheckMiddleware } from '../middleware/creditCheck';
+import {
+  resolveDurationSeconds,
+  computeCostCredits,
+  createGeneration,
+  attachPredictionId,
+} from '../services/generationService';
+import { ReplicateProvider } from '../services/providers/ReplicateProvider';
+import type { GenerationInput } from '../services/providers/ModelProvider';
+
+export const generationsRouter = Router();
+
+const provider = new ReplicateProvider();
+
+const VALID_RESOLUTIONS = ['480p', '720p'] as const;
+
+interface ResolvedGenerationRequest {
+  prompt: string;
+  durationSeconds: number;
+  resolution: '480p' | '720p';
+  aspectRatio: string;
+  audioEnabled: boolean;
+  cost: number;
+}
+
+declare global {
+  namespace Express {
+    interface Request {
+      _resolved?: ResolvedGenerationRequest;
+    }
+  }
+}
+
+// Step 1: validate + resolve duration/cost, attach cost_credits to req.body so
+// creditCheckMiddleware (mounted next) can read it per its existing contract.
+function prepareCost(req: Request, res: Response, next: NextFunction): void {
+  const { prompt, duration, resolution, aspect_ratio, audio_enabled } = req.body ?? {};
+
+  if (!prompt || typeof prompt !== 'string') {
+    res.status(400).json({ error: 'prompt is required', code: 'INVALID_PROMPT' });
+    return;
+  }
+  if (!VALID_RESOLUTIONS.includes(resolution)) {
+    res.status(400).json({ error: 'resolution must be one of 480p, 720p', code: 'INVALID_RESOLUTION' });
+    return;
+  }
+
+  let durationSeconds: number;
+  try {
+    durationSeconds = resolveDurationSeconds(duration);
+  } catch (err) {
+    res.status(400).json({ error: (err as Error).message, code: 'INVALID_DURATION' });
+    return;
+  }
+
+  const cost = computeCostCredits({ durationSeconds, resolution });
+
+  req.body.cost_credits = cost;
+  req._resolved = {
+    prompt,
+    durationSeconds,
+    resolution,
+    aspectRatio: aspect_ratio ?? '16:9',
+    audioEnabled: Boolean(audio_enabled),
+    cost,
+  };
+  next();
+}
+
+generationsRouter.post('/', prepareCost, creditCheckMiddleware, async (req: Request, res: Response) => {
+  if (!req.user?.dbUserId) {
+    res.status(401).json({ error: 'Not authenticated' });
+    return;
+  }
+
+  const resolved = req._resolved as ResolvedGenerationRequest;
+
+  try {
+    const { id: generationId } = await createGeneration({
+      user_id: req.user.dbUserId,
+      model: 'bytedance/seedance-2.0-fast',
+      status: 'pending',
+      prompt: resolved.prompt,
+      params: {
+        resolution: resolved.resolution,
+        duration: resolved.durationSeconds,
+        aspect_ratio: resolved.aspectRatio,
+        audio_enabled: resolved.audioEnabled,
+      },
+      cost_credits: resolved.cost,
+    });
+
+    const webhookUrl = `${process.env.PUBLIC_BASE_URL ?? ''}/webhooks/replicate`;
+    const input: GenerationInput = {
+      prompt: resolved.prompt,
+      durationSeconds: resolved.durationSeconds,
+      resolution: resolved.resolution,
+      aspectRatio: resolved.aspectRatio,
+      audioEnabled: resolved.audioEnabled,
+    };
+
+    const { providerPredictionId } = await provider.dispatch(input, webhookUrl);
+    await attachPredictionId(generationId, providerPredictionId);
+
+    res.status(200).json({ generation_id: generationId, status: 'processing' });
+  } catch (error) {
+    console.error('[generations] Error dispatching generation:', error);
+    res.status(500).json({ error: 'Failed to dispatch generation' });
+  }
+});
