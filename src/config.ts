@@ -24,4 +24,6 @@ export const config = {
   apnsKeyId: requireEnv('APNS_KEY_ID'),
   apnsTeamId: requireEnv('APNS_TEAM_ID'),
   apnsBundleId: requireEnv('APNS_BUNDLE_ID'),
+  replicateApiToken: requireEnv('REPLICATE_API_TOKEN'),
+  replicateWebhookSecret: requireEnv('REPLICATE_WEBHOOK_SECRET'),
 } as const;
