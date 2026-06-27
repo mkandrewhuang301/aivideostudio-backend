@@ -43,6 +43,11 @@ jest.mock('../../../services/generationService', () => ({
   getGenerationByPredictionId: jest.fn(),
   markCompleted: jest.fn(),
   markFailed: jest.fn(),
+  markQuarantined: jest.fn(),
+}));
+
+jest.mock('../../../services/hiveService', () => ({
+  scanForCsam: jest.fn(),
 }));
 
 jest.mock('../../../services/creditService', () => ({
@@ -63,7 +68,8 @@ import express from 'express';
 import request from 'supertest';
 import { validateWebhook } from 'replicate';
 import { archiveToR2 } from '../../../services/archivalService';
-import { getGenerationByPredictionId, markCompleted, markFailed } from '../../../services/generationService';
+import { getGenerationByPredictionId, markCompleted, markFailed, markQuarantined } from '../../../services/generationService';
+import { scanForCsam } from '../../../services/hiveService';
 import { refundCredits } from '../../../services/creditService';
 import { sendGenerationComplete } from '../../../services/apnsService';
 import { db } from '../../../db/client';
@@ -91,8 +97,10 @@ beforeEach(() => {
   jest.clearAllMocks();
   (db.execute as jest.Mock).mockResolvedValue({ rows: [{ apns_device_token: 'device-token-1' }] });
   (archiveToR2 as jest.Mock).mockResolvedValue('generations/gen-1.mp4');
+  (scanForCsam as jest.Mock).mockResolvedValue({ flagged: false });
   (markCompleted as jest.Mock).mockResolvedValue(true);
   (markFailed as jest.Mock).mockResolvedValue(true);
+  (markQuarantined as jest.Mock).mockResolvedValue(true);
   (refundCredits as jest.Mock).mockResolvedValue(undefined);
   (sendGenerationComplete as jest.Mock).mockResolvedValue(undefined);
 });

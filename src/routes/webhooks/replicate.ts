@@ -10,7 +10,8 @@ import { Router, Request, Response } from 'express';
 import { validateWebhook } from 'replicate';
 import { config } from '../../config';
 import { archiveToR2 } from '../../services/archivalService';
-import { getGenerationByPredictionId, markCompleted, markFailed } from '../../services/generationService';
+import { scanForCsam } from '../../services/hiveService';
+import { getGenerationByPredictionId, markCompleted, markFailed, markQuarantined } from '../../services/generationService';
 import { refundCredits } from '../../services/creditService';
 import { sendGenerationComplete } from '../../services/apnsService';
 import { db } from '../../db/client';
@@ -48,7 +49,7 @@ replicateWebhookRouter.post('/', async (req: Request, res: Response) => {
     }
 
     // Idempotency: already-terminal generation means another path already processed this.
-    if (generation.status === 'completed' || generation.status === 'failed' || generation.status === 'refunded') {
+    if (['completed', 'failed', 'refunded', 'quarantined'].includes(generation.status)) {
       res.status(200).json({ received: true, duplicate: true });
       return;
     }
@@ -65,20 +66,42 @@ replicateWebhookRouter.post('/', async (req: Request, res: Response) => {
 
       // CLAUDE.md Rule 2: archive FIRST, before any DB status write.
       const r2Key = await archiveToR2(outputUrl, generation.id);
-      await markCompleted(generation.id, r2Key);
 
-      // Best-effort push — isolated, never blocks this response (CLAUDE.md/RESEARCH.md Pitfall 5).
+      // Construct R2 public URL for Hive CSAM scan — matches archivalService.ts key format.
+      const r2PublicUrl = config.r2PublicDomain
+        ? `https://${config.r2PublicDomain}/${r2Key}`
+        : `https://${config.r2AccountId}.r2.cloudflarestorage.com/${config.r2BucketName}/${r2Key}`;
+
+      // Hive CSAM scan — fail-safe: if Hive is unavailable, quarantine rather than deliver unscanned content.
+      let hiveFlagged = false;
       try {
-        const userRows = await db.execute(sql`SELECT apns_device_token FROM users WHERE id = ${generation.user_id}::uuid`);
-        const deviceToken = (userRows.rows?.[0] as { apns_device_token: string | null } | undefined)?.apns_device_token;
-        if (deviceToken) {
-          await sendGenerationComplete(deviceToken, generation.id);
-        }
-      } catch (pushError) {
-        console.error('[webhook/replicate] Push notification failed (non-blocking):', pushError);
+        const { flagged } = await scanForCsam(r2PublicUrl);
+        hiveFlagged = flagged;
+      } catch (hiveError) {
+        console.error('[webhook/replicate] Hive scan failed — quarantining as precaution:', hiveError);
+        hiveFlagged = true;
       }
 
-      console.log(`[webhook/replicate] succeeded: generation ${generation.id} archived to ${r2Key}`);
+      if (hiveFlagged) {
+        await markQuarantined(generation.id);
+        await refundCredits(generation.user_id, generation.cost_credits, `csam-quarantine-${payload.id}`);
+        console.warn(`[webhook/replicate] CSAM flagged: generation ${generation.id} quarantined, credits refunded.`);
+      } else {
+        await markCompleted(generation.id, r2Key);
+
+        // Best-effort push — isolated, never blocks this response (CLAUDE.md/RESEARCH.md Pitfall 5).
+        try {
+          const userRows = await db.execute(sql`SELECT apns_device_token FROM users WHERE id = ${generation.user_id}::uuid`);
+          const deviceToken = (userRows.rows?.[0] as { apns_device_token: string | null } | undefined)?.apns_device_token;
+          if (deviceToken) {
+            await sendGenerationComplete(deviceToken, generation.id);
+          }
+        } catch (pushError) {
+          console.error('[webhook/replicate] Push notification failed (non-blocking):', pushError);
+        }
+
+        console.log(`[webhook/replicate] succeeded: generation ${generation.id} archived to ${r2Key}`);
+      }
     } else if (payload.status === 'failed' || payload.status === 'canceled') {
       await markFailed(generation.id);
       await refundCredits(generation.user_id, generation.cost_credits, payload.id);
