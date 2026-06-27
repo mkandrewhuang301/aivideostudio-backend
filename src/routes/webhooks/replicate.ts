@@ -67,15 +67,11 @@ replicateWebhookRouter.post('/', async (req: Request, res: Response) => {
       // CLAUDE.md Rule 2: archive FIRST, before any DB status write.
       const r2Key = await archiveToR2(outputUrl, generation.id);
 
-      // Construct R2 public URL for Hive CSAM scan — matches archivalService.ts key format.
-      const r2PublicUrl = config.r2PublicDomain
-        ? `https://${config.r2PublicDomain}/${r2Key}`
-        : `https://${config.r2AccountId}.r2.cloudflarestorage.com/${config.r2BucketName}/${r2Key}`;
-
-      // Hive CSAM scan — fail-safe: if Hive is unavailable, quarantine rather than deliver unscanned content.
+      // Hive CSAM scan — pass r2Key directly; hiveService generates a presigned URL internally.
+      // No public bucket required. Fails safe: errors quarantine rather than deliver unscanned content.
       let hiveFlagged = false;
       try {
-        const { flagged } = await scanForCsam(r2PublicUrl);
+        const { flagged } = await scanForCsam(r2Key);
         hiveFlagged = flagged;
       } catch (hiveError) {
         console.error('[webhook/replicate] Hive scan failed — quarantining as precaution:', hiveError);

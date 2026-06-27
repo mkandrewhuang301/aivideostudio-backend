@@ -1,6 +1,7 @@
 // src/services/hiveService.ts
 // Hive Moderation CSAM scan for completed generation videos.
-// Called AFTER archiveToR2() in the webhook handler — uses the R2 public URL.
+// Called AFTER archiveToR2() in the webhook handler.
+// Uses a presigned R2 URL (5 min TTL) — no public bucket required.
 // API: Hive v3 Visual Moderation (POST /api/v3/hive/visual-moderation, Bearer auth)
 //
 // CSAM flag logic: flag the video if ANY frame has BOTH:
@@ -9,7 +10,16 @@
 //
 // On Hive errors: caller should quarantine (fail-safe — never deliver unscanned content).
 
+import { GetObjectCommand } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { r2, R2_BUCKET } from '../storage/r2';
 import { config } from '../config';
+
+const HIVE_TIMEOUT_MS = 30_000;
+
+async function getPresignedUrl(r2Key: string): Promise<string> {
+  return getSignedUrl(r2, new GetObjectCommand({ Bucket: R2_BUCKET, Key: r2Key }), { expiresIn: 300 });
+}
 
 interface HiveClass {
   class_name: string;
@@ -44,15 +54,27 @@ function isFrameFlagged(classes: HiveClass[]): boolean {
   return [...SEXUAL_CLASS_NAMES].some((name) => (classMap.get(name) ?? 0) >= SEXUAL_CONTENT_THRESHOLD);
 }
 
-export async function scanForCsam(r2Url: string): Promise<{ flagged: boolean }> {
-  const response = await fetch('https://api.thehive.ai/api/v3/hive/visual-moderation', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${config.hiveApiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ input: [{ media_url: r2Url }] }),
-  });
+// Accepts the R2 object key (not a URL) — generates a presigned URL internally.
+export async function scanForCsam(r2Key: string): Promise<{ flagged: boolean }> {
+  const presignedUrl = await getPresignedUrl(r2Key);
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), HIVE_TIMEOUT_MS);
+
+  let response: Response;
+  try {
+    response = await fetch('https://api.thehive.ai/api/v3/hive/visual-moderation', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${config.hiveApiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ input: [{ media_url: presignedUrl }] }),
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
 
   if (!response.ok) {
     throw new Error(`Hive API error: ${response.status}`);
