@@ -58,6 +58,12 @@ jest.mock('../../services/providers/ReplicateProvider', () => {
   };
 });
 
+// Mock promptModerationMiddleware as a pass-through — moderation logic is tested separately
+// in src/__tests__/middleware/promptModeration.test.ts
+jest.mock('../../middleware/promptModeration', () => ({
+  promptModerationMiddleware: jest.fn((_req: unknown, _res: unknown, next: () => void) => next()),
+}));
+
 import express, { NextFunction, Request, Response } from 'express';
 import request from 'supertest';
 import { generationsRouter } from '../../routes/generations';

@@ -6,6 +6,7 @@
 
 import { Router, Request, Response, NextFunction } from 'express';
 import { creditCheckMiddleware } from '../middleware/creditCheck';
+import { promptModerationMiddleware } from '../middleware/promptModeration';
 import {
   resolveDurationSeconds,
   computeCostCredits,
@@ -85,7 +86,7 @@ function prepareCost(req: Request, res: Response, next: NextFunction): void {
   next();
 }
 
-generationsRouter.post('/', prepareCost, creditCheckMiddleware, async (req: Request, res: Response) => {
+generationsRouter.post('/', promptModerationMiddleware, prepareCost, creditCheckMiddleware, async (req: Request, res: Response) => {
   if (!req.user?.dbUserId) {
     res.status(401).json({ error: 'Not authenticated' });
     return;
