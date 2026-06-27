@@ -4,6 +4,7 @@ import {
   uuid,
   text,
   integer,
+  boolean,
   timestamp,
   pgEnum,
   jsonb,
@@ -27,6 +28,7 @@ export const generationStatusEnum = pgEnum('generation_status', [
   'processing',
   'completed',
   'failed',
+  'quarantined',
   'refunded',
 ]);
 
@@ -50,6 +52,7 @@ export const users = pgTable(
     display_name: text('display_name'), // user display name for profile UI (Phase 6)
     total_generations: integer('total_generations').notNull().default(0), // incremented on generation completion; avoids COUNT(*) on generations table
     last_active_at: timestamp('last_active_at', { withTimezone: true }), // churn analytics and re-engagement push (Phase 7)
+    banned: boolean('banned').notNull().default(false),
     created_at: timestamp('created_at', { withTimezone: true })
       .notNull()
       .default(sql`now()`),
@@ -124,7 +127,32 @@ export const generations = pgTable(
   }),
 );
 
-// ─── Type exports (used by services in Phases 2–4) ───────────────────────────
+// ─── reports ──────────────────────────────────────────────────────────────────
+// Phase 5: User-submitted content reports. References generations.id and users.firebase_uid.
+
+export const reports = pgTable(
+  'reports',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    generationId: uuid('generation_id')
+      .references(() => generations.id)
+      .notNull(),
+    userId: text('user_id')
+      .references(() => users.firebase_uid)
+      .notNull(),
+    reason: text('reason').notNull(), // 'inappropriate_content' | 'suspected_illegal' | 'other'
+    freeText: text('free_text'),
+    createdAt: timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+  },
+  (table) => ({
+    generationIdIdx: index('reports_generation_id_idx').on(table.generationId),
+    userIdIdx: index('reports_user_id_idx').on(table.userId),
+  }),
+);
+
+// ─── Type exports (used by services in Phases 2–5) ───────────────────────────
 
 export type User = typeof users.$inferSelect;
 export type NewUser = typeof users.$inferInsert;
@@ -134,3 +162,5 @@ export type Generation = typeof generations.$inferSelect;
 export type NewGeneration = typeof generations.$inferInsert;
 export type GenerationStatus = (typeof generationStatusEnum.enumValues)[number];
 export type CreditTransactionType = (typeof creditTransactionTypeEnum.enumValues)[number];
+export type Report = typeof reports.$inferSelect;
+export type NewReport = typeof reports.$inferInsert;

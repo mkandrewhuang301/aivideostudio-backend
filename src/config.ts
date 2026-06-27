@@ -27,4 +27,6 @@ export const config = {
   replicateApiToken: requireEnv('REPLICATE_API_TOKEN'),
   replicateWebhookSecret: requireEnv('REPLICATE_WEBHOOK_SECRET'),
   publicBaseUrl: requireEnv('PUBLIC_BASE_URL'),
+  hiveApiKey: requireEnv('HIVE_API_KEY'),
+  openaiApiKey: requireEnv('OPENAI_API_KEY'),
 } as const;
