@@ -80,6 +80,16 @@ export async function markFailed(generationId: string): Promise<boolean> {
   return (result.rows?.length ?? 0) > 0;
 }
 
+export async function markQuarantined(generationId: string): Promise<boolean> {
+  const result = await db.execute(sql`
+    UPDATE generations
+    SET status = 'quarantined', completed_at = now()
+    WHERE id = ${generationId}::uuid AND status = 'processing'
+    RETURNING id
+  `);
+  return (result.rows?.length ?? 0) > 0;
+}
+
 export async function markRefunded(generationId: string): Promise<boolean> {
   const result = await db.execute(sql`
     UPDATE generations
