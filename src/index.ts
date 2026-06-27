@@ -10,6 +10,9 @@ import { revenueCatWebhookRouter } from './routes/webhooks/revenuecat';
 import { replicateWebhookRouter } from './routes/webhooks/replicate';
 import { generationsRouter } from './routes/generations';
 import { scheduleReaper } from './queue/reaperWorker';
+import { banCheckMiddleware } from './middleware/banCheck';
+import { reportsRouter } from './routes/reports';
+import { privacyRouter } from './routes/privacy';
 
 // Eagerly initialize Firebase Admin at startup — prevents double-init on concurrent requests
 getFirebaseAdmin();
@@ -37,9 +40,12 @@ app.use('/health', healthRouter);
 // RevenueCat authenticates with Authorization Bearer header set in RC dashboard.
 app.use('/webhooks/revenuecat', revenueCatWebhookRouter);
 
-app.use('/api', authMiddleware);
+app.use('/api', authMiddleware, banCheckMiddleware);
 app.use('/api/me', meRouter);
 app.use('/api/generations', generationsRouter);
+app.use('/api/reports', reportsRouter);
+
+app.use('/privacy', privacyRouter);
 
 app.listen(config.port, () => {
   console.log(`[server] listening on port ${config.port} (${config.nodeEnv})`);
