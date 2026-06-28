@@ -39,6 +39,8 @@ interface ResolvedGenerationRequest {
   aspectRatio: string;
   audioEnabled: boolean;
   cost: number;
+  referenceImages?: string[];   // GEN-02: image reference URLs (already-uploaded R2 presigned URLs)
+  referenceVideos?: string[];   // GEN-03: video reference URLs (already-uploaded R2 presigned URLs)
 }
 
 declare global {
@@ -52,7 +54,16 @@ declare global {
 // Step 1: validate + resolve duration/cost, attach cost_credits to req.body so
 // creditCheckMiddleware (mounted next) can read it per its existing contract.
 function prepareCost(req: Request, res: Response, next: NextFunction): void {
-  const { prompt, model = 'bytedance/seedance-2.0-fast', duration, resolution, aspect_ratio, audio_enabled } = req.body ?? {};
+  const {
+    prompt,
+    model = 'bytedance/seedance-2.0-fast',
+    duration,
+    resolution,
+    aspect_ratio,
+    audio_enabled,
+    reference_images,
+    reference_videos,
+  } = req.body ?? {};
 
   if (!prompt || typeof prompt !== 'string') {
     res.status(400).json({ error: 'prompt is required', code: 'INVALID_PROMPT' });
@@ -75,17 +86,39 @@ function prepareCost(req: Request, res: Response, next: NextFunction): void {
     return;
   }
 
-  const cost = computeCostCredits({ durationSeconds, resolution, model: model as SupportedModel });
+  // Normalize reference arrays — filter to string-only entries (client may send null/undefined elements)
+  const refImages: string[] = Array.isArray(reference_images)
+    ? reference_images.filter((u: unknown) => typeof u === 'string')
+    : [];
+  const refVideos: string[] = Array.isArray(reference_videos)
+    ? reference_videos.filter((u: unknown) => typeof u === 'string')
+    : [];
+
+  // Auto-append @Image1/@Video1 to prompt — MANDATORY per CLAUDE.md + CONTEXT.md (D-23, D-24).
+  // Replicate ignores reference arrays if the corresponding token is absent from prompt text.
+  let finalPrompt = prompt as string;
+  if (refImages.length > 0 && !finalPrompt.includes('@Image1')) finalPrompt += ' @Image1';
+  if (refVideos.length > 0 && !finalPrompt.includes('@Video1')) finalPrompt += ' @Video1';
+
+  // Use videoIn rate when video references are present (GEN-03, T-07-04-03: flag is set server-side)
+  const cost = computeCostCredits({
+    durationSeconds,
+    resolution,
+    model: model as SupportedModel,
+    hasVideoReference: refVideos.length > 0,
+  });
 
   req.body.cost_credits = cost;
   req._resolved = {
-    prompt,
+    prompt: finalPrompt,
     model: model as SupportedModel,
     durationSeconds,
     resolution,
     aspectRatio: aspect_ratio ?? '16:9',
     audioEnabled: Boolean(audio_enabled),
     cost,
+    referenceImages: refImages.length > 0 ? refImages : undefined,
+    referenceVideos: refVideos.length > 0 ? refVideos : undefined,
   };
   next();
 }
