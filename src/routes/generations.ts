@@ -142,18 +142,21 @@ generationsRouter.post('/', promptModerationMiddleware, prepareCost, creditCheck
         duration: resolved.durationSeconds,
         aspect_ratio: resolved.aspectRatio,
         audio_enabled: resolved.audioEnabled,
+        has_reference: ((resolved.referenceImages?.length ?? 0) + (resolved.referenceVideos?.length ?? 0)) > 0,
       },
       cost_credits: resolved.cost,
     });
 
     const webhookUrl = `${config.publicBaseUrl}/webhooks/replicate`;
     const input: GenerationInput = {
-      prompt: resolved.prompt,
+      prompt: resolved.prompt,       // already has @Image1/@Video1 from prepareCost
       model: resolved.model,
       durationSeconds: resolved.durationSeconds,
       resolution: resolved.resolution,
       aspectRatio: resolved.aspectRatio,
       audioEnabled: resolved.audioEnabled,
+      referenceImages: resolved.referenceImages?.length ? resolved.referenceImages : undefined,
+      referenceVideos: resolved.referenceVideos?.length ? resolved.referenceVideos : undefined,
     };
 
     let providerPredictionId: string;

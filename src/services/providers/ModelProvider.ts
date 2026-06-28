@@ -9,7 +9,8 @@ export interface GenerationInput {
   resolution: '480p' | '720p';
   aspectRatio: string;
   audioEnabled: boolean;
-  referenceAssetKeys?: string[];
+  referenceImages?: string[];  // presigned R2 URLs; @Image1 auto-appended to prompt (D-23)
+  referenceVideos?: string[];  // presigned R2 URLs; @Video1 auto-appended to prompt (D-24)
 }
 
 export interface DispatchResult {
