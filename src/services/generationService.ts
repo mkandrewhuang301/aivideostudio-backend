@@ -5,7 +5,7 @@
 
 import { db } from '../db/client';
 import { generations } from '../db/schema';
-import { sql } from 'drizzle-orm';
+import { sql, desc, lt, eq, and, notInArray, or } from 'drizzle-orm';
 import type { GenerationStatus, NewGeneration } from '../db/schema';
 
 const CREDITS_PER_DOLLAR = 50; // mirrors SUBSCRIPTION_CREDITS/TOPUP_CREDITS scale in revenuecat.ts (500 credits ≈ $9.99)
@@ -109,4 +109,61 @@ export async function getGenerationByPredictionId(
   return result.rows?.[0] as
     | { id: string; user_id: string; status: GenerationStatus; cost_credits: number }
     | undefined;
+}
+
+const HIDDEN_STATUSES: GenerationStatus[] = ['quarantined', 'deleted'];
+
+// Cursor pagination: cursor is { createdAt, id } of the last visible item (oldest in current page)
+// Uses lt(created_at) + DESC order — newest items first. RESEARCH.md Pitfall 3: use lt NOT gt.
+export async function listGenerations(
+  userId: string,
+  cursor?: { createdAt: Date; id: string },
+  limit = 20,
+) {
+  return db
+    .select()
+    .from(generations)
+    .where(
+      and(
+        eq(generations.user_id, userId),
+        notInArray(generations.status, HIDDEN_STATUSES),
+        cursor
+          ? or(
+              lt(generations.created_at, cursor.createdAt),
+              and(
+                eq(generations.created_at, cursor.createdAt),
+                lt(generations.id, cursor.id),
+              ),
+            )
+          : undefined,
+      ),
+    )
+    .orderBy(desc(generations.created_at), desc(generations.id))
+    .limit(limit);
+}
+
+// IDOR guard: userId in WHERE clause — never returns another user's row
+export async function getGenerationById(
+  generationId: string,
+  userId: string,
+): Promise<typeof generations.$inferSelect | undefined> {
+  const result = await db.execute(sql`
+    SELECT * FROM generations
+    WHERE id = ${generationId}::uuid
+      AND user_id = ${userId}::uuid
+      AND status NOT IN ('quarantined', 'deleted')
+  `);
+  return result.rows?.[0] as typeof generations.$inferSelect | undefined;
+}
+
+// Atomic soft-delete: ownership check in WHERE clause prevents IDOR Tampering (T-07-02-02)
+export async function softDeleteGeneration(generationId: string, userId: string): Promise<boolean> {
+  const result = await db.execute(sql`
+    UPDATE generations
+    SET status = 'deleted'
+    WHERE id = ${generationId}::uuid AND user_id = ${userId}::uuid
+      AND status NOT IN ('deleted', 'quarantined')
+    RETURNING id
+  `);
+  return (result.rows?.length ?? 0) > 0;
 }
