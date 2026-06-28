@@ -6,7 +6,7 @@
 
 import { Router, Request, Response } from 'express';
 import multer from 'multer';
-import { v4 as uuidv4 } from 'uuid';
+import { randomUUID } from 'crypto';
 import { PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { r2, R2_BUCKET } from '../storage/r2';
@@ -40,7 +40,7 @@ uploadsRouter.post('/', upload.single('file'), async (req: Request, res: Respons
   }
   try {
     const ext = ALLOWED_MIMES[req.file.mimetype];
-    const key = `uploads/${req.user.dbUserId}/${uuidv4()}.${ext}`;
+    const key = `uploads/${req.user.dbUserId}/${randomUUID()}.${ext}`;
     await r2.send(
       new PutObjectCommand({
         Bucket: R2_BUCKET,
