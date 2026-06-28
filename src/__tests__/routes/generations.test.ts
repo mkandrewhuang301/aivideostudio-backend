@@ -47,7 +47,16 @@ jest.mock('../../services/generationService', () => ({
   createGeneration: jest.fn(),
   attachPredictionId: jest.fn(),
   markRefunded: jest.fn(),
+  listGenerations: jest.fn(),
+  getGenerationById: jest.fn(),
+  softDeleteGeneration: jest.fn(),
   SUPPORTED_MODELS: ['bytedance/seedance-2.0-fast', 'bytedance/seedance-2.0-mini'],
+}));
+
+jest.mock('../../services/archivalService', () => ({
+  archiveToR2: jest.fn(),
+  getGenerationPresignedUrl: jest.fn().mockResolvedValue('https://r2.example.com/presigned'),
+  getUploadPresignedUrl: jest.fn(),
 }));
 
 jest.mock('../../services/providers/ReplicateProvider', () => {
@@ -73,7 +82,11 @@ import {
   computeCostCredits,
   createGeneration,
   attachPredictionId,
+  listGenerations,
+  getGenerationById,
+  softDeleteGeneration,
 } from '../../services/generationService';
+import { getGenerationPresignedUrl } from '../../services/archivalService';
 import { ReplicateProvider } from '../../services/providers/ReplicateProvider';
 
 // Grab the mocked dispatch fn off the mocked class's first (and only) instance used by the router.
@@ -182,5 +195,162 @@ describe('POST /api/generations', () => {
     const dispatchInputArg = dispatchMock.mock.calls[0][0];
     expect(dispatchInputArg.durationSeconds).toBe(5);
     expect(dispatchInputArg.durationSeconds).not.toBe(-1);
+  });
+});
+
+// ─── GET /api/generations ──────────────────────────────────────────────────────
+
+describe('GET /api/generations', () => {
+  const completedItem = {
+    id: 'gen-001',
+    user_id: 'test-user-id',
+    status: 'completed',
+    r2_key: 'generations/gen-001.mp4',
+    created_at: new Date('2026-06-28T10:00:00Z'),
+    prompt: 'a cinematic city',
+    model: 'bytedance/seedance-2.0-fast',
+    cost_credits: 60,
+    params: {},
+    replicate_prediction_id: 'pred-abc',
+    completed_at: new Date('2026-06-28T10:01:00Z'),
+  };
+  const pendingItem = {
+    id: 'gen-002',
+    user_id: 'test-user-id',
+    status: 'pending',
+    r2_key: null,
+    created_at: new Date('2026-06-28T09:00:00Z'),
+    prompt: 'a forest',
+    model: 'bytedance/seedance-2.0-fast',
+    cost_credits: 38,
+    params: {},
+    replicate_prediction_id: null,
+    completed_at: null,
+  };
+
+  it('returns 200 with items array and nextCursor null when fewer than limit items returned', async () => {
+    (listGenerations as jest.Mock).mockResolvedValue([completedItem, pendingItem]);
+
+    const res = await request(app).get('/api/generations');
+
+    expect(res.status).toBe(200);
+    expect(res.body.items).toHaveLength(2);
+    // completed item gets presigned video_url
+    expect(res.body.items[0].video_url).toBe('https://r2.example.com/presigned');
+    expect(getGenerationPresignedUrl).toHaveBeenCalledWith('generations/gen-001.mp4');
+    // pending item gets null video_url
+    expect(res.body.items[1].video_url).toBeNull();
+    // fewer than limit (20) → nextCursor is null
+    expect(res.body.nextCursor).toBeNull();
+  });
+
+  it('returns 401 when no auth token', async () => {
+    const unauthApp = express();
+    unauthApp.use(express.json());
+    unauthApp.use('/api/generations', generationsRouter);
+
+    const res = await request(unauthApp).get('/api/generations');
+    expect(res.status).toBe(401);
+  });
+
+  it('scopes listGenerations to the authenticated user (IDOR check)', async () => {
+    (listGenerations as jest.Mock).mockResolvedValue([completedItem]);
+
+    await request(app).get('/api/generations');
+
+    // listGenerations must be called with the authenticated dbUserId, not any other id
+    expect(listGenerations).toHaveBeenCalledWith('test-user-id', undefined, 20);
+  });
+
+  it('returns nextCursor when page is exactly at limit', async () => {
+    // Return exactly 20 items (the default limit)
+    const items = Array.from({ length: 20 }, (_, i) => ({
+      ...pendingItem,
+      id: `gen-${String(i).padStart(3, '0')}`,
+      created_at: new Date(`2026-06-28T${String(10 - Math.floor(i / 6)).padStart(2, '0')}:0${i % 6}:00Z`),
+    }));
+    (listGenerations as jest.Mock).mockResolvedValue(items);
+
+    const res = await request(app).get('/api/generations');
+
+    expect(res.status).toBe(200);
+    expect(res.body.items).toHaveLength(20);
+    expect(res.body.nextCursor).not.toBeNull();
+    expect(typeof res.body.nextCursor).toBe('string');
+    // nextCursor format: ISO__id
+    expect(res.body.nextCursor).toContain('__');
+  });
+});
+
+// ─── GET /api/generations/:id ─────────────────────────────────────────────────
+
+describe('GET /api/generations/:id', () => {
+  const completedGen = {
+    id: 'gen-001',
+    user_id: 'test-user-id',
+    status: 'completed',
+    r2_key: 'generations/gen-001.mp4',
+    created_at: new Date('2026-06-28T10:00:00Z'),
+    prompt: 'a cinematic city',
+    model: 'bytedance/seedance-2.0-fast',
+    cost_credits: 60,
+    params: {},
+    replicate_prediction_id: 'pred-abc',
+    completed_at: new Date('2026-06-28T10:01:00Z'),
+  };
+
+  it('returns 200 with video_url for a completed generation', async () => {
+    (getGenerationById as jest.Mock).mockResolvedValue(completedGen);
+
+    const res = await request(app).get('/api/generations/gen-001');
+
+    expect(res.status).toBe(200);
+    expect(res.body.video_url).toBe('https://r2.example.com/presigned');
+    expect(getGenerationById).toHaveBeenCalledWith('gen-001', 'test-user-id');
+  });
+
+  it('returns 404 when getGenerationById returns undefined (IDOR guard)', async () => {
+    (getGenerationById as jest.Mock).mockResolvedValue(undefined);
+
+    const res = await request(app).get('/api/generations/other-user-gen');
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('Not found');
+  });
+
+  it('returns null video_url for a pending generation', async () => {
+    (getGenerationById as jest.Mock).mockResolvedValue({
+      ...completedGen,
+      status: 'pending',
+      r2_key: null,
+    });
+
+    const res = await request(app).get('/api/generations/gen-001');
+
+    expect(res.status).toBe(200);
+    expect(res.body.video_url).toBeNull();
+    expect(getGenerationPresignedUrl).not.toHaveBeenCalled();
+  });
+});
+
+// ─── DELETE /api/generations/:id ─────────────────────────────────────────────
+
+describe('DELETE /api/generations/:id', () => {
+  it('returns 204 on successful soft-delete', async () => {
+    (softDeleteGeneration as jest.Mock).mockResolvedValue(true);
+
+    const res = await request(app).delete('/api/generations/gen-001');
+
+    expect(res.status).toBe(204);
+    expect(softDeleteGeneration).toHaveBeenCalledWith('gen-001', 'test-user-id');
+  });
+
+  it('returns 404 when softDeleteGeneration returns false (IDOR guard — other user ID)', async () => {
+    (softDeleteGeneration as jest.Mock).mockResolvedValue(false);
+
+    const res = await request(app).delete('/api/generations/other-user-gen');
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('Not found or not authorized');
   });
 });

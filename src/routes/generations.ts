@@ -12,12 +12,16 @@ import {
   computeCostCredits,
   createGeneration,
   attachPredictionId,
+  listGenerations,
+  getGenerationById,
+  softDeleteGeneration,
   SUPPORTED_MODELS,
   type SupportedModel,
 } from '../services/generationService';
 import { ReplicateProvider } from '../services/providers/ReplicateProvider';
 import { refundCredits } from '../services/creditService';
 import { markRefunded } from '../services/generationService';
+import { getGenerationPresignedUrl } from '../services/archivalService';
 import { config } from '../config';
 import type { GenerationInput } from '../services/providers/ModelProvider';
 
@@ -135,5 +139,69 @@ generationsRouter.post('/', promptModerationMiddleware, prepareCost, creditCheck
   } catch (error) {
     console.error('[generations] Error dispatching generation:', error);
     res.status(500).json({ error: 'Failed to dispatch generation' });
+  }
+});
+
+// GET /api/generations — cursor-paginated list (GAL-01, D-31)
+// Returns newest-first; completed items include video_url (24-hr presigned). Never returns quarantined/deleted.
+// SECURITY: user_id scoped inside listGenerations (T-07-02-01 mitigated)
+generationsRouter.get('/', async (req: Request, res: Response) => {
+  if (!req.user?.dbUserId) { res.status(401).json({ error: 'Not authenticated' }); return; }
+  try {
+    const { cursor: cursorStr, limit: limitStr } = req.query;
+    let cursor: { createdAt: Date; id: string } | undefined;
+    if (typeof cursorStr === 'string') {
+      const [createdAtStr, id] = cursorStr.split('__');
+      if (createdAtStr && id) cursor = { createdAt: new Date(createdAtStr), id };
+    }
+    const limit = Math.min(Number(limitStr) || 20, 50);
+    const items = await listGenerations(req.user.dbUserId, cursor, limit);
+    const enriched = await Promise.all(
+      items.map(async (item) => ({
+        ...item,
+        video_url: item.status === 'completed' && item.r2_key
+          ? await getGenerationPresignedUrl(item.r2_key)
+          : null,
+      })),
+    );
+    const last = enriched[enriched.length - 1];
+    const nextCursor = enriched.length === limit && last
+      ? `${last.created_at instanceof Date ? last.created_at.toISOString() : last.created_at}__${last.id}`
+      : null;
+    res.status(200).json({ items: enriched, nextCursor });
+  } catch (err) {
+    console.error('[generations] Error listing generations:', err);
+    res.status(500).json({ error: 'Failed to list generations' });
+  }
+});
+
+// GET /api/generations/:id — single generation with presigned URL (GAL-05, D-32)
+// SECURITY: getGenerationById filters WHERE user_id = dbUserId (T-07-02-01 mitigated)
+generationsRouter.get('/:id', async (req: Request, res: Response) => {
+  if (!req.user?.dbUserId) { res.status(401).json({ error: 'Not authenticated' }); return; }
+  try {
+    const item = await getGenerationById(req.params.id as string, req.user.dbUserId);
+    if (!item) { res.status(404).json({ error: 'Not found' }); return; }
+    const video_url = item.status === 'completed' && item.r2_key
+      ? await getGenerationPresignedUrl(item.r2_key)
+      : null;
+    res.status(200).json({ ...item, video_url });
+  } catch (err) {
+    console.error('[generations] Error fetching generation:', err);
+    res.status(500).json({ error: 'Failed to fetch generation' });
+  }
+});
+
+// DELETE /api/generations/:id — soft-delete (GAL-06, D-37)
+// SECURITY: softDeleteGeneration WHERE clause includes user_id guard (T-07-02-02 mitigated)
+generationsRouter.delete('/:id', async (req: Request, res: Response) => {
+  if (!req.user?.dbUserId) { res.status(401).json({ error: 'Not authenticated' }); return; }
+  try {
+    const deleted = await softDeleteGeneration(req.params.id as string, req.user.dbUserId);
+    if (!deleted) { res.status(404).json({ error: 'Not found or not authorized' }); return; }
+    res.status(204).send();
+  } catch (err) {
+    console.error('[generations] Error deleting generation:', err);
+    res.status(500).json({ error: 'Failed to delete generation' });
   }
 });
