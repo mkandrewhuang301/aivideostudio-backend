@@ -15,6 +15,20 @@ jest.mock('../../db/client', () => ({
   },
 }));
 
+// Mock R2 storage and presigner — hiveService generates a presigned URL before scanning
+jest.mock('../../storage/r2', () => ({
+  r2: {},
+  R2_BUCKET: 'test-bucket',
+}));
+
+jest.mock('@aws-sdk/s3-request-presigner', () => ({
+  getSignedUrl: jest.fn().mockResolvedValue('https://r2.example.com/video.mp4'),
+}));
+
+jest.mock('@aws-sdk/client-s3', () => ({
+  GetObjectCommand: jest.fn().mockImplementation((input) => input),
+}));
+
 const mockFetch = jest.fn();
 global.fetch = mockFetch as unknown as typeof fetch;
 
@@ -77,6 +91,11 @@ describe('scanForCsam', () => {
   it('throws an error when Hive API returns HTTP 500', async () => {
     mockFetch.mockResolvedValue({ ok: false, status: 500 });
     await expect(scanForCsam('https://r2.example.com/video.mp4')).rejects.toThrow('Hive API error: 500');
+  });
+
+  it('throws when Hive returns empty output array — fails safe rather than delivering unscanned content', async () => {
+    mockFetch.mockResolvedValue(makeHiveResponse([]));
+    await expect(scanForCsam('video.mp4')).rejects.toThrow('Hive returned empty output');
   });
 
   it('flags video if ANY frame triggers both conditions (multi-frame video)', async () => {

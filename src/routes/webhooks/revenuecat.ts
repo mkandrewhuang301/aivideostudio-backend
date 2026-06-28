@@ -44,6 +44,20 @@ const PRODUCT_ENTITLEMENT: Record<string, string> = {
   'com.fantasiaai.creator_yearly':  'creator',
 };
 
+// Yearly product IDs handled by the monthly cron (yearlyGrantWorker) for months 2–N.
+const YEARLY_PRODUCT_IDS = new Set([
+  'com.fantasiaai.basic_yearly',
+  'com.fantasiaai.pro_yearly',
+  'com.fantasiaai.creator_yearly',
+]);
+
+function currentMonthKey(): string {
+  const now = new Date();
+  return `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
+}
+
+const MONTHLY_GRANT_TTL_SECONDS = 35 * 24 * 60 * 60; // 35 days — outlasts any calendar month
+
 function verifyAuthorization(req: Request): boolean {
   const authHeader = req.headers['authorization'];
   return authHeader === `Bearer ${config.revenueCatWebhookSecret}`;
@@ -115,18 +129,36 @@ revenueCatWebhookRouter.post('/', async (req: Request, res: Response) => {
         return;
       }
 
-      // Grant subscription credits (resets subscription_allotment — see grantCredits)
-      await grantCredits(dbUserId, creditsToGrant, 'subscription_grant', transactionId);
-
-      // Update entitlement_level on users row (D-10)
+      // Always record which product the user is subscribed to.
+      // COALESCE preserves the original start date across RENEWAL events.
       await db.execute(sql`
         UPDATE users
         SET entitlement_level = ${entitlementLevel},
+            subscription_product_id = ${productId},
+            subscription_started_at = COALESCE(subscription_started_at, now()),
             updated_at = now()
         WHERE id = ${dbUserId}::uuid
       `);
 
-      console.log(`[webhook/revenuecat] ${eventType}: granted ${creditsToGrant} credits to user ${dbUserId} (${entitlementLevel})`);
+      if (YEARLY_PRODUCT_IDS.has(productId)) {
+        // Yearly subscriptions: months 2–N are handled by yearlyGrantWorker cron.
+        // Use NX on the monthly key so whichever fires first (this event or the cron) wins,
+        // and the other skips — preventing double-granting in the same calendar month.
+        const monthKey = currentMonthKey();
+        const idempotencyKey = `yearly_monthly_grant:${dbUserId}:${monthKey}`;
+        const isNew = await redis.set(idempotencyKey, '1', 'EX', MONTHLY_GRANT_TTL_SECONDS, 'NX');
+        if (isNew) {
+          const referenceId = `yearly-monthly-${dbUserId}-${monthKey}`;
+          await grantCredits(dbUserId, creditsToGrant, 'subscription_grant', referenceId);
+          console.log(`[webhook/revenuecat] ${eventType}: granted ${creditsToGrant} credits to user ${dbUserId} (${entitlementLevel} yearly, ${monthKey})`);
+        } else {
+          console.log(`[webhook/revenuecat] ${eventType}: cron already granted for ${dbUserId} in ${monthKey} — skipping`);
+        }
+      } else {
+        // Monthly subscriptions: grant directly — RevenueCat RENEWAL IS the monthly trigger.
+        await grantCredits(dbUserId, creditsToGrant, 'subscription_grant', transactionId);
+        console.log(`[webhook/revenuecat] ${eventType}: granted ${creditsToGrant} credits to user ${dbUserId} (${entitlementLevel})`);
+      }
 
     } else if (eventType === 'NON_RENEWING_PURCHASE') {
       // Top-up consumable purchase (D-08: expires 90 days from purchase)
@@ -146,8 +178,10 @@ revenueCatWebhookRouter.post('/', async (req: Request, res: Response) => {
       console.log(`[webhook/revenuecat] NON_RENEWING_PURCHASE: granted ${creditsToGrant} credits (expires ${expiresAt.toISOString()}) to user ${dbUserId}`);
 
     } else if (eventType === 'REFUND') {
-      // Subscription refunded — clawback the credits (D-21)
-      const creditsToClawback = SUBSCRIPTION_CREDITS[productId];
+      // Subscription or top-up refunded — clawback the credits (D-21).
+      // Check subscriptions first, then top-ups; both need clawback.
+      const subscriptionCredits = SUBSCRIPTION_CREDITS[productId];
+      const creditsToClawback = subscriptionCredits ?? TOPUP_CREDITS[productId];
 
       if (!creditsToClawback) {
         console.warn(`[webhook/revenuecat] REFUND for unknown product_id: ${productId}. Skipping credit clawback.`);
@@ -157,13 +191,18 @@ revenueCatWebhookRouter.post('/', async (req: Request, res: Response) => {
 
       await clawbackCredits(dbUserId, creditsToClawback, transactionId);
 
-      // Clear entitlement_level if subscription was refunded (set to null)
-      await db.execute(sql`
-        UPDATE users
-        SET entitlement_level = NULL,
-            updated_at = now()
-        WHERE id = ${dbUserId}::uuid
-      `);
+      // Only clear entitlement + subscription_product_id for subscription refunds.
+      // Top-up refunds don't affect subscription status.
+      if (subscriptionCredits) {
+        await db.execute(sql`
+          UPDATE users
+          SET entitlement_level = NULL,
+              subscription_product_id = NULL,
+              subscription_started_at = NULL,
+              updated_at = now()
+          WHERE id = ${dbUserId}::uuid
+        `);
+      }
 
       console.log(`[webhook/revenuecat] REFUND: clawback ${creditsToClawback} credits from user ${dbUserId}`);
 
@@ -174,6 +213,8 @@ revenueCatWebhookRouter.post('/', async (req: Request, res: Response) => {
         await db.execute(sql`
           UPDATE users
           SET entitlement_level = NULL,
+              subscription_product_id = NULL,
+              subscription_started_at = NULL,
               updated_at = now()
           WHERE id = ${dbUserId}::uuid
         `);

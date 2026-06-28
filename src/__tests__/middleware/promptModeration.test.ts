@@ -77,14 +77,56 @@ describe('promptModerationMiddleware', () => {
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
-  it('returns 500 when OpenAI API throws a network error', async () => {
+  it('calls next() when OpenAI API throws — fails open so blocklist still protects clean prompts', async () => {
     const { req, res, next } = makeReqResNext({ prompt: 'a beautiful forest' });
     mockFetch.mockRejectedValue(new Error('Network error'));
 
     await promptModerationMiddleware(req, res, next);
 
-    expect(res.status).toHaveBeenCalledWith(500);
-    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ error: 'Moderation check failed' }));
+    expect(next).toHaveBeenCalled();
+    expect(res.status).not.toHaveBeenCalled();
+  });
+
+  it('calls next() when OpenAI returns non-ok status — fails open', async () => {
+    const { req, res, next } = makeReqResNext({ prompt: 'a beautiful sunset' });
+    mockFetch.mockResolvedValue({ ok: false, status: 429 });
+
+    await promptModerationMiddleware(req, res, next);
+
+    expect(next).toHaveBeenCalled();
+    expect(res.status).not.toHaveBeenCalled();
+  });
+
+  it('blocks prompts blocked by the regex even when OpenAI is down', async () => {
+    const { req, res, next } = makeReqResNext({ prompt: 'nude woman' });
+    mockFetch.mockRejectedValue(new Error('Network error'));
+
+    await promptModerationMiddleware(req, res, next);
+
+    expect(res.status).toHaveBeenCalledWith(400);
     expect(next).not.toHaveBeenCalled();
+  });
+
+  it('returns 400 when prompt exceeds 2000 characters', async () => {
+    const { req, res, next } = makeReqResNext({ prompt: 'a'.repeat(2001) });
+
+    await promptModerationMiddleware(req, res, next);
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'prompt_too_long' }));
+    expect(next).not.toHaveBeenCalled();
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('passes a prompt at exactly 2000 characters', async () => {
+    const { req, res, next } = makeReqResNext({ prompt: 'a'.repeat(2000) });
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ results: [{ categories: { 'sexual/minors': false, 'violence/graphic': false } }] }),
+    });
+
+    await promptModerationMiddleware(req, res, next);
+
+    expect(next).toHaveBeenCalled();
   });
 });

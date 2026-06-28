@@ -190,4 +190,87 @@ describe('replicateWebhookRouter', () => {
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ received: true });
   });
+
+  it('quarantines and refunds when Hive flags the video — never marks completed or sends push', async () => {
+    (validateWebhook as jest.Mock).mockResolvedValue(true);
+    (getGenerationByPredictionId as jest.Mock).mockResolvedValue({
+      id: 'gen-1',
+      user_id: 'u1',
+      status: 'processing',
+      cost_credits: 45,
+    });
+    (scanForCsam as jest.Mock).mockResolvedValue({ flagged: true });
+
+    const res = await post({ id: 'pred_csam', status: 'succeeded', output: ['https://replicate.delivery/flagged.mp4'] });
+
+    expect(res.status).toBe(200);
+    expect(markQuarantined).toHaveBeenCalledWith('gen-1');
+    expect(refundCredits).toHaveBeenCalledWith('u1', 45, 'csam-quarantine-pred_csam');
+    expect(markCompleted).not.toHaveBeenCalled();
+    expect(sendGenerationComplete).not.toHaveBeenCalled();
+  });
+
+  it('quarantines and refunds when Hive throws — fail-safe, never delivers unscanned content', async () => {
+    (validateWebhook as jest.Mock).mockResolvedValue(true);
+    (getGenerationByPredictionId as jest.Mock).mockResolvedValue({
+      id: 'gen-1',
+      user_id: 'u1',
+      status: 'processing',
+      cost_credits: 45,
+    });
+    (scanForCsam as jest.Mock).mockRejectedValue(new Error('Hive timeout'));
+
+    const res = await post({ id: 'pred_err', status: 'succeeded', output: ['https://replicate.delivery/video.mp4'] });
+
+    expect(res.status).toBe(200);
+    expect(markQuarantined).toHaveBeenCalledWith('gen-1');
+    expect(refundCredits).toHaveBeenCalledWith('u1', 45, 'csam-quarantine-pred_err');
+    expect(markCompleted).not.toHaveBeenCalled();
+    expect(sendGenerationComplete).not.toHaveBeenCalled();
+  });
+
+  it('returns 200 with duplicate:true when status is already quarantined', async () => {
+    (validateWebhook as jest.Mock).mockResolvedValue(true);
+    (getGenerationByPredictionId as jest.Mock).mockResolvedValue({
+      id: 'gen-1',
+      user_id: 'u1',
+      status: 'quarantined',
+      cost_credits: 45,
+    });
+
+    const res = await post({ id: 'pred_123', status: 'succeeded', output: ['https://replicate.delivery/abc.mp4'] });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ received: true, duplicate: true });
+    expect(archiveToR2).not.toHaveBeenCalled();
+    expect(scanForCsam).not.toHaveBeenCalled();
+  });
+
+  it('marks failed and refunds when succeeded payload has no output URL', async () => {
+    (validateWebhook as jest.Mock).mockResolvedValue(true);
+    (getGenerationByPredictionId as jest.Mock).mockResolvedValue({
+      id: 'gen-1',
+      user_id: 'u1',
+      status: 'processing',
+      cost_credits: 45,
+    });
+
+    const res = await post({ id: 'pred_no_output', status: 'succeeded', output: [] });
+
+    expect(res.status).toBe(200);
+    expect(markFailed).toHaveBeenCalledWith('gen-1');
+    expect(refundCredits).toHaveBeenCalledWith('u1', 45, 'pred_no_output');
+    expect(archiveToR2).not.toHaveBeenCalled();
+  });
+
+  it('returns skipped:generation_not_found when prediction_id has no matching generation', async () => {
+    (validateWebhook as jest.Mock).mockResolvedValue(true);
+    (getGenerationByPredictionId as jest.Mock).mockResolvedValue(null);
+
+    const res = await post({ id: 'pred_unknown', status: 'succeeded', output: ['https://replicate.delivery/abc.mp4'] });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ received: true, skipped: 'generation_not_found' });
+    expect(archiveToR2).not.toHaveBeenCalled();
+  });
 });

@@ -10,6 +10,7 @@ import { revenueCatWebhookRouter } from './routes/webhooks/revenuecat';
 import { replicateWebhookRouter } from './routes/webhooks/replicate';
 import { generationsRouter } from './routes/generations';
 import { scheduleReaper } from './queue/reaperWorker';
+import { scheduleYearlyGrant } from './queue/yearlyGrantWorker';
 import { banCheckMiddleware } from './middleware/banCheck';
 import { reportsRouter } from './routes/reports';
 import { privacyRouter } from './routes/privacy';
@@ -20,6 +21,7 @@ getFirebaseAdmin();
 // Schedule the BullMQ reaper once at startup (Redis persists the repeat schedule across restarts;
 // jobId: 'reaper-singleton' inside scheduleReaper() prevents duplicate schedules on redeploy).
 scheduleReaper().catch((err) => console.error('[server] Failed to schedule reaper:', err));
+scheduleYearlyGrant().catch((err) => console.error('[server] Failed to schedule yearly grant:', err));
 
 const app = express();
 

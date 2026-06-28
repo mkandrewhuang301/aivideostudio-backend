@@ -49,6 +49,8 @@ export const users = pgTable(
     entitlement_level: text('entitlement_level'), // nullable: 'basic' | 'pro' | NULL (no active subscription)
     subscription_allotment: integer('subscription_allotment').notNull().default(0), // credits granted in the current billing period (reset on RENEWAL)
     revenuecat_customer_id: text('revenuecat_customer_id').unique(), // RevenueCat customer ID — O(1) webhook lookups without joining on firebase_uid
+    subscription_product_id: text('subscription_product_id'), // active product_id (e.g. 'com.fantasiaai.basic_yearly'); cleared on REFUND/EXPIRATION
+    subscription_started_at: timestamp('subscription_started_at', { withTimezone: true }), // set on INITIAL_PURCHASE; drives anniversary-based credit grants for yearly plans
     display_name: text('display_name'), // user display name for profile UI (Phase 6)
     total_generations: integer('total_generations').notNull().default(0), // incremented on generation completion; avoids COUNT(*) on generations table
     last_active_at: timestamp('last_active_at', { withTimezone: true }), // churn analytics and re-engagement push (Phase 7)

@@ -187,6 +187,51 @@ describe('INITIAL_PURCHASE event (PAY-01)', () => {
   });
 });
 
+// ─── NON_RENEWING_PURCHASE (top-up) ─────────────────────────────────────────
+
+describe('NON_RENEWING_PURCHASE event (top-up)', () => {
+  it('grants 500 credits with 90-day expiry for topup_9_99', async () => {
+    await request(app)
+      .post('/webhooks/revenuecat')
+      .set('Authorization', VALID_AUTH)
+      .send(makePayload('NON_RENEWING_PURCHASE', 'com.fantasiaai.topup_9_99', 'txn-topup-001'));
+
+    expect(grantCredits).toHaveBeenCalledWith(
+      USER_ROW.id,
+      500,
+      'topup_grant',
+      'txn-topup-001',
+      expect.any(Date),
+    );
+  });
+
+  it('grants 2900 credits for topup_49_99', async () => {
+    await request(app)
+      .post('/webhooks/revenuecat')
+      .set('Authorization', VALID_AUTH)
+      .send(makePayload('NON_RENEWING_PURCHASE', 'com.fantasiaai.topup_49_99', 'txn-topup-002'));
+
+    expect(grantCredits).toHaveBeenCalledWith(
+      USER_ROW.id,
+      2900,
+      'topup_grant',
+      'txn-topup-002',
+      expect.any(Date),
+    );
+  });
+
+  it('returns skipped:unknown_product for unrecognised top-up product_id', async () => {
+    const res = await request(app)
+      .post('/webhooks/revenuecat')
+      .set('Authorization', VALID_AUTH)
+      .send(makePayload('NON_RENEWING_PURCHASE', 'com.fantasiaai.topup_unknown'));
+
+    expect(res.status).toBe(200);
+    expect(res.body.skipped).toBe('unknown_product');
+    expect(grantCredits).not.toHaveBeenCalled();
+  });
+});
+
 // ─── REFUND idempotency (PAY-04) ──────────────────────────────────────────────
 
 describe('REFUND idempotency (PAY-04)', () => {
@@ -242,6 +287,66 @@ describe('REFUND idempotency (PAY-04)', () => {
     // db.execute called twice: user lookup + entitlement clear
     expect(db.execute).toHaveBeenCalledTimes(2);
     expect(clawbackCredits).toHaveBeenCalledWith(USER_ROW.id, 1400, 'txn-refund-002');
+  });
+});
+
+// ─── REFUND for top-up ───────────────────────────────────────────────────────
+
+describe('REFUND for top-up products', () => {
+  it('claws back credits when a top-up purchase is refunded', async () => {
+    await request(app)
+      .post('/webhooks/revenuecat')
+      .set('Authorization', VALID_AUTH)
+      .send(makePayload('REFUND', 'com.fantasiaai.topup_9_99', 'txn-topup-refund-001'));
+
+    expect(clawbackCredits).toHaveBeenCalledWith(USER_ROW.id, 500, 'txn-topup-refund-001');
+  });
+
+  it('does NOT clear entitlement_level when a top-up is refunded (only subscriptions affect entitlement)', async () => {
+    (db.execute as jest.Mock)
+      .mockResolvedValueOnce({ rows: [USER_ROW] }); // user lookup only — no entitlement UPDATE
+
+    await request(app)
+      .post('/webhooks/revenuecat')
+      .set('Authorization', VALID_AUTH)
+      .send(makePayload('REFUND', 'com.fantasiaai.topup_24_99', 'txn-topup-refund-002'));
+
+    expect(clawbackCredits).toHaveBeenCalledWith(USER_ROW.id, 1400, 'txn-topup-refund-002');
+    // db.execute called exactly once (user lookup only, no entitlement UPDATE)
+    expect(db.execute).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ─── EXPIRATION / CANCELLATION ───────────────────────────────────────────────
+
+describe('EXPIRATION and CANCELLATION events', () => {
+  it('clears entitlement_level on EXPIRATION', async () => {
+    (db.execute as jest.Mock)
+      .mockResolvedValueOnce({ rows: [USER_ROW] }) // user lookup
+      .mockResolvedValueOnce({ rows: [] });         // UPDATE entitlement = NULL
+
+    const res = await request(app)
+      .post('/webhooks/revenuecat')
+      .set('Authorization', VALID_AUTH)
+      .send(makePayload('EXPIRATION', 'com.fantasiaai.basic_monthly', 'txn-exp-001'));
+
+    expect(res.status).toBe(200);
+    expect(db.execute).toHaveBeenCalledTimes(2);
+    expect(grantCredits).not.toHaveBeenCalled();
+    expect(clawbackCredits).not.toHaveBeenCalled();
+  });
+
+  it('returns 200 and takes no credit action on CANCELLATION', async () => {
+    const res = await request(app)
+      .post('/webhooks/revenuecat')
+      .set('Authorization', VALID_AUTH)
+      .send(makePayload('CANCELLATION', 'com.fantasiaai.basic_monthly', 'txn-cancel-001'));
+
+    expect(res.status).toBe(200);
+    expect(grantCredits).not.toHaveBeenCalled();
+    expect(clawbackCredits).not.toHaveBeenCalled();
+    // Only user lookup, no entitlement UPDATE
+    expect(db.execute).toHaveBeenCalledTimes(1);
   });
 });
 

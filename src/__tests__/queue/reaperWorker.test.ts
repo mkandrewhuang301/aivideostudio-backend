@@ -24,6 +24,11 @@ jest.mock('../../db/client', () => ({
 jest.mock('../../services/generationService', () => ({
   markRefunded: jest.fn(),
   markCompleted: jest.fn(),
+  markQuarantined: jest.fn(),
+}));
+
+jest.mock('../../services/hiveService', () => ({
+  scanForCsam: jest.fn(),
 }));
 
 jest.mock('../../services/creditService', () => ({
@@ -43,9 +48,10 @@ jest.mock('../../services/providers/ReplicateProvider', () => ({
 }));
 
 import { db } from '../../db/client';
-import { markRefunded, markCompleted } from '../../services/generationService';
+import { markRefunded, markCompleted, markQuarantined } from '../../services/generationService';
 import { refundCredits } from '../../services/creditService';
 import { archiveToR2 } from '../../services/archivalService';
+import { scanForCsam } from '../../services/hiveService';
 import {
   reapOrphanedJobs,
   reapStalledJobs,
@@ -56,8 +62,10 @@ import {
 const mockDbExecute = db.execute as jest.Mock;
 const mockMarkRefunded = markRefunded as jest.Mock;
 const mockMarkCompleted = markCompleted as jest.Mock;
+const mockMarkQuarantined = markQuarantined as jest.Mock;
 const mockRefundCredits = refundCredits as jest.Mock;
 const mockArchiveToR2 = archiveToR2 as jest.Mock;
+const mockScanForCsam = scanForCsam as jest.Mock;
 
 function extractSql(drizzleQuery: unknown): string {
   if (typeof drizzleQuery === 'string') return drizzleQuery;
@@ -138,7 +146,7 @@ describe('reapStalledJobs', () => {
     expect(sqlText).toMatch(/interval '30 minutes'/);
   });
 
-  it('archives to R2 and marks completed when Replicate reports succeeded', async () => {
+  it('archives to R2, scans for CSAM, and marks completed when Replicate reports succeeded', async () => {
     mockDbExecute.mockResolvedValueOnce({
       rows: [
         { id: 'gen-3', user_id: 'user-3', cost_credits: 60, replicate_prediction_id: 'pred-3' },
@@ -149,14 +157,59 @@ describe('reapStalledJobs', () => {
       outputUrl: 'https://replicate.delivery/output.mp4',
     });
     mockArchiveToR2.mockResolvedValueOnce('generations/gen-3.mp4');
+    mockScanForCsam.mockResolvedValueOnce({ flagged: false });
     mockMarkCompleted.mockResolvedValueOnce(true);
 
     await reapStalledJobs();
 
     expect(mockGetStatus).toHaveBeenCalledWith('pred-3');
     expect(mockArchiveToR2).toHaveBeenCalledWith('https://replicate.delivery/output.mp4', 'gen-3');
+    expect(mockScanForCsam).toHaveBeenCalledWith('generations/gen-3.mp4');
     expect(mockMarkCompleted).toHaveBeenCalledWith('gen-3', 'generations/gen-3.mp4');
     expect(mockMarkRefunded).not.toHaveBeenCalled();
+    expect(mockMarkQuarantined).not.toHaveBeenCalled();
+  });
+
+  it('quarantines and refunds when Hive flags the video during reaper reconciliation', async () => {
+    mockDbExecute.mockResolvedValueOnce({
+      rows: [
+        { id: 'gen-3b', user_id: 'user-3b', cost_credits: 60, replicate_prediction_id: 'pred-3b' },
+      ],
+    });
+    mockGetStatus.mockResolvedValueOnce({
+      status: 'succeeded',
+      outputUrl: 'https://replicate.delivery/flagged.mp4',
+    });
+    mockArchiveToR2.mockResolvedValueOnce('generations/gen-3b.mp4');
+    mockScanForCsam.mockResolvedValueOnce({ flagged: true });
+    mockMarkQuarantined.mockResolvedValueOnce(true);
+
+    await reapStalledJobs();
+
+    expect(mockMarkQuarantined).toHaveBeenCalledWith('gen-3b');
+    expect(mockRefundCredits).toHaveBeenCalledWith('user-3b', 60, 'csam-quarantine-reaper-gen-3b');
+    expect(mockMarkCompleted).not.toHaveBeenCalled();
+  });
+
+  it('quarantines and refunds when Hive throws during reaper reconciliation (fail-safe)', async () => {
+    mockDbExecute.mockResolvedValueOnce({
+      rows: [
+        { id: 'gen-3c', user_id: 'user-3c', cost_credits: 45, replicate_prediction_id: 'pred-3c' },
+      ],
+    });
+    mockGetStatus.mockResolvedValueOnce({
+      status: 'succeeded',
+      outputUrl: 'https://replicate.delivery/video.mp4',
+    });
+    mockArchiveToR2.mockResolvedValueOnce('generations/gen-3c.mp4');
+    mockScanForCsam.mockRejectedValueOnce(new Error('Hive timeout'));
+    mockMarkQuarantined.mockResolvedValueOnce(true);
+
+    await reapStalledJobs();
+
+    expect(mockMarkQuarantined).toHaveBeenCalledWith('gen-3c');
+    expect(mockRefundCredits).toHaveBeenCalledWith('user-3c', 45, 'csam-quarantine-reaper-gen-3c');
+    expect(mockMarkCompleted).not.toHaveBeenCalled();
   });
 
   it('refunds credits when Replicate reports failed', async () => {
@@ -231,6 +284,7 @@ describe('reapStalledJobs', () => {
       outputUrl: 'https://replicate.delivery/output8.mp4',
     });
     mockArchiveToR2.mockResolvedValueOnce('generations/gen-8.mp4');
+    mockScanForCsam.mockResolvedValueOnce({ flagged: false });
     mockMarkCompleted.mockResolvedValueOnce(true);
 
     await reapStalledJobs();

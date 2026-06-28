@@ -8,12 +8,10 @@ import { Router, Request, Response } from 'express';
 
 export const privacyRouter = Router();
 
-// TODO(phase-8): Replace DMCA placeholder contact info with registered DMCA agent details
-// from copyright.gov/dmca-directory before App Store submission.
-const DMCA_AGENT_NAME = 'Andrew Huang'; // TODO: replace with registered agent name
-const DMCA_AGENT_EMAIL = 'andyallen.huang@gmail.com'; // TODO: replace with registered agent email
-const DMCA_AGENT_ADDRESS = '[Mailing Address — update before App Store submission]'; // TODO
-const DMCA_AGENT_PHONE = '[Phone — update before App Store submission]'; // TODO
+const DMCA_AGENT_NAME = 'Andrew Huang';
+const DMCA_AGENT_EMAIL = 'baaa00033@gmail.com';
+const DMCA_AGENT_ADDRESS = '1109 Riggins Mill Road, Cary, NC 27519';
+const DMCA_AGENT_PHONE = '9199953829';
 
 const PRIVACY_HTML = `<!DOCTYPE html>
 <html lang="en">

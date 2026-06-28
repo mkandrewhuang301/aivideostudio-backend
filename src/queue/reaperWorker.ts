@@ -9,9 +9,10 @@
 import { Queue, Worker } from 'bullmq';
 import { db } from '../db/client';
 import { sql } from 'drizzle-orm';
-import { markRefunded, markCompleted } from '../services/generationService';
+import { markRefunded, markCompleted, markQuarantined } from '../services/generationService';
 import { refundCredits } from '../services/creditService';
 import { archiveToR2 } from '../services/archivalService';
+import { scanForCsam } from '../services/hiveService';
 import { ReplicateProvider } from '../services/providers/ReplicateProvider';
 
 const QUEUE_NAME = 'generation-reaper';
@@ -68,8 +69,24 @@ export async function reapStalledJobs(): Promise<void> {
 
       if (prediction.status === 'succeeded' && prediction.outputUrl) {
         const r2Key = await archiveToR2(prediction.outputUrl, row.id);
-        await markCompleted(row.id, r2Key);
-        console.log(`[reaper] Stalled generation ${row.id} reconciled as completed`);
+
+        let hiveFlagged = false;
+        try {
+          const { flagged } = await scanForCsam(r2Key);
+          hiveFlagged = flagged;
+        } catch (hiveErr) {
+          console.error(`[reaper] Hive scan failed for ${row.id} — quarantining:`, hiveErr);
+          hiveFlagged = true;
+        }
+
+        if (hiveFlagged) {
+          await markQuarantined(row.id);
+          await refundCredits(row.user_id, row.cost_credits, `csam-quarantine-reaper-${row.id}`);
+          console.warn(`[reaper] Stalled generation ${row.id} quarantined after CSAM scan`);
+        } else {
+          await markCompleted(row.id, r2Key);
+          console.log(`[reaper] Stalled generation ${row.id} reconciled as completed`);
+        }
       } else if (prediction.status === 'failed' || prediction.status === 'canceled') {
         const refunded = await markRefunded(row.id);
         if (refunded) await refundCredits(row.user_id, row.cost_credits, row.replicate_prediction_id);

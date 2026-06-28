@@ -34,24 +34,34 @@ interface OpenAIModerationResponse {
 }
 
 async function checkOpenAIModeration(prompt: string): Promise<boolean> {
-  const response = await fetch('https://api.openai.com/v1/moderations', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${config.openaiApiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ model: 'omni-moderation-latest', input: prompt }),
-  });
-
-  if (!response.ok) {
-    throw new Error(`OpenAI Moderation API error: ${response.status}`);
+  // OpenAI is a bonus layer — fail open on errors so a transient outage doesn't
+  // take down the entire generation feature. The regex blocklist still runs regardless.
+  let data: OpenAIModerationResponse;
+  try {
+    const response = await fetch('https://api.openai.com/v1/moderations', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${config.openaiApiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ model: 'omni-moderation-latest', input: prompt }),
+    });
+    if (!response.ok) {
+      console.error(`[promptModeration] OpenAI Moderation API error: ${response.status}, skipping semantic check`);
+      return false;
+    }
+    data = (await response.json()) as OpenAIModerationResponse;
+  } catch (err) {
+    console.error('[promptModeration] OpenAI API unreachable, skipping semantic check:', err);
+    return false;
   }
 
-  const data = (await response.json()) as OpenAIModerationResponse;
   const result = data.results[0];
   // Only block on categories that are unambiguously illegal/CSAM — per CONTEXT.md decision
   return result.categories['sexual/minors'] === true || result.categories['violence/graphic'] === true;
 }
+
+const MAX_PROMPT_LENGTH = 2000;
 
 export async function promptModerationMiddleware(
   req: Request,
@@ -63,6 +73,11 @@ export async function promptModerationMiddleware(
   // If no prompt (or not a string), skip moderation — prepareCost will handle validation
   if (!prompt || typeof prompt !== 'string') {
     next();
+    return;
+  }
+
+  if (prompt.length > MAX_PROMPT_LENGTH) {
+    res.status(400).json({ error: `Prompt must be ${MAX_PROMPT_LENGTH} characters or fewer`, code: 'prompt_too_long' });
     return;
   }
 

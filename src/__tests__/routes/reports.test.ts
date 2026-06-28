@@ -106,6 +106,18 @@ describe('POST /api/reports', () => {
     expect(res.body.code).toBe('MISSING_GENERATION_ID');
     expect(mockExecute).not.toHaveBeenCalled();
   });
+
+  it('returns 400 INVALID_GENERATION_ID for a malformed UUID — prevents PostgreSQL cast error', async () => {
+    const app = buildApp({ uid: 'firebase-uid-1', dbUserId: 'db-user-uuid-1' });
+
+    const res = await request(app)
+      .post('/api/reports')
+      .send({ generation_id: 'not-a-uuid', reason: 'other' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_GENERATION_ID');
+    expect(mockExecute).not.toHaveBeenCalled();
+  });
 });
 
 // ─── banCheckMiddleware ───────────────────────────────────────────────────────
@@ -134,6 +146,22 @@ describe('banCheckMiddleware', () => {
 
   it('calls next() when user is not banned', async () => {
     mockExecute.mockResolvedValueOnce({ rows: [{ banned: false }] });
+
+    const req = { user: { dbUserId: 'some-uuid' } } as unknown as Request;
+    const res = {
+      status: jest.fn().mockReturnThis(),
+      json: jest.fn().mockReturnThis(),
+    } as unknown as Response;
+    const next = jest.fn() as NextFunction;
+
+    await banCheckMiddleware(req, res, next);
+
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(res.status).not.toHaveBeenCalled();
+  });
+
+  it('fails open and calls next() when DB throws — availability over security for ban check', async () => {
+    mockExecute.mockRejectedValueOnce(new Error('DB connection lost'));
 
     const req = { user: { dbUserId: 'some-uuid' } } as unknown as Request;
     const res = {

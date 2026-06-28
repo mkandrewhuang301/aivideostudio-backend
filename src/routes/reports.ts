@@ -28,6 +28,12 @@ reportsRouter.post('/', async (req: Request, res: Response) => {
     return;
   }
 
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if (!UUID_RE.test(generation_id)) {
+    res.status(400).json({ error: 'generation_id must be a valid UUID', code: 'INVALID_GENERATION_ID' });
+    return;
+  }
+
   if (!VALID_REASONS.includes(reason as ReportReason)) {
     res.status(400).json({
       error: `Invalid reason. Must be one of: ${VALID_REASONS.join(', ')}`,

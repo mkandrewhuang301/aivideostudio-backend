@@ -18,7 +18,7 @@ import { config } from '../config';
 const HIVE_TIMEOUT_MS = 30_000;
 
 async function getPresignedUrl(r2Key: string): Promise<string> {
-  return getSignedUrl(r2, new GetObjectCommand({ Bucket: R2_BUCKET, Key: r2Key }), { expiresIn: 300 });
+  return getSignedUrl(r2, new GetObjectCommand({ Bucket: R2_BUCKET, Key: r2Key }), { expiresIn: 900 });
 }
 
 interface HiveClass {
@@ -81,6 +81,11 @@ export async function scanForCsam(r2Key: string): Promise<{ flagged: boolean }> 
   }
 
   const data = (await response.json()) as HiveVisualModerationResponse;
-  const flagged = (data.output ?? []).some((frame) => isFrameFlagged(frame.classes ?? []));
+  const frames = data.output ?? [];
+  // Empty output means Hive couldn't process the video — treat as scan failure, not clean.
+  if (frames.length === 0) {
+    throw new Error('Hive returned empty output — video could not be scanned');
+  }
+  const flagged = frames.some((frame) => isFrameFlagged(frame.classes ?? []));
   return { flagged };
 }
