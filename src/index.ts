@@ -13,6 +13,7 @@ import { scheduleReaper } from './queue/reaperWorker';
 import { scheduleYearlyGrant } from './queue/yearlyGrantWorker';
 import { banCheckMiddleware } from './middleware/banCheck';
 import { reportsRouter } from './routes/reports';
+import { uploadsRouter } from './routes/uploads';
 import { privacyRouter } from './routes/privacy';
 
 // Eagerly initialize Firebase Admin at startup — prevents double-init on concurrent requests
@@ -46,6 +47,7 @@ app.use('/api', authMiddleware, banCheckMiddleware);
 app.use('/api/me', meRouter);
 app.use('/api/generations', generationsRouter);
 app.use('/api/reports', reportsRouter);
+app.use('/api/uploads', uploadsRouter);
 
 app.use('/privacy', privacyRouter);
 
