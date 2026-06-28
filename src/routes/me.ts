@@ -61,7 +61,7 @@ meRouter.patch('/preferences', async (req: Request, res: Response) => {
   }
 
   const { preferences } = req.body ?? {};
-  if (!preferences || typeof preferences !== 'object') {
+  if (!preferences || typeof preferences !== 'object' || Array.isArray(preferences)) {
     res.status(400).json({ error: 'preferences is required', code: 'MISSING_PREFERENCES' });
     return;
   }
