@@ -30,6 +30,7 @@ export const generationStatusEnum = pgEnum('generation_status', [
   'failed',
   'quarantined',
   'refunded',
+  'deleted',     // enables soft-delete (D-37, GAL-06)
 ]);
 
 // ─── users ────────────────────────────────────────────────────────────────────
