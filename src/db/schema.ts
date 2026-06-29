@@ -131,6 +131,25 @@ export const generations = pgTable(
   }),
 );
 
+// ─── reference_uploads ────────────────────────────────────────────────────────
+// Persistent record of user-uploaded reference media. R2 objects do not expire;
+// presigned URLs are generated fresh at query time (GET /api/uploads).
+
+export const referenceUploads = pgTable(
+  'reference_uploads',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    user_id: uuid('user_id').notNull().references(() => users.id),
+    r2_key: text('r2_key').notNull(),
+    mime_type: text('mime_type').notNull(), // 'image/jpeg' | 'image/png' | 'image/webp' | 'video/mp4'
+    created_at: timestamp('created_at', { withTimezone: true }).notNull().default(sql`now()`),
+  },
+  (table) => ({
+    userIdIdx: index('reference_uploads_user_id_idx').on(table.user_id),
+    createdAtIdx: index('reference_uploads_created_at_idx').on(table.created_at),
+  }),
+);
+
 // ─── reports ──────────────────────────────────────────────────────────────────
 // Phase 5: User-submitted content reports. References generations.id and users.firebase_uid.
 
@@ -168,3 +187,5 @@ export type GenerationStatus = (typeof generationStatusEnum.enumValues)[number];
 export type CreditTransactionType = (typeof creditTransactionTypeEnum.enumValues)[number];
 export type Report = typeof reports.$inferSelect;
 export type NewReport = typeof reports.$inferInsert;
+export type ReferenceUpload = typeof referenceUploads.$inferSelect;
+export type NewReferenceUpload = typeof referenceUploads.$inferInsert;

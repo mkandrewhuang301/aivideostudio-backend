@@ -1,7 +1,8 @@
 // src/routes/uploads.ts
 // POST /api/uploads — accepts multipart/form-data with single file, validates MIME type,
-// stores to R2 under uploads/{userId}/{uuid}.{ext}, returns presigned URL (1-hour TTL).
-// SECURITY: MIME whitelist via multer fileFilter (T-07-03-01). 50MB limit (T-07-03-02).
+// stores to R2 under uploads/{userId}/{uuid}.{ext}, persists record to reference_uploads,
+// returns presigned URL (1-hour TTL). SECURITY: MIME whitelist via multer fileFilter. 50MB limit.
+// GET /api/uploads — lists user's uploaded reference media with fresh presigned URLs.
 // CLAUDE.md Rule 2: raw r2_key never returned — always presigned URL.
 
 import { Router, Request, Response } from 'express';
@@ -10,6 +11,9 @@ import { randomUUID } from 'crypto';
 import { PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { r2, R2_BUCKET } from '../storage/r2';
+import { db } from '../db/client';
+import { referenceUploads } from '../db/schema';
+import { eq, desc } from 'drizzle-orm';
 
 export const uploadsRouter = Router();
 
@@ -22,9 +26,8 @@ const ALLOWED_MIMES: Record<string, string> = {
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 50 * 1024 * 1024 }, // 50MB max (D-33)
+  limits: { fileSize: 50 * 1024 * 1024 }, // 50MB max
   fileFilter: (_req, file, cb) => {
-    // T-07-03-01: whitelist MIME types; multer rejects unknown types with no file on req
     cb(null, file.mimetype in ALLOWED_MIMES);
   },
 });
@@ -41,6 +44,7 @@ uploadsRouter.post('/', upload.single('file'), async (req: Request, res: Respons
   try {
     const ext = ALLOWED_MIMES[req.file.mimetype];
     const key = `uploads/${req.user.dbUserId}/${randomUUID()}.${ext}`;
+
     await r2.send(
       new PutObjectCommand({
         Bucket: R2_BUCKET,
@@ -49,15 +53,62 @@ uploadsRouter.post('/', upload.single('file'), async (req: Request, res: Respons
         ContentType: req.file.mimetype,
       }),
     );
-    // D-34: 1-hour TTL for upload references (CLAUDE.md Rule 2: never expose raw key)
+
+    // Persist upload record so the user can reference it later via GET /api/uploads
+    await db.insert(referenceUploads).values({
+      user_id: req.user.dbUserId,
+      r2_key: key,
+      mime_type: req.file.mimetype,
+    });
+
+    // 1-hour presigned URL (CLAUDE.md Rule 2: never expose raw key)
     const url = await getSignedUrl(
       r2,
       new GetObjectCommand({ Bucket: R2_BUCKET, Key: key }),
       { expiresIn: 3600 },
     );
+
     res.status(200).json({ url });
   } catch (err) {
     console.error('[uploads] Error storing file:', err);
     res.status(500).json({ error: 'Failed to upload file' });
+  }
+});
+
+// GET /api/uploads — returns the authenticated user's uploaded reference media,
+// newest first, with fresh presigned URLs generated at query time (R2 objects don't expire).
+uploadsRouter.get('/', async (req: Request, res: Response) => {
+  if (!req.user?.dbUserId) {
+    res.status(401).json({ error: 'Not authenticated' });
+    return;
+  }
+  try {
+    const rows = await db
+      .select()
+      .from(referenceUploads)
+      .where(eq(referenceUploads.user_id, req.user.dbUserId))
+      .orderBy(desc(referenceUploads.created_at))
+      .limit(50);
+
+    const uploads = await Promise.all(
+      rows.map(async (row) => {
+        const url = await getSignedUrl(
+          r2,
+          new GetObjectCommand({ Bucket: R2_BUCKET, Key: row.r2_key }),
+          { expiresIn: 3600 },
+        );
+        return {
+          id: row.id,
+          url,
+          mime_type: row.mime_type,
+          created_at: row.created_at,
+        };
+      }),
+    );
+
+    res.status(200).json({ uploads });
+  } catch (err) {
+    console.error('[uploads] Error listing uploads:', err);
+    res.status(500).json({ error: 'Failed to list uploads' });
   }
 });
