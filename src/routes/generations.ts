@@ -21,9 +21,12 @@ import {
 import { ReplicateProvider } from '../services/providers/ReplicateProvider';
 import { refundCredits } from '../services/creditService';
 import { markRefunded } from '../services/generationService';
-import { getGenerationPresignedUrl } from '../services/archivalService';
+import { getGenerationPresignedUrl, getUploadPresignedUrl } from '../services/archivalService';
 import { config } from '../config';
 import type { GenerationInput } from '../services/providers/ModelProvider';
+import { db } from '../db/client';
+import { referenceUploads } from '../db/schema';
+import { eq, inArray } from 'drizzle-orm';
 
 export const generationsRouter = Router();
 
@@ -39,8 +42,9 @@ interface ResolvedGenerationRequest {
   aspectRatio: string;
   audioEnabled: boolean;
   cost: number;
-  referenceImages?: string[];   // GEN-02: image reference URLs (already-uploaded R2 presigned URLs)
-  referenceVideos?: string[];   // GEN-03: video reference URLs (already-uploaded R2 presigned URLs)
+  referenceImages?: string[];     // GEN-02: image reference URLs for Replicate dispatch
+  referenceVideos?: string[];     // GEN-03: video reference URLs for Replicate dispatch
+  refUploadIds?: string[];        // upload IDs to store in params for remix/regen
 }
 
 declare global {
@@ -63,6 +67,7 @@ function prepareCost(req: Request, res: Response, next: NextFunction): void {
     audio_enabled,
     reference_images,
     reference_videos,
+    reference_upload_ids,
   } = req.body ?? {};
 
   if (!prompt || typeof prompt !== 'string') {
@@ -108,6 +113,10 @@ function prepareCost(req: Request, res: Response, next: NextFunction): void {
     hasVideoReference: refVideos.length > 0,
   });
 
+  const refUploadIds: string[] = Array.isArray(reference_upload_ids)
+    ? reference_upload_ids.filter((id: unknown) => typeof id === 'string')
+    : [];
+
   req.body.cost_credits = cost;
   req._resolved = {
     prompt: finalPrompt,
@@ -119,6 +128,7 @@ function prepareCost(req: Request, res: Response, next: NextFunction): void {
     cost,
     referenceImages: refImages.length > 0 ? refImages : undefined,
     referenceVideos: refVideos.length > 0 ? refVideos : undefined,
+    refUploadIds: refUploadIds.length > 0 ? refUploadIds : undefined,
   };
   next();
 }
@@ -143,6 +153,7 @@ generationsRouter.post('/', promptModerationMiddleware, prepareCost, creditCheck
         aspect_ratio: resolved.aspectRatio,
         audio_enabled: resolved.audioEnabled,
         has_reference: ((resolved.referenceImages?.length ?? 0) + (resolved.referenceVideos?.length ?? 0)) > 0,
+        ref_upload_ids: resolved.refUploadIds ?? [],
       },
       cost_credits: resolved.cost,
     });
@@ -192,13 +203,39 @@ generationsRouter.get('/', async (req: Request, res: Response) => {
     }
     const limit = Math.min(Number(limitStr) || 20, 50);
     const items = await listGenerations(req.user.dbUserId, cursor, limit);
+
+    // Pre-fetch all reference upload rows needed across all items in one query
+    const allRefIds = items.flatMap((item) => {
+      const p = item.params as Record<string, unknown> | null;
+      const ids = p?.ref_upload_ids;
+      return Array.isArray(ids) ? ids as string[] : [];
+    });
+    const refUploadRows = allRefIds.length > 0
+      ? await db.select().from(referenceUploads).where(inArray(referenceUploads.id, allRefIds))
+      : [];
+    const refUploadMap = Object.fromEntries(refUploadRows.map((r) => [r.id, r]));
+
     const enriched = await Promise.all(
-      items.map(async (item) => ({
-        ...item,
-        video_url: item.status === 'completed' && item.r2_key
-          ? await getGenerationPresignedUrl(item.r2_key)
-          : null,
-      })),
+      items.map(async (item) => {
+        const p = item.params as Record<string, unknown> | null;
+        const refIds: string[] = Array.isArray(p?.ref_upload_ids) ? p!.ref_upload_ids as string[] : [];
+        const referenceUrls = await Promise.all(
+          refIds
+            .filter((id) => refUploadMap[id])
+            .map(async (id) => {
+              const row = refUploadMap[id];
+              const url = await getUploadPresignedUrl(row.r2_key);
+              return { url, isVideo: row.mime_type.startsWith('video/') };
+            }),
+        );
+        return {
+          ...item,
+          video_url: item.status === 'completed' && item.r2_key
+            ? await getGenerationPresignedUrl(item.r2_key)
+            : null,
+          reference_urls: referenceUrls.length > 0 ? referenceUrls : null,
+        };
+      }),
     );
     const last = enriched[enriched.length - 1];
     const nextCursor = enriched.length === limit && last
@@ -221,7 +258,18 @@ generationsRouter.get('/:id', async (req: Request, res: Response) => {
     const video_url = item.status === 'completed' && item.r2_key
       ? await getGenerationPresignedUrl(item.r2_key)
       : null;
-    res.status(200).json({ ...item, video_url });
+    const p = item.params as Record<string, unknown> | null;
+    const refIds: string[] = Array.isArray(p?.ref_upload_ids) ? p!.ref_upload_ids as string[] : [];
+    const referenceRows = refIds.length > 0
+      ? await db.select().from(referenceUploads).where(inArray(referenceUploads.id, refIds))
+      : [];
+    const reference_urls = referenceRows.length > 0
+      ? await Promise.all(referenceRows.map(async (r) => ({
+          url: await getUploadPresignedUrl(r.r2_key),
+          isVideo: r.mime_type.startsWith('video/'),
+        })))
+      : null;
+    res.status(200).json({ ...item, video_url, reference_urls });
   } catch (err) {
     console.error('[generations] Error fetching generation:', err);
     res.status(500).json({ error: 'Failed to fetch generation' });

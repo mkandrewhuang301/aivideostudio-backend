@@ -55,11 +55,11 @@ uploadsRouter.post('/', upload.single('file'), async (req: Request, res: Respons
     );
 
     // Persist upload record so the user can reference it later via GET /api/uploads
-    await db.insert(referenceUploads).values({
+    const [insertedRow] = await db.insert(referenceUploads).values({
       user_id: req.user.dbUserId,
       r2_key: key,
       mime_type: req.file.mimetype,
-    });
+    }).returning({ id: referenceUploads.id });
 
     // 1-hour presigned URL (CLAUDE.md Rule 2: never expose raw key)
     const url = await getSignedUrl(
@@ -68,7 +68,7 @@ uploadsRouter.post('/', upload.single('file'), async (req: Request, res: Respons
       { expiresIn: 3600 },
     );
 
-    res.status(200).json({ url });
+    res.status(200).json({ id: insertedRow?.id ?? null, url });
   } catch (err) {
     console.error('[uploads] Error storing file:', err);
     res.status(500).json({ error: 'Failed to upload file' });
