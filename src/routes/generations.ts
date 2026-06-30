@@ -10,17 +10,20 @@ import { promptModerationMiddleware } from '../middleware/promptModeration';
 import {
   resolveDurationSeconds,
   computeCostCredits,
+  computeImageCostCredits,
   createGeneration,
   attachPredictionId,
   listGenerations,
   getGenerationById,
   softDeleteGeneration,
   SUPPORTED_MODELS,
+  MODEL_RESOLUTIONS,
+  SUPPORTED_IMAGE_MODELS,
   type SupportedModel,
 } from '../services/generationService';
 import { ReplicateProvider } from '../services/providers/ReplicateProvider';
 import { refundCredits } from '../services/creditService';
-import { markRefunded } from '../services/generationService';
+import { markRefunded, markFailed } from '../services/generationService';
 import { getGenerationPresignedUrl, getUploadPresignedUrl } from '../services/archivalService';
 import { config } from '../config';
 import type { GenerationInput } from '../services/providers/ModelProvider';
@@ -32,15 +35,18 @@ export const generationsRouter = Router();
 
 const provider = new ReplicateProvider();
 
-const VALID_RESOLUTIONS = ['480p', '720p'] as const;
-
 interface ResolvedGenerationRequest {
   prompt: string;
-  model: SupportedModel;
-  durationSeconds: number;
-  resolution: '480p' | '720p';
-  aspectRatio: string;
-  audioEnabled: boolean;
+  model: string;                  // covers both video (SupportedModel) and image (SupportedImageModel) IDs
+  mediaType: 'video' | 'image';
+  // Video-only (undefined for image)
+  durationSeconds?: number;
+  resolution?: '480p' | '720p' | '1080p' | '4k';
+  aspectRatio?: string;
+  audioEnabled?: boolean;
+  // Image-only (undefined for video)
+  width?: number;
+  height?: number;
   cost: number;
   referenceImages?: string[];     // GEN-02: image reference URLs for Replicate dispatch
   referenceVideos?: string[];     // GEN-03: video reference URLs for Replicate dispatch
@@ -60,7 +66,9 @@ declare global {
 function prepareCost(req: Request, res: Response, next: NextFunction): void {
   const {
     prompt,
-    model = 'bytedance/seedance-2.0-fast',
+    model,
+    media_type = 'video',
+    // video-specific
     duration,
     resolution,
     aspect_ratio,
@@ -68,18 +76,50 @@ function prepareCost(req: Request, res: Response, next: NextFunction): void {
     reference_images,
     reference_videos,
     reference_upload_ids,
+    // image-specific
+    width,
+    height,
   } = req.body ?? {};
 
   if (!prompt || typeof prompt !== 'string') {
     res.status(400).json({ error: 'prompt is required', code: 'INVALID_PROMPT' });
     return;
   }
-  if (!SUPPORTED_MODELS.includes(model)) {
+
+  if (media_type === 'image') {
+    // Image path — flat cost per model, no duration/resolution (T-08-03-01 mitigated below)
+    const imageModel = model ?? 'black-forest-labs/flux-schnell';
+    if (!(SUPPORTED_IMAGE_MODELS as readonly string[]).includes(imageModel)) {
+      res.status(400).json({ error: `model must be one of: ${SUPPORTED_IMAGE_MODELS.join(', ')}`, code: 'INVALID_MODEL' });
+      return;
+    }
+    const imageWidth = typeof width === 'number' && width > 0 ? width : 1024;
+    const imageHeight = typeof height === 'number' && height > 0 ? height : 1024;
+    const cost = computeImageCostCredits(imageModel);
+
+    req.body.cost_credits = cost;
+    req._resolved = {
+      prompt: prompt as string,
+      model: imageModel,
+      mediaType: 'image',
+      width: imageWidth,
+      height: imageHeight,
+      cost,
+    };
+    next();
+    return;
+  }
+
+  // Video path — existing logic (UNCHANGED), T-08-03-02 mitigated: video model validated against
+  // SUPPORTED_MODELS only, so a flux-* ID supplied with media_type='video' (or omitted) is rejected.
+  const videoModel = model ?? 'bytedance/seedance-2.0-fast';
+  if (!SUPPORTED_MODELS.includes(videoModel)) {
     res.status(400).json({ error: `model must be one of: ${SUPPORTED_MODELS.join(', ')}`, code: 'INVALID_MODEL' });
     return;
   }
-  if (!VALID_RESOLUTIONS.includes(resolution)) {
-    res.status(400).json({ error: 'resolution must be one of 480p, 720p', code: 'INVALID_RESOLUTION' });
+  const validResolutions = MODEL_RESOLUTIONS[videoModel];
+  if (!validResolutions?.includes(resolution)) {
+    res.status(400).json({ error: `resolution must be one of: ${validResolutions?.join(', ') ?? '480p, 720p'}`, code: 'INVALID_RESOLUTION' });
     return;
   }
 
@@ -109,7 +149,7 @@ function prepareCost(req: Request, res: Response, next: NextFunction): void {
   const cost = computeCostCredits({
     durationSeconds,
     resolution,
-    model: model as SupportedModel,
+    model: videoModel as SupportedModel,
     hasVideoReference: refVideos.length > 0,
   });
 
@@ -120,7 +160,8 @@ function prepareCost(req: Request, res: Response, next: NextFunction): void {
   req.body.cost_credits = cost;
   req._resolved = {
     prompt: finalPrompt,
-    model: model as SupportedModel,
+    model: videoModel,
+    mediaType: 'video',
     durationSeconds,
     resolution,
     aspectRatio: aspect_ratio ?? '16:9',
@@ -147,27 +188,35 @@ generationsRouter.post('/', promptModerationMiddleware, prepareCost, creditCheck
       model: resolved.model,
       status: 'pending',
       prompt: resolved.prompt,
-      params: {
-        resolution: resolved.resolution,
-        duration: resolved.durationSeconds,
-        aspect_ratio: resolved.aspectRatio,
-        audio_enabled: resolved.audioEnabled,
-        has_reference: ((resolved.referenceImages?.length ?? 0) + (resolved.referenceVideos?.length ?? 0)) > 0,
-        ref_upload_ids: resolved.refUploadIds ?? [],
-      },
+      params: resolved.mediaType === 'image'
+        ? { width: resolved.width, height: resolved.height }
+        : {
+            resolution: resolved.resolution,
+            duration: resolved.durationSeconds,
+            aspect_ratio: resolved.aspectRatio,
+            audio_enabled: resolved.audioEnabled,
+            has_reference: ((resolved.referenceImages?.length ?? 0) + (resolved.referenceVideos?.length ?? 0)) > 0,
+            ref_upload_ids: resolved.refUploadIds ?? [],
+          },
       cost_credits: resolved.cost,
+      media_type: resolved.mediaType,
     });
 
     const webhookUrl = `${config.publicBaseUrl}/webhooks/replicate`;
     const input: GenerationInput = {
       prompt: resolved.prompt,       // already has @Image1/@Video1 from prepareCost
       model: resolved.model,
+      mediaType: resolved.mediaType,
+      // Video-only fields
       durationSeconds: resolved.durationSeconds,
       resolution: resolved.resolution,
       aspectRatio: resolved.aspectRatio,
       audioEnabled: resolved.audioEnabled,
       referenceImages: resolved.referenceImages?.length ? resolved.referenceImages : undefined,
       referenceVideos: resolved.referenceVideos?.length ? resolved.referenceVideos : undefined,
+      // Image-only fields
+      width: resolved.width,
+      height: resolved.height,
     };
 
     let providerPredictionId: string;
@@ -175,7 +224,7 @@ generationsRouter.post('/', promptModerationMiddleware, prepareCost, creditCheck
       ({ providerPredictionId } = await provider.dispatch(input, webhookUrl));
     } catch (dispatchError) {
       console.error('[generations] Dispatch failed — refunding credits immediately:', dispatchError);
-      await markRefunded(generationId);
+      await markFailed(generationId);
       await refundCredits(req.user.dbUserId, resolved.cost, `dispatch-failure-${generationId}`);
       res.status(502).json({ error: 'Generation provider unavailable. Credits have been refunded.' });
       return;
