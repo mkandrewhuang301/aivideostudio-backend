@@ -8,9 +8,9 @@ import { generations } from '../db/schema';
 import { sql, desc, lt, eq, and, notInArray, or } from 'drizzle-orm';
 import type { GenerationStatus, NewGeneration } from '../db/schema';
 
-const CREDITS_PER_DOLLAR = 50; // mirrors SUBSCRIPTION_CREDITS/TOPUP_CREDITS scale in revenuecat.ts (500 credits ≈ $9.99)
+export const CREDITS_PER_DOLLAR = 50; // mirrors SUBSCRIPTION_CREDITS/TOPUP_CREDITS scale in revenuecat.ts (500 credits ≈ $9.99)
 
-const MODEL_RATES: Record<string, { nonVideoIn: Record<string, number>; videoIn: Record<string, number> }> = {
+export const MODEL_RATES: Record<string, { nonVideoIn: Record<string, number>; videoIn: Record<string, number> }> = {
   'bytedance/seedance-2.0-fast': {
     nonVideoIn: { '480p': 0.07, '720p': 0.15 },
     videoIn:    { '480p': 0.08, '720p': 0.17 },
@@ -19,6 +19,17 @@ const MODEL_RATES: Record<string, { nonVideoIn: Record<string, number>; videoIn:
     nonVideoIn: { '480p': 0.04, '720p': 0.09 },
     videoIn:    { '480p': 0.05, '720p': 0.11 },
   },
+  'bytedance/seedance-2.0': {
+    nonVideoIn: { '480p': 0.08, '720p': 0.18, '1080p': 0.45, '4k': 1.00 },
+    videoIn:    { '480p': 0.10, '720p': 0.22, '1080p': 0.55, '4k': 1.25 },
+  },
+};
+
+// Per-model supported resolutions — used for request validation in generations.ts
+export const MODEL_RESOLUTIONS: Record<string, readonly string[]> = {
+  'bytedance/seedance-2.0-fast': ['480p', '720p'],
+  'bytedance/seedance-2.0-mini': ['480p', '720p'],
+  'bytedance/seedance-2.0':      ['480p', '720p', '1080p', '4k'],
 };
 
 export function resolveDurationSeconds(requested: number | 'auto'): number {
@@ -32,12 +43,30 @@ export function resolveDurationSeconds(requested: number | 'auto'): number {
   return requested;
 }
 
-export const SUPPORTED_MODELS = ['bytedance/seedance-2.0-fast', 'bytedance/seedance-2.0-mini'] as const;
+export const SUPPORTED_MODELS = ['bytedance/seedance-2.0-fast', 'bytedance/seedance-2.0-mini', 'bytedance/seedance-2.0'] as const;
 export type SupportedModel = typeof SUPPORTED_MODELS[number];
+
+// Image model flat costs (credits per generation, not per-second)
+// Per 08-CONTEXT.md: flux-schnell=5, flux-dev=15
+export const IMAGE_MODEL_COSTS: Record<string, number> = {
+  'black-forest-labs/flux-schnell': 5,
+  'black-forest-labs/flux-dev': 15,
+};
+
+export const SUPPORTED_IMAGE_MODELS = [
+  'black-forest-labs/flux-schnell',
+  'black-forest-labs/flux-dev',
+] as const;
+export type SupportedImageModel = typeof SUPPORTED_IMAGE_MODELS[number];
+
+// Flat cost for image models — no duration involved (CLAUDE.md Rule 7 does not apply to images)
+export function computeImageCostCredits(model: string): number {
+  return IMAGE_MODEL_COSTS[model] ?? 0;
+}
 
 export function computeCostCredits(input: {
   durationSeconds: number;
-  resolution: '480p' | '720p';
+  resolution: '480p' | '720p' | '1080p' | '4k';
   model: SupportedModel;
   hasVideoReference?: boolean;
 }): number {
@@ -102,12 +131,12 @@ export async function markRefunded(generationId: string): Promise<boolean> {
 
 export async function getGenerationByPredictionId(
   predictionId: string,
-): Promise<{ id: string; user_id: string; status: GenerationStatus; cost_credits: number } | undefined> {
+): Promise<{ id: string; user_id: string; status: GenerationStatus; cost_credits: number; media_type: string } | undefined> {
   const result = await db.execute(sql`
-    SELECT id, user_id, status, cost_credits FROM generations WHERE replicate_prediction_id = ${predictionId}
+    SELECT id, user_id, status, cost_credits, media_type FROM generations WHERE replicate_prediction_id = ${predictionId}
   `);
   return result.rows?.[0] as
-    | { id: string; user_id: string; status: GenerationStatus; cost_credits: number }
+    | { id: string; user_id: string; status: GenerationStatus; cost_credits: number; media_type: string }
     | undefined;
 }
 

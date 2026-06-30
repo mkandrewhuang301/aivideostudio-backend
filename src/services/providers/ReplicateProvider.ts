@@ -10,17 +10,29 @@ const replicate = new Replicate({ auth: config.replicateApiToken });
 
 export class ReplicateProvider implements ModelProvider {
   async dispatch(input: GenerationInput, webhookUrl: string): Promise<DispatchResult> {
-    // Build Replicate input — only include reference arrays when non-empty (D-23, D-24).
-    // Prompt already has @Image1/@Video1 appended by prepareCost in generations.ts.
-    const replicateInput: Record<string, unknown> = {
-      prompt: input.prompt,
-      duration: input.durationSeconds,
-      resolution: input.resolution,
-      aspect_ratio: input.aspectRatio,
-      audio: input.audioEnabled,
-    };
-    if (input.referenceImages?.length) replicateInput.reference_images = input.referenceImages;
-    if (input.referenceVideos?.length) replicateInput.reference_videos = input.referenceVideos;
+    let replicateInput: Record<string, unknown>;
+
+    if (input.mediaType === 'image') {
+      // Image model input: prompt + dimensions only (no duration/resolution/aspect_ratio/audio)
+      replicateInput = {
+        prompt: input.prompt,
+        width: input.width ?? 1024,
+        height: input.height ?? 1024,
+      };
+    } else {
+      // Video model input: existing logic (CLAUDE.md Rule 7: durationSeconds never -1)
+      // Build Replicate input — only include reference arrays when non-empty (D-23, D-24).
+      // Prompt already has @Image1/@Video1 appended by prepareCost in generations.ts.
+      replicateInput = {
+        prompt: input.prompt,
+        duration: input.durationSeconds,
+        resolution: input.resolution,
+        aspect_ratio: input.aspectRatio,
+        audio: input.audioEnabled,
+      };
+      if (input.referenceImages?.length) replicateInput.reference_images = input.referenceImages;
+      if (input.referenceVideos?.length) replicateInput.reference_videos = input.referenceVideos;
+    }
 
     const prediction = await replicate.predictions.create({
       model: input.model as `${string}/${string}`,
