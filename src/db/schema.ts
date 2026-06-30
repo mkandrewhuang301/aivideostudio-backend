@@ -116,6 +116,7 @@ export const generations = pgTable(
     params: jsonb('params'), // {resolution, duration, aspect_ratio, audio_enabled, ref_asset_key}
     cost_credits: integer('cost_credits').notNull(),
     r2_key: text('r2_key'), // nullable until video archived to R2
+    media_type: text('media_type').notNull().default('video'), // 'video' | 'image'; validated at application layer (prepareCost middleware)
     created_at: timestamp('created_at', { withTimezone: true })
       .notNull()
       .default(sql`now()`),
