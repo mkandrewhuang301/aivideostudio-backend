@@ -19,10 +19,14 @@ const apnProvider = new apn.Provider({
  * Sends a "generation complete" push notification. Never throws — a push failure
  * (expired token, network error) must not block the caller's webhook completion logic.
  */
-export async function sendGenerationComplete(deviceToken: string, generationId: string): Promise<void> {
+export async function sendGenerationComplete(
+  deviceToken: string,
+  generationId: string,
+  mediaType: 'video' | 'image' = 'video',
+): Promise<void> {
   try {
     const notification = new apn.Notification();
-    notification.alert = 'Your video is ready!';
+    notification.alert = mediaType === 'image' ? 'Your image is ready!' : 'Your video is ready!';
     notification.payload = { generationId };
     notification.topic = config.apnsBundleId;
     await apnProvider.send(notification, deviceToken);

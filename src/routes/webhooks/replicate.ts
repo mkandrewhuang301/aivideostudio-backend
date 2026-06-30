@@ -14,6 +14,7 @@ import { scanForCsam } from '../../services/hiveService';
 import { getGenerationByPredictionId, markCompleted, markFailed, markQuarantined } from '../../services/generationService';
 import { refundCredits } from '../../services/creditService';
 import { sendGenerationComplete } from '../../services/apnsService';
+import { hiveScanQueue } from '../../queue/hiveScanWorker';
 import { db } from '../../db/client';
 import { sql } from 'drizzle-orm';
 
@@ -64,21 +65,42 @@ replicateWebhookRouter.post('/', async (req: Request, res: Response) => {
         return;
       }
 
+      // Determine content type from media_type (stored in DB during POST /api/generations).
+      // For images: detect from URL extension if possible, fallback to image/jpeg (default Flux output).
+      const mediaType = generation.media_type ?? 'video';
+      let contentType = 'video/mp4';
+      if (mediaType === 'image') {
+        if (outputUrl.includes('.webp')) contentType = 'image/webp';
+        else if (outputUrl.includes('.png')) contentType = 'image/png';
+        else contentType = 'image/jpeg';
+      }
+
       // CLAUDE.md Rule 2: archive FIRST, before any DB status write.
-      const r2Key = await archiveToR2(outputUrl, generation.id);
+      const r2Key = await archiveToR2(outputUrl, generation.id, contentType);
 
       // Hive CSAM scan — pass r2Key directly; hiveService generates a presigned URL internally.
-      // No public bucket required. Fails safe: errors quarantine rather than deliver unscanned content.
+      // On scan error: enqueue hiveScanWorker retry (up to ~60s) rather than immediately quarantining.
+      // On scan success with flagged content: quarantine immediately.
       let hiveFlagged = false;
+      let hiveScanErrored = false;
       try {
         const { flagged } = await scanForCsam(r2Key);
         hiveFlagged = flagged;
       } catch (hiveError) {
-        console.error('[webhook/replicate] Hive scan failed — quarantining as precaution:', hiveError);
-        hiveFlagged = true;
+        console.error('[webhook/replicate] Hive scan error — queuing retry:', hiveError);
+        hiveScanErrored = true;
       }
 
-      if (hiveFlagged) {
+      if (hiveScanErrored) {
+        // Video stays in 'processing'; hiveScanWorker delivers or fails+refunds within ~60s.
+        await hiveScanQueue.add('scan', {
+          generationId: generation.id,
+          r2Key,
+          userId: generation.user_id,
+          costCredits: generation.cost_credits,
+        });
+        console.log(`[webhook/replicate] Hive retry queued for generation ${generation.id}`);
+      } else if (hiveFlagged) {
         await markQuarantined(generation.id);
         await refundCredits(generation.user_id, generation.cost_credits, `csam-quarantine-${payload.id}`);
         console.warn(`[webhook/replicate] CSAM flagged: generation ${generation.id} quarantined, credits refunded.`);
@@ -90,7 +112,7 @@ replicateWebhookRouter.post('/', async (req: Request, res: Response) => {
           const userRows = await db.execute(sql`SELECT apns_device_token FROM users WHERE id = ${generation.user_id}::uuid`);
           const deviceToken = (userRows.rows?.[0] as { apns_device_token: string | null } | undefined)?.apns_device_token;
           if (deviceToken) {
-            await sendGenerationComplete(deviceToken, generation.id);
+            await sendGenerationComplete(deviceToken, generation.id, mediaType as 'video' | 'image');
           }
         } catch (pushError) {
           console.error('[webhook/replicate] Push notification failed (non-blocking):', pushError);

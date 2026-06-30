@@ -44,13 +44,21 @@ jest.mock('../../services/creditService', () => ({
 jest.mock('../../services/generationService', () => ({
   resolveDurationSeconds: jest.fn(),
   computeCostCredits: jest.fn(),
+  computeImageCostCredits: jest.fn(),
   createGeneration: jest.fn(),
   attachPredictionId: jest.fn(),
   markRefunded: jest.fn(),
+  markFailed: jest.fn(),
   listGenerations: jest.fn(),
   getGenerationById: jest.fn(),
   softDeleteGeneration: jest.fn(),
-  SUPPORTED_MODELS: ['bytedance/seedance-2.0-fast', 'bytedance/seedance-2.0-mini'],
+  SUPPORTED_MODELS: ['bytedance/seedance-2.0-fast', 'bytedance/seedance-2.0-mini', 'bytedance/seedance-2.0'],
+  MODEL_RESOLUTIONS: {
+    'bytedance/seedance-2.0-fast': ['480p', '720p'],
+    'bytedance/seedance-2.0-mini': ['480p', '720p'],
+    'bytedance/seedance-2.0':      ['480p', '720p', '1080p', '4k'],
+  },
+  SUPPORTED_IMAGE_MODELS: ['black-forest-labs/flux-schnell', 'black-forest-labs/flux-dev'],
 }));
 
 jest.mock('../../services/archivalService', () => ({
@@ -76,15 +84,18 @@ jest.mock('../../middleware/promptModeration', () => ({
 import express, { NextFunction, Request, Response } from 'express';
 import request from 'supertest';
 import { generationsRouter } from '../../routes/generations';
-import { deductCredits } from '../../services/creditService';
+import { deductCredits, refundCredits } from '../../services/creditService';
 import {
   resolveDurationSeconds,
   computeCostCredits,
+  computeImageCostCredits,
   createGeneration,
   attachPredictionId,
   listGenerations,
   getGenerationById,
   softDeleteGeneration,
+  markRefunded,
+  markFailed,
 } from '../../services/generationService';
 import { getGenerationPresignedUrl } from '../../services/archivalService';
 import { ReplicateProvider } from '../../services/providers/ReplicateProvider';
@@ -195,6 +206,84 @@ describe('POST /api/generations', () => {
     const dispatchInputArg = dispatchMock.mock.calls[0][0];
     expect(dispatchInputArg.durationSeconds).toBe(5);
     expect(dispatchInputArg.durationSeconds).not.toBe(-1);
+  });
+});
+
+// ─── POST /api/generations — image media_type ─────────────────────────────────
+
+describe('POST /api/generations — image media_type', () => {
+  const IMAGE_BODY = {
+    prompt: 'a watercolor painting of a fox',
+    media_type: 'image',
+    model: 'black-forest-labs/flux-schnell',
+  };
+
+  it('Test 1: image dispatch with flux-schnell succeeds and returns 200 with generation_id', async () => {
+    (computeImageCostCredits as jest.Mock).mockReturnValue(5);
+    (deductCredits as jest.Mock).mockResolvedValue(true);
+    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-img-1' });
+    dispatchMock.mockResolvedValue({ providerPredictionId: 'pred-img-1' });
+    (attachPredictionId as jest.Mock).mockResolvedValue(undefined);
+
+    const res = await request(app).post('/api/generations').send(IMAGE_BODY);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ generation_id: 'gen-img-1', status: 'processing' });
+
+    expect(createGeneration).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: 'pending',
+        cost_credits: 5,
+        media_type: 'image',
+        model: 'black-forest-labs/flux-schnell',
+      }),
+    );
+    expect(deductCredits).toHaveBeenCalledWith('test-user-id', 5);
+    expect(dispatchMock).toHaveBeenCalledTimes(1);
+    expect(dispatchMock.mock.calls[0][0]).toEqual(
+      expect.objectContaining({ mediaType: 'image', width: 1024, height: 1024 }),
+    );
+    expect(attachPredictionId).toHaveBeenCalledWith('gen-img-1', 'pred-img-1');
+  });
+
+  it('Test 2: image dispatch with unknown image model returns 400 INVALID_MODEL and never calls dispatch', async () => {
+    const res = await request(app)
+      .post('/api/generations')
+      .send({ ...IMAGE_BODY, model: 'stability-ai/sdxl' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_MODEL');
+    expect(dispatchMock).not.toHaveBeenCalled();
+    expect(createGeneration).not.toHaveBeenCalled();
+    expect(deductCredits).not.toHaveBeenCalled();
+  });
+
+  it('Test 3: image generation cost = 5 credits for flux-schnell via computeImageCostCredits', async () => {
+    (computeImageCostCredits as jest.Mock).mockReturnValue(5);
+    (deductCredits as jest.Mock).mockResolvedValue(true);
+    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-img-2' });
+    dispatchMock.mockResolvedValue({ providerPredictionId: 'pred-img-2' });
+    (attachPredictionId as jest.Mock).mockResolvedValue(undefined);
+
+    await request(app).post('/api/generations').send(IMAGE_BODY);
+
+    expect(computeImageCostCredits).toHaveBeenCalledWith('black-forest-labs/flux-schnell');
+    const createGenerationArg = (createGeneration as jest.Mock).mock.calls[0][0];
+    expect(createGenerationArg.cost_credits).toBe(5);
+  });
+
+  it('Test 4: insufficient credits for image generation returns 402 without dispatching', async () => {
+    (computeImageCostCredits as jest.Mock).mockReturnValue(15);
+    (deductCredits as jest.Mock).mockResolvedValue(false);
+
+    const res = await request(app)
+      .post('/api/generations')
+      .send({ ...IMAGE_BODY, model: 'black-forest-labs/flux-dev' });
+
+    expect(res.status).toBe(402);
+    expect(res.body.code).toBe('INSUFFICIENT_CREDITS');
+    expect(dispatchMock).not.toHaveBeenCalled();
+    expect(createGeneration).not.toHaveBeenCalled();
   });
 });
 
@@ -352,5 +441,154 @@ describe('DELETE /api/generations/:id', () => {
 
     expect(res.status).toBe(404);
     expect(res.body.error).toBe('Not found or not authorized');
+  });
+});
+
+// ─── Input validation (prepareCost middleware) ────────────────────────────────
+
+describe('POST /api/generations — input validation', () => {
+  it('returns 400 INVALID_PROMPT when prompt is missing', async () => {
+    const { prompt: _p, ...bodyWithoutPrompt } = VALID_BODY as Record<string, unknown>;
+    const res = await request(app).post('/api/generations').send(bodyWithoutPrompt);
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_PROMPT');
+    expect(deductCredits).not.toHaveBeenCalled();
+  });
+
+  it('returns 400 INVALID_PROMPT when prompt is an empty string', async () => {
+    const res = await request(app).post('/api/generations').send({ ...VALID_BODY, prompt: '' });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_PROMPT');
+    expect(deductCredits).not.toHaveBeenCalled();
+  });
+
+  it('returns 400 INVALID_PROMPT when prompt is a number (not a string)', async () => {
+    const res = await request(app).post('/api/generations').send({ ...VALID_BODY, prompt: 42 });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_PROMPT');
+    expect(deductCredits).not.toHaveBeenCalled();
+  });
+
+  it('returns 400 INVALID_MODEL when model is not in SUPPORTED_MODELS', async () => {
+    const res = await request(app)
+      .post('/api/generations')
+      .send({ ...VALID_BODY, model: 'openai/sora' });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_MODEL');
+    expect(deductCredits).not.toHaveBeenCalled();
+  });
+
+  it('returns 400 INVALID_RESOLUTION when resolution is not 480p or 720p', async () => {
+    const res = await request(app)
+      .post('/api/generations')
+      .send({ ...VALID_BODY, resolution: '1080p' });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_RESOLUTION');
+    expect(deductCredits).not.toHaveBeenCalled();
+  });
+
+  it('returns 400 INVALID_RESOLUTION when resolution is missing', async () => {
+    const { resolution: _r, ...bodyWithoutResolution } = VALID_BODY as Record<string, unknown>;
+    const res = await request(app).post('/api/generations').send(bodyWithoutResolution);
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_RESOLUTION');
+    expect(deductCredits).not.toHaveBeenCalled();
+  });
+});
+
+// ─── Dispatch failure path ────────────────────────────────────────────────────
+
+describe('POST /api/generations — dispatch failure', () => {
+  it('returns 502 and refunds credits immediately when provider.dispatch throws', async () => {
+    (resolveDurationSeconds as jest.Mock).mockReturnValue(8);
+    (computeCostCredits as jest.Mock).mockReturnValue(60);
+    (deductCredits as jest.Mock).mockResolvedValue(true);
+    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-dispatch-fail' });
+    dispatchMock.mockRejectedValue(new Error('Replicate unreachable'));
+    (markFailed as jest.Mock).mockResolvedValue(true);
+    (refundCredits as jest.Mock).mockResolvedValue(undefined);
+
+    const res = await request(app).post('/api/generations').send(VALID_BODY);
+
+    expect(res.status).toBe(502);
+    expect(markFailed).toHaveBeenCalledWith('gen-dispatch-fail');
+    expect(markRefunded).not.toHaveBeenCalled();
+    expect(refundCredits).toHaveBeenCalledWith(
+      'test-user-id',
+      60,
+      'dispatch-failure-gen-dispatch-fail',
+    );
+    expect(attachPredictionId).not.toHaveBeenCalled();
+  });
+});
+
+// ─── Reference token auto-append (D-23, D-24) ────────────────────────────────
+
+describe('POST /api/generations — reference token auto-append', () => {
+  beforeEach(() => {
+    (resolveDurationSeconds as jest.Mock).mockReturnValue(5);
+    (computeCostCredits as jest.Mock).mockReturnValue(38);
+    (deductCredits as jest.Mock).mockResolvedValue(true);
+    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-ref-test' });
+    dispatchMock.mockResolvedValue({ providerPredictionId: 'pred-ref' });
+    (attachPredictionId as jest.Mock).mockResolvedValue(undefined);
+  });
+
+  it('appends @Image1 to prompt when reference_images provided and token absent', async () => {
+    const res = await request(app)
+      .post('/api/generations')
+      .send({ ...VALID_BODY, reference_images: ['https://r2.example.com/img.jpg'] });
+
+    expect(res.status).toBe(200);
+    const genArg = (createGeneration as jest.Mock).mock.calls[0][0];
+    expect(genArg.prompt).toContain('@Image1');
+    expect(dispatchMock.mock.calls[0][0].referenceImages).toEqual(['https://r2.example.com/img.jpg']);
+  });
+
+  it('does NOT double-append @Image1 when it is already in the prompt', async () => {
+    await request(app)
+      .post('/api/generations')
+      .send({
+        ...VALID_BODY,
+        prompt: 'a scene with @Image1 in foreground',
+        reference_images: ['https://r2.example.com/img.jpg'],
+      });
+
+    const genArg = (createGeneration as jest.Mock).mock.calls[0][0];
+    const count = (genArg.prompt.match(/@Image1/g) || []).length;
+    expect(count).toBe(1);
+  });
+
+  it('appends @Video1 to prompt when reference_videos provided and token absent', async () => {
+    const res = await request(app)
+      .post('/api/generations')
+      .send({ ...VALID_BODY, reference_videos: ['https://r2.example.com/vid.mp4'] });
+
+    expect(res.status).toBe(200);
+    const genArg = (createGeneration as jest.Mock).mock.calls[0][0];
+    expect(genArg.prompt).toContain('@Video1');
+    expect(dispatchMock.mock.calls[0][0].referenceVideos).toEqual(['https://r2.example.com/vid.mp4']);
+  });
+
+  it('passes hasVideoReference=true to computeCostCredits when reference_videos present — prevents cost gaming (T-07-04-03)', async () => {
+    await request(app)
+      .post('/api/generations')
+      .send({ ...VALID_BODY, reference_videos: ['https://r2.example.com/vid.mp4'] });
+
+    expect(computeCostCredits).toHaveBeenCalledWith(
+      expect.objectContaining({ hasVideoReference: true }),
+    );
+  });
+
+  it('strips non-string entries from reference_images (null/undefined/number filtering)', async () => {
+    await request(app)
+      .post('/api/generations')
+      .send({
+        ...VALID_BODY,
+        reference_images: [null, 'https://r2.example.com/img.jpg', undefined, 42],
+      });
+
+    // Only the valid string URL passes through to dispatch
+    expect(dispatchMock.mock.calls[0][0].referenceImages).toEqual(['https://r2.example.com/img.jpg']);
   });
 });

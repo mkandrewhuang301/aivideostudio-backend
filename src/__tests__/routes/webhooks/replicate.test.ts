@@ -35,6 +35,11 @@ jest.mock('replicate', () => ({
   validateWebhook: jest.fn(),
 }));
 
+const mockHiveScanQueueAdd = jest.fn();
+jest.mock('../../../queue/hiveScanWorker', () => ({
+  hiveScanQueue: { add: mockHiveScanQueueAdd },
+}));
+
 jest.mock('../../../services/archivalService', () => ({
   archiveToR2: jest.fn(),
 }));
@@ -131,14 +136,50 @@ describe('replicateWebhookRouter', () => {
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ received: true });
-    expect(archiveToR2).toHaveBeenCalledWith('https://replicate.delivery/abc.mp4', 'gen-1');
+    expect(archiveToR2).toHaveBeenCalledWith('https://replicate.delivery/abc.mp4', 'gen-1', 'video/mp4');
     expect(markCompleted).toHaveBeenCalledWith('gen-1', 'generations/gen-1.mp4');
 
     const archiveOrder = (archiveToR2 as jest.Mock).mock.invocationCallOrder[0];
     const completeOrder = (markCompleted as jest.Mock).mock.invocationCallOrder[0];
     expect(archiveOrder).toBeLessThan(completeOrder);
 
-    expect(sendGenerationComplete).toHaveBeenCalledWith('device-token-1', 'gen-1');
+    expect(sendGenerationComplete).toHaveBeenCalledWith('device-token-1', 'gen-1', 'video');
+  });
+
+  it('archives an image generation with image/jpeg content-type and sends image push copy', async () => {
+    (validateWebhook as jest.Mock).mockResolvedValue(true);
+    (getGenerationByPredictionId as jest.Mock).mockResolvedValue({
+      id: 'gen-img-1',
+      user_id: 'u1',
+      status: 'processing',
+      cost_credits: 5,
+      media_type: 'image',
+    });
+    (archiveToR2 as jest.Mock).mockResolvedValue('generations/gen-img-1.jpg');
+
+    const res = await post({ id: 'pred_img_1', status: 'succeeded', output: ['https://replicate.delivery/flux-out.bin'] });
+
+    expect(res.status).toBe(200);
+    expect(archiveToR2).toHaveBeenCalledWith('https://replicate.delivery/flux-out.bin', 'gen-img-1', 'image/jpeg');
+    expect(markCompleted).toHaveBeenCalledWith('gen-img-1', 'generations/gen-img-1.jpg');
+    expect(sendGenerationComplete).toHaveBeenCalledWith('device-token-1', 'gen-img-1', 'image');
+  });
+
+  it('archives an image generation with image/webp content-type when output URL has .webp extension', async () => {
+    (validateWebhook as jest.Mock).mockResolvedValue(true);
+    (getGenerationByPredictionId as jest.Mock).mockResolvedValue({
+      id: 'gen-img-2',
+      user_id: 'u1',
+      status: 'processing',
+      cost_credits: 15,
+      media_type: 'image',
+    });
+    (archiveToR2 as jest.Mock).mockResolvedValue('generations/gen-img-2.webp');
+
+    const res = await post({ id: 'pred_img_2', status: 'succeeded', output: ['https://replicate.delivery/flux-out.webp'] });
+
+    expect(res.status).toBe(200);
+    expect(archiveToR2).toHaveBeenCalledWith('https://replicate.delivery/flux-out.webp', 'gen-img-2', 'image/webp');
   });
 
   it('returns 200 with duplicate:true and skips all side effects for an already-completed generation', async () => {
@@ -210,7 +251,7 @@ describe('replicateWebhookRouter', () => {
     expect(sendGenerationComplete).not.toHaveBeenCalled();
   });
 
-  it('quarantines and refunds when Hive throws — fail-safe, never delivers unscanned content', async () => {
+  it('queues hiveScanWorker retry when Hive errors — never quarantines or delivers immediately', async () => {
     (validateWebhook as jest.Mock).mockResolvedValue(true);
     (getGenerationByPredictionId as jest.Mock).mockResolvedValue({
       id: 'gen-1',
@@ -223,10 +264,15 @@ describe('replicateWebhookRouter', () => {
     const res = await post({ id: 'pred_err', status: 'succeeded', output: ['https://replicate.delivery/video.mp4'] });
 
     expect(res.status).toBe(200);
-    expect(markQuarantined).toHaveBeenCalledWith('gen-1');
-    expect(refundCredits).toHaveBeenCalledWith('u1', 45, 'csam-quarantine-pred_err');
+    expect(mockHiveScanQueueAdd).toHaveBeenCalledWith('scan', {
+      generationId: 'gen-1',
+      r2Key: 'generations/gen-1.mp4',
+      userId: 'u1',
+      costCredits: 45,
+    });
+    expect(markQuarantined).not.toHaveBeenCalled();
     expect(markCompleted).not.toHaveBeenCalled();
-    expect(sendGenerationComplete).not.toHaveBeenCalled();
+    expect(refundCredits).not.toHaveBeenCalled();
   });
 
   it('returns 200 with duplicate:true when status is already quarantined', async () => {
