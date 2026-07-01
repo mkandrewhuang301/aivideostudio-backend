@@ -314,7 +314,9 @@ generationsRouter.post('/', promptModerationMiddleware, prepareCost, creditCheck
       media_type: resolved.mediaType,
     });
 
-    const webhookUrl = `${config.publicBaseUrl.trim().replace(/^["']|["']$/g, '')}/webhooks/replicate`;
+    const baseUrl = config.publicBaseUrl.trim().replace(/^["']|["']$/g, '');
+    const normalizedBase = baseUrl.startsWith('http') ? baseUrl : `https://${baseUrl}`;
+    const webhookUrl = `${normalizedBase}/webhooks/replicate`;
     console.log(`[generations] webhookUrl="${webhookUrl}"`);
     const input: GenerationInput = {
       prompt: resolved.prompt,
