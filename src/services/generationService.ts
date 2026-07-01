@@ -11,10 +11,6 @@ import type { GenerationStatus, NewGeneration } from '../db/schema';
 export const CREDITS_PER_DOLLAR = 50; // mirrors SUBSCRIPTION_CREDITS/TOPUP_CREDITS scale in revenuecat.ts (500 credits ≈ $9.99)
 
 export const MODEL_RATES: Record<string, { nonVideoIn: Record<string, number>; videoIn: Record<string, number> }> = {
-  'bytedance/seedance-2.0-fast': {
-    nonVideoIn: { '480p': 0.07, '720p': 0.15 },
-    videoIn:    { '480p': 0.08, '720p': 0.17 },
-  },
   'bytedance/seedance-2.0-mini': {
     nonVideoIn: { '480p': 0.04, '720p': 0.09 },
     videoIn:    { '480p': 0.05, '720p': 0.11 },
@@ -27,7 +23,6 @@ export const MODEL_RATES: Record<string, { nonVideoIn: Record<string, number>; v
 
 // Per-model supported resolutions — used for request validation in generations.ts
 export const MODEL_RESOLUTIONS: Record<string, readonly string[]> = {
-  'bytedance/seedance-2.0-fast': ['480p', '720p'],
   'bytedance/seedance-2.0-mini': ['480p', '720p'],
   'bytedance/seedance-2.0':      ['480p', '720p', '1080p', '4k'],
 };
@@ -43,7 +38,7 @@ export function resolveDurationSeconds(requested: number | 'auto'): number {
   return requested;
 }
 
-export const SUPPORTED_MODELS = ['bytedance/seedance-2.0-fast', 'bytedance/seedance-2.0-mini', 'bytedance/seedance-2.0'] as const;
+export const SUPPORTED_MODELS = ['bytedance/seedance-2.0-mini', 'bytedance/seedance-2.0'] as const;
 export type SupportedModel = typeof SUPPORTED_MODELS[number];
 
 // Image model flat costs (credits per generation, not per-second). 1 credit = 1¢.
@@ -63,6 +58,58 @@ export type SupportedImageModel = typeof SUPPORTED_IMAGE_MODELS[number];
 // Flat cost for image models — no duration involved (CLAUDE.md Rule 7 does not apply to images)
 export function computeImageCostCredits(model: string): number {
   return IMAGE_MODEL_COSTS[model] ?? 0;
+}
+
+// ─── DreamActor M2.0 (avatar) ─────────────────────────────────────────────────
+// $0.05/sec of output video — flat rate, no resolution tiers.
+// Inputs: image (portrait) + video (driving). No text prompt. Output: single video URL.
+// Source: https://replicate.com/bytedance/dreamactor-m2.0 pricing (2026-07-01)
+
+export const DREAMACTOR_RATE = 0.05; // $/sec
+
+export const SUPPORTED_AVATAR_MODELS = ['bytedance/dreamactor-m2.0'] as const;
+export type SupportedAvatarModel = typeof SUPPORTED_AVATAR_MODELS[number];
+
+export function computeDreamActorCost(estimatedDurationSeconds: number): number {
+  return Math.ceil(estimatedDurationSeconds * DREAMACTOR_RATE * CREDITS_PER_DOLLAR);
+}
+
+// ─── ByteDance Video Upscaler ─────────────────────────────────────────────────
+// Tiered pricing: Standard/Pro × resolution × fps band (≤30 / >30).
+// 'pro' tier is Replicate-allowlist-only — default to 'standard' server-side.
+// Source: BytePlus per-minute pricing converted to per-second (2026-07-01).
+
+export const VIDEO_UPSCALER_RATES: Record<
+  'standard' | 'pro',
+  Record<string, { lte30: number; gt30: number }>
+> = {
+  standard: {
+    '720p':  { lte30: 3.443 / 1000,  gt30: 6.887 / 1000 },
+    '1080p': { lte30: 6.887 / 1000,  gt30: 0.013773 },
+    '2k':    { lte30: 0.013773,       gt30: 0.027548 },
+    '4k':    { lte30: 0.027548,       gt30: 0.055097 },
+  },
+  pro: {
+    '720p':  { lte30: 0.034435,  gt30: 0.068870 },
+    '1080p': { lte30: 0.068870,  gt30: 0.137742 },
+    '2k':    { lte30: 0.137742,  gt30: 0.275482 },
+    '4k':    { lte30: 0.275482,  gt30: 0.550965 },
+  },
+};
+
+export const SUPPORTED_UPSCALER_MODELS = ['bytedance/video-upscaler'] as const;
+export type SupportedUpscalerModel = typeof SUPPORTED_UPSCALER_MODELS[number];
+
+export function computeUpscalerCost(
+  estimatedDurationSeconds: number,
+  tier: 'standard' | 'pro' = 'standard',
+  targetResolution = '720p',
+  targetFps = 30,
+): number {
+  const tierRates = VIDEO_UPSCALER_RATES[tier] ?? VIDEO_UPSCALER_RATES.standard;
+  const resRates = tierRates[targetResolution] ?? tierRates['720p'];
+  const rate = targetFps > 30 ? resRates.gt30 : resRates.lte30;
+  return Math.ceil(estimatedDurationSeconds * rate * CREDITS_PER_DOLLAR);
 }
 
 export function computeCostCredits(input: {

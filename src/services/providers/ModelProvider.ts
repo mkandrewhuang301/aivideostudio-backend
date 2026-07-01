@@ -5,17 +5,27 @@
 export interface GenerationInput {
   prompt: string;
   model: string;
-  mediaType?: 'video' | 'image';        // routing flag for provider dispatch; defaults to 'video' when absent
-  // Video-specific (undefined for image generations)
+  mediaType?: 'video' | 'image' | 'avatar' | 'upscale';
+  // Video-specific (undefined for image/avatar/upscale generations)
   durationSeconds?: number;              // NEVER -1 when present (CLAUDE.md Rule 7)
   resolution?: '480p' | '720p' | '1080p' | '4k';
   aspectRatio?: string;
   audioEnabled?: boolean;
   referenceImages?: string[];            // presigned R2 URLs; @Image1 auto-appended to prompt (D-23)
   referenceVideos?: string[];            // presigned R2 URLs; @Video1 auto-appended to prompt (D-24)
-  // Image-specific (undefined for video generations)
-  width?: number;                        // e.g. 1024 — Flux models accept width/height directly
-  height?: number;                       // e.g. 1024
+  // Image-specific (undefined for video/avatar/upscale generations)
+  width?: number;
+  height?: number;
+  // Avatar-specific — DreamActor M2.0 (bytedance/dreamactor-m2.0)
+  avatarImage?: string;        // presigned URL — portrait source image
+  avatarDrivingVideo?: string; // presigned URL — motion/expression driver video
+  cutFirstSecond?: boolean;    // trim 1s lead-in transition; Replicate default is true
+  // Upscale-specific — ByteDance Video Upscaler (bytedance/video-upscaler)
+  upscalerInputVideo?: string;         // presigned URL — video to upscale
+  upscalerTier?: 'standard' | 'pro';  // 'pro' requires Replicate allowlist; always 'standard' until enabled
+  upscalerScene?: 'aigc' | 'short_series' | 'ugc' | 'old_film' | 'common';
+  upscalerTargetResolution?: string;   // '720p' | '1080p' | '2k' | '4k'
+  upscalerTargetFps?: 24 | 30 | 60 | 120;
 }
 
 export interface DispatchResult {

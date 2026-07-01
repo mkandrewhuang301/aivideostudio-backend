@@ -11,10 +11,12 @@ import { replicateWebhookRouter } from './routes/webhooks/replicate';
 import { generationsRouter } from './routes/generations';
 import { scheduleReaper } from './queue/reaperWorker';
 import { scheduleYearlyGrant } from './queue/yearlyGrantWorker';
+import './queue/hiveScanWorker';
 import { banCheckMiddleware } from './middleware/banCheck';
 import { reportsRouter } from './routes/reports';
 import { uploadsRouter } from './routes/uploads';
 import { privacyRouter } from './routes/privacy';
+import { ratesRouter } from './routes/rates';
 
 // Eagerly initialize Firebase Admin at startup — prevents double-init on concurrent requests
 getFirebaseAdmin();
@@ -50,6 +52,7 @@ app.use('/api/reports', reportsRouter);
 app.use('/api/uploads', uploadsRouter);
 
 app.use('/privacy', privacyRouter);
+app.use('/rates', ratesRouter);
 
 app.listen(config.port, () => {
   console.log(`[server] listening on port ${config.port} (${config.nodeEnv})`);

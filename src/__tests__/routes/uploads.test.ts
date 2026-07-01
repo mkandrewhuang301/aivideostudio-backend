@@ -37,12 +37,23 @@ jest.mock('@aws-sdk/s3-request-presigner', () => ({
   getSignedUrl: jest.fn().mockResolvedValue('https://r2.example.com/uploads/presigned-url'),
 }));
 
+// db/client must be mocked — neon() throws at module eval with a non-postgres URL
+jest.mock('../../db/client', () => ({
+  db: {
+    execute: jest.fn(),
+    insert: jest.fn(),
+    select: jest.fn(),
+  },
+}));
+
 import express, { NextFunction, Request, Response } from 'express';
 import request from 'supertest';
 import { uploadsRouter } from '../../routes/uploads';
 import { r2 } from '../../storage/r2';
+import { db } from '../../db/client';
 
 const r2Mock = r2 as unknown as { send: jest.Mock };
+const dbMock = db as unknown as { insert: jest.Mock; select: jest.Mock; execute: jest.Mock };
 
 const app = express();
 
@@ -58,12 +69,35 @@ app.use('/api/uploads', uploadsRouter);
 const unauthApp = express();
 unauthApp.use('/api/uploads', uploadsRouter);
 
+function makeSelectChain(rows: unknown[] = []) {
+  const chain = {
+    from: jest.fn(),
+    where: jest.fn(),
+    orderBy: jest.fn(),
+    limit: jest.fn().mockResolvedValue(rows),
+  };
+  chain.from.mockReturnValue(chain);
+  chain.where.mockReturnValue(chain);
+  chain.orderBy.mockReturnValue(chain);
+  return chain;
+}
+
 beforeEach(() => {
   jest.clearAllMocks();
   (require('@aws-sdk/s3-request-presigner').getSignedUrl as jest.Mock).mockResolvedValue(
     'https://r2.example.com/uploads/presigned-url',
   );
   r2Mock.send.mockResolvedValue({});
+
+  // Default db insert chain: resolves to a row with id
+  dbMock.insert.mockReturnValue({
+    values: jest.fn().mockReturnValue({
+      returning: jest.fn().mockResolvedValue([{ id: 'upload-row-id' }]),
+    }),
+  });
+
+  // Default db select chain: returns empty list
+  dbMock.select.mockReturnValue(makeSelectChain([]));
 });
 
 describe('POST /api/uploads', () => {
@@ -154,5 +188,137 @@ describe('POST /api/uploads', () => {
     expect(putCommand.input.Key).toMatch(/^uploads\/test-db-user-id\/[0-9a-f-]{36}\.png$/);
     expect(putCommand.input.Bucket).toBe('test-bucket');
     expect(putCommand.input.ContentType).toBe('image/png');
+  });
+});
+
+// ─── POST /api/uploads — DB integration ───────────────────────────────────────
+
+describe('POST /api/uploads — DB integration', () => {
+  it('returns the inserted db row id in the response body', async () => {
+    dbMock.insert.mockReturnValue({
+      values: jest.fn().mockReturnValue({
+        returning: jest.fn().mockResolvedValue([{ id: 'specific-upload-id' }]),
+      }),
+    });
+
+    const res = await request(app)
+      .post('/api/uploads')
+      .attach('file', Buffer.from('fake-jpeg'), { filename: 'test.jpg', contentType: 'image/jpeg' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.id).toBe('specific-upload-id');
+    expect(res.body.url).toBe('https://r2.example.com/uploads/presigned-url');
+  });
+
+  it('inserts the upload record with correct user_id, r2_key pattern, and mime_type', async () => {
+    const valuesFn = jest.fn().mockReturnValue({
+      returning: jest.fn().mockResolvedValue([{ id: 'upload-new' }]),
+    });
+    dbMock.insert.mockReturnValue({ values: valuesFn });
+
+    await request(app)
+      .post('/api/uploads')
+      .attach('file', Buffer.from('fake-jpg'), { filename: 'photo.jpg', contentType: 'image/jpeg' });
+
+    expect(valuesFn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        user_id: 'test-db-user-id',
+        mime_type: 'image/jpeg',
+        r2_key: expect.stringMatching(/^uploads\/test-db-user-id\/[0-9a-f-]{36}\.jpg$/),
+      }),
+    );
+  });
+
+  it('returns 500 and does not expose db error when db.insert throws', async () => {
+    dbMock.insert.mockReturnValue({
+      values: jest.fn().mockReturnValue({
+        returning: jest.fn().mockRejectedValue(new Error('DB connection lost')),
+      }),
+    });
+
+    const res = await request(app)
+      .post('/api/uploads')
+      .attach('file', Buffer.from('fake-jpg'), { filename: 'test.jpg', contentType: 'image/jpeg' });
+
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe('Failed to upload file');
+    expect(JSON.stringify(res.body)).not.toContain('DB connection lost');
+  });
+
+  it('returns null id gracefully when db returns an empty array', async () => {
+    dbMock.insert.mockReturnValue({
+      values: jest.fn().mockReturnValue({
+        returning: jest.fn().mockResolvedValue([]),
+      }),
+    });
+
+    const res = await request(app)
+      .post('/api/uploads')
+      .attach('file', Buffer.from('fake-png'), { filename: 'test.png', contentType: 'image/png' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.id).toBeNull();
+    expect(res.body.url).toBe('https://r2.example.com/uploads/presigned-url');
+  });
+});
+
+// ─── GET /api/uploads ─────────────────────────────────────────────────────────
+
+describe('GET /api/uploads', () => {
+  it('returns 401 when there is no authenticated user', async () => {
+    const res = await request(unauthApp).get('/api/uploads');
+    expect(res.status).toBe(401);
+  });
+
+  it('returns 200 with empty uploads array when the user has no uploads', async () => {
+    dbMock.select.mockReturnValue(makeSelectChain([]));
+
+    const res = await request(app).get('/api/uploads');
+
+    expect(res.status).toBe(200);
+    expect(res.body.uploads).toEqual([]);
+  });
+
+  it('returns uploads list with fresh presigned URLs for each row', async () => {
+    dbMock.select.mockReturnValue(
+      makeSelectChain([
+        { id: 'upload-1', r2_key: 'uploads/user/uuid1.jpg', mime_type: 'image/jpeg', created_at: new Date('2026-06-01') },
+        { id: 'upload-2', r2_key: 'uploads/user/uuid2.mp4', mime_type: 'video/mp4', created_at: new Date('2026-06-02') },
+      ]),
+    );
+
+    const res = await request(app).get('/api/uploads');
+
+    expect(res.status).toBe(200);
+    expect(res.body.uploads).toHaveLength(2);
+    expect(res.body.uploads[0].url).toBe('https://r2.example.com/uploads/presigned-url');
+    expect(res.body.uploads[0].id).toBe('upload-1');
+    expect(res.body.uploads[0].mime_type).toBe('image/jpeg');
+    expect(res.body.uploads[1].id).toBe('upload-2');
+    // getSignedUrl called once per row
+    const { getSignedUrl } = require('@aws-sdk/s3-request-presigner') as { getSignedUrl: jest.Mock };
+    expect(getSignedUrl).toHaveBeenCalledTimes(2);
+  });
+
+  it('returns 500 and does not expose db error when db.select throws', async () => {
+    const errChain = makeSelectChain([]);
+    errChain.limit.mockRejectedValue(new Error('Neon timeout'));
+    dbMock.select.mockReturnValue(errChain);
+
+    const res = await request(app).get('/api/uploads');
+
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe('Failed to list uploads');
+    expect(JSON.stringify(res.body)).not.toContain('Neon timeout');
+  });
+
+  it('scopes the query to the authenticated user (IDOR: does not return other users uploads)', async () => {
+    const chain = makeSelectChain([]);
+    dbMock.select.mockReturnValue(chain);
+
+    await request(app).get('/api/uploads');
+
+    // The where() call must have been made (user scoping happens in where clause)
+    expect(chain.where).toHaveBeenCalledTimes(1);
   });
 });

@@ -3,7 +3,7 @@
 // credit costs client-side without hardcoding values in the app bundle.
 
 import { Router } from 'express';
-import { MODEL_RATES, CREDITS_PER_DOLLAR, IMAGE_MODEL_COSTS } from '../services/generationService';
+import { MODEL_RATES, CREDITS_PER_DOLLAR, IMAGE_MODEL_COSTS, DREAMACTOR_RATE, VIDEO_UPSCALER_RATES } from '../services/generationService';
 
 export const ratesRouter = Router();
 
@@ -17,6 +17,22 @@ ratesRouter.get('/', (_req, res) => {
       videoIn:    Object.fromEntries(Object.entries(sets.videoIn).map(([res, r]) => [res, r * CREDITS_PER_DOLLAR])),
     };
   }
-  // imageCosts: flat credits per image generation (no per-second math needed)
-  res.json({ rates: creditRates, imageCosts: IMAGE_MODEL_COSTS });
+  // dreamactorRate: credits per second (flat, no resolution tiers)
+  const dreamactorCreditRate = DREAMACTOR_RATE * CREDITS_PER_DOLLAR;
+
+  // upscalerRates: same matrix as VIDEO_UPSCALER_RATES but in credits/sec
+  const upscalerCreditRates: typeof VIDEO_UPSCALER_RATES = {
+    standard: Object.fromEntries(
+      Object.entries(VIDEO_UPSCALER_RATES.standard).map(([res, bands]) => [
+        res, { lte30: bands.lte30 * CREDITS_PER_DOLLAR, gt30: bands.gt30 * CREDITS_PER_DOLLAR },
+      ]),
+    ) as typeof VIDEO_UPSCALER_RATES['standard'],
+    pro: Object.fromEntries(
+      Object.entries(VIDEO_UPSCALER_RATES.pro).map(([res, bands]) => [
+        res, { lte30: bands.lte30 * CREDITS_PER_DOLLAR, gt30: bands.gt30 * CREDITS_PER_DOLLAR },
+      ]),
+    ) as typeof VIDEO_UPSCALER_RATES['pro'],
+  };
+
+  res.json({ rates: creditRates, imageCosts: IMAGE_MODEL_COSTS, dreamactorRate: dreamactorCreditRate, upscalerRates: upscalerCreditRates });
 });

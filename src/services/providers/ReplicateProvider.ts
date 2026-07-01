@@ -13,20 +13,34 @@ export class ReplicateProvider implements ModelProvider {
     let replicateInput: Record<string, unknown>;
 
     if (input.mediaType === 'image') {
-      // Image model input: prompt + dimensions only (no duration/resolution/aspect_ratio/audio)
+      // Image model input: prompt + dimensions only
       replicateInput = {
         prompt: input.prompt,
         width: input.width ?? 1024,
         height: input.height ?? 1024,
       };
-      // GPT Image 2 requires quality param; default to high (users don't pick quality)
       if (input.model === 'openai/gpt-image-2') {
         replicateInput.quality = 'high';
       }
+    } else if (input.mediaType === 'avatar') {
+      // DreamActor M2.0: portrait image + driving video — no text prompt
+      replicateInput = {
+        image: input.avatarImage,
+        video: input.avatarDrivingVideo,
+        ...(input.cutFirstSecond !== undefined ? { cut_first_second: input.cutFirstSecond } : {}),
+      };
+    } else if (input.mediaType === 'upscale') {
+      // ByteDance Video Upscaler: input video + optional quality params
+      // 'pro' tier is Replicate-allowlist-only; always 'standard' unless explicitly set
+      replicateInput = {
+        video: input.upscalerInputVideo,
+        ...(input.upscalerTier ? { processing_type: input.upscalerTier } : {}),
+        ...(input.upscalerScene ? { scene: input.upscalerScene } : {}),
+        ...(input.upscalerTargetResolution ? { target_resolution: input.upscalerTargetResolution } : {}),
+        ...(input.upscalerTargetFps ? { target_fps: input.upscalerTargetFps } : {}),
+      };
     } else {
-      // Video model input: existing logic (CLAUDE.md Rule 7: durationSeconds never -1)
-      // Build Replicate input — only include reference arrays when non-empty (D-23, D-24).
-      // Prompt already has @Image1/@Video1 appended by prepareCost in generations.ts.
+      // Video model input (CLAUDE.md Rule 7: durationSeconds never -1)
       replicateInput = {
         prompt: input.prompt,
         duration: input.durationSeconds,

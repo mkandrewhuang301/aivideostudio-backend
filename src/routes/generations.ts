@@ -11,6 +11,8 @@ import {
   resolveDurationSeconds,
   computeCostCredits,
   computeImageCostCredits,
+  computeDreamActorCost,
+  computeUpscalerCost,
   createGeneration,
   attachPredictionId,
   listGenerations,
@@ -19,6 +21,8 @@ import {
   SUPPORTED_MODELS,
   MODEL_RESOLUTIONS,
   SUPPORTED_IMAGE_MODELS,
+  SUPPORTED_AVATAR_MODELS,
+  SUPPORTED_UPSCALER_MODELS,
   type SupportedModel,
 } from '../services/generationService';
 import { ReplicateProvider } from '../services/providers/ReplicateProvider';
@@ -37,20 +41,30 @@ const provider = new ReplicateProvider();
 
 interface ResolvedGenerationRequest {
   prompt: string;
-  model: string;                  // covers both video (SupportedModel) and image (SupportedImageModel) IDs
-  mediaType: 'video' | 'image';
-  // Video-only (undefined for image)
+  model: string;
+  mediaType: 'video' | 'image' | 'avatar' | 'upscale';
+  // Video-only
   durationSeconds?: number;
   resolution?: '480p' | '720p' | '1080p' | '4k';
   aspectRatio?: string;
   audioEnabled?: boolean;
-  // Image-only (undefined for video)
+  referenceImages?: string[];
+  referenceVideos?: string[];
+  refUploadIds?: string[];
+  // Image-only
   width?: number;
   height?: number;
+  // Avatar-only (DreamActor M2.0)
+  avatarImage?: string;
+  avatarDrivingVideo?: string;
+  cutFirstSecond?: boolean;
+  // Upscale-only (ByteDance Video Upscaler)
+  upscalerInputVideo?: string;
+  upscalerTier?: 'standard' | 'pro';
+  upscalerScene?: string;
+  upscalerTargetResolution?: string;
+  upscalerTargetFps?: number;
   cost: number;
-  referenceImages?: string[];     // GEN-02: image reference URLs for Replicate dispatch
-  referenceVideos?: string[];     // GEN-03: video reference URLs for Replicate dispatch
-  refUploadIds?: string[];        // upload IDs to store in params for remix/regen
 }
 
 declare global {
@@ -79,10 +93,89 @@ function prepareCost(req: Request, res: Response, next: NextFunction): void {
     // image-specific
     width,
     height,
+    // avatar-specific (DreamActor M2.0)
+    avatar_image,
+    avatar_driving_video,
+    cut_first_second,
+    // upscale-specific (ByteDance Video Upscaler)
+    source_video_url,
+    processing_type,
+    scene,
+    target_resolution,
+    target_fps,
+    // shared for avatar + upscale billing (duration not known upfront)
+    estimated_duration_seconds,
   } = req.body ?? {};
 
   if (!prompt || typeof prompt !== 'string') {
     res.status(400).json({ error: 'prompt is required', code: 'INVALID_PROMPT' });
+    return;
+  }
+
+  if (media_type === 'avatar') {
+    const avatarModel = model ?? 'bytedance/dreamactor-m2.0';
+    if (!(SUPPORTED_AVATAR_MODELS as readonly string[]).includes(avatarModel)) {
+      res.status(400).json({ error: `model must be one of: ${SUPPORTED_AVATAR_MODELS.join(', ')}`, code: 'INVALID_MODEL' });
+      return;
+    }
+    if (!avatar_image || typeof avatar_image !== 'string') {
+      res.status(400).json({ error: 'avatar_image (presigned URL) is required', code: 'INVALID_INPUT' });
+      return;
+    }
+    if (!avatar_driving_video || typeof avatar_driving_video !== 'string') {
+      res.status(400).json({ error: 'avatar_driving_video (presigned URL) is required', code: 'INVALID_INPUT' });
+      return;
+    }
+    const estimatedDuration = typeof estimated_duration_seconds === 'number' && estimated_duration_seconds > 0
+      ? estimated_duration_seconds : 5;
+    const cost = computeDreamActorCost(estimatedDuration);
+    req.body.cost_credits = cost;
+    req._resolved = {
+      prompt: '',
+      model: avatarModel,
+      mediaType: 'avatar',
+      durationSeconds: estimatedDuration,
+      avatarImage: avatar_image as string,
+      avatarDrivingVideo: avatar_driving_video as string,
+      cutFirstSecond: cut_first_second !== false,
+      cost,
+    };
+    next();
+    return;
+  }
+
+  if (media_type === 'upscale') {
+    const upscalerModel = model ?? 'bytedance/video-upscaler';
+    if (!(SUPPORTED_UPSCALER_MODELS as readonly string[]).includes(upscalerModel)) {
+      res.status(400).json({ error: `model must be one of: ${SUPPORTED_UPSCALER_MODELS.join(', ')}`, code: 'INVALID_MODEL' });
+      return;
+    }
+    if (!source_video_url || typeof source_video_url !== 'string') {
+      res.status(400).json({ error: 'source_video_url (presigned URL of video to upscale) is required', code: 'INVALID_INPUT' });
+      return;
+    }
+    const estimatedDuration = typeof estimated_duration_seconds === 'number' && estimated_duration_seconds > 0
+      ? estimated_duration_seconds : 5;
+    // Pro tier is Replicate-allowlist-only — always clamp to 'standard' server-side
+    const tier: 'standard' | 'pro' = 'standard';
+    const targetRes = typeof target_resolution === 'string' ? target_resolution : '720p';
+    const targetFpsNum = typeof target_fps === 'number' ? target_fps : 30;
+    const upscalerScene = typeof scene === 'string' ? scene : 'aigc';
+    const cost = computeUpscalerCost(estimatedDuration, tier, targetRes, targetFpsNum);
+    req.body.cost_credits = cost;
+    req._resolved = {
+      prompt: '',
+      model: upscalerModel,
+      mediaType: 'upscale',
+      durationSeconds: estimatedDuration,
+      upscalerInputVideo: source_video_url as string,
+      upscalerTier: tier,
+      upscalerScene: upscalerScene,
+      upscalerTargetResolution: targetRes,
+      upscalerTargetFps: targetFpsNum,
+      cost,
+    };
+    next();
     return;
   }
 
@@ -139,11 +232,18 @@ function prepareCost(req: Request, res: Response, next: NextFunction): void {
     ? reference_videos.filter((u: unknown) => typeof u === 'string')
     : [];
 
-  // Auto-append @Image1/@Video1 to prompt — MANDATORY per CLAUDE.md + CONTEXT.md (D-23, D-24).
-  // Replicate ignores reference arrays if the corresponding token is absent from prompt text.
+  // Auto-append [ImageN]/[VideoN] tokens — Seedance 2.0 uses bracket notation per Replicate docs.
+  // Replicate ignores reference arrays if the corresponding token is absent from the prompt.
+  // Client inserts tokens directly; this fallback covers regen/remix flows that pre-date client-side tokens.
   let finalPrompt = prompt as string;
-  if (refImages.length > 0 && !finalPrompt.includes('@Image1')) finalPrompt += ' @Image1';
-  if (refVideos.length > 0 && !finalPrompt.includes('@Video1')) finalPrompt += ' @Video1';
+  for (let i = 0; i < refImages.length; i++) {
+    const token = `[Image${i + 1}]`;
+    if (!finalPrompt.includes(token)) finalPrompt += ` ${token}`;
+  }
+  for (let i = 0; i < refVideos.length; i++) {
+    const token = `[Video${i + 1}]`;
+    if (!finalPrompt.includes(token)) finalPrompt += ` ${token}`;
+  }
 
   // Use videoIn rate when video references are present (GEN-03, T-07-04-03: flag is set server-side)
   const cost = computeCostCredits({
@@ -183,13 +283,13 @@ generationsRouter.post('/', promptModerationMiddleware, prepareCost, creditCheck
   const resolved = req._resolved as ResolvedGenerationRequest;
 
   try {
-    const { id: generationId } = await createGeneration({
-      user_id: req.user.dbUserId,
-      model: resolved.model,
-      status: 'pending',
-      prompt: resolved.prompt,
-      params: resolved.mediaType === 'image'
+    const params =
+      resolved.mediaType === 'image'
         ? { width: resolved.width, height: resolved.height }
+        : resolved.mediaType === 'avatar'
+        ? { avatar_image: resolved.avatarImage, avatar_driving_video: resolved.avatarDrivingVideo, estimated_duration: resolved.durationSeconds }
+        : resolved.mediaType === 'upscale'
+        ? { source_video_url: resolved.upscalerInputVideo, processing_type: resolved.upscalerTier, scene: resolved.upscalerScene, target_resolution: resolved.upscalerTargetResolution, target_fps: resolved.upscalerTargetFps, estimated_duration: resolved.durationSeconds }
         : {
             resolution: resolved.resolution,
             duration: resolved.durationSeconds,
@@ -197,26 +297,43 @@ generationsRouter.post('/', promptModerationMiddleware, prepareCost, creditCheck
             audio_enabled: resolved.audioEnabled,
             has_reference: ((resolved.referenceImages?.length ?? 0) + (resolved.referenceVideos?.length ?? 0)) > 0,
             ref_upload_ids: resolved.refUploadIds ?? [],
-          },
+          };
+
+    const { id: generationId } = await createGeneration({
+      user_id: req.user.dbUserId,
+      model: resolved.model,
+      status: 'pending',
+      prompt: resolved.prompt || null,
+      params,
       cost_credits: resolved.cost,
       media_type: resolved.mediaType,
     });
 
     const webhookUrl = `${config.publicBaseUrl}/webhooks/replicate`;
     const input: GenerationInput = {
-      prompt: resolved.prompt,       // already has @Image1/@Video1 from prepareCost
+      prompt: resolved.prompt,
       model: resolved.model,
       mediaType: resolved.mediaType,
-      // Video-only fields
+      // Video-only
       durationSeconds: resolved.durationSeconds,
       resolution: resolved.resolution,
       aspectRatio: resolved.aspectRatio,
       audioEnabled: resolved.audioEnabled,
       referenceImages: resolved.referenceImages?.length ? resolved.referenceImages : undefined,
       referenceVideos: resolved.referenceVideos?.length ? resolved.referenceVideos : undefined,
-      // Image-only fields
+      // Image-only
       width: resolved.width,
       height: resolved.height,
+      // Avatar-only
+      avatarImage: resolved.avatarImage,
+      avatarDrivingVideo: resolved.avatarDrivingVideo,
+      cutFirstSecond: resolved.cutFirstSecond,
+      // Upscale-only
+      upscalerInputVideo: resolved.upscalerInputVideo,
+      upscalerTier: resolved.upscalerTier,
+      upscalerScene: resolved.upscalerScene as GenerationInput['upscalerScene'],
+      upscalerTargetResolution: resolved.upscalerTargetResolution,
+      upscalerTargetFps: resolved.upscalerTargetFps as GenerationInput['upscalerTargetFps'],
     };
 
     let providerPredictionId: string;
