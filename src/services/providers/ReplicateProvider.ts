@@ -19,6 +19,10 @@ export class ReplicateProvider implements ModelProvider {
         width: input.width ?? 1024,
         height: input.height ?? 1024,
       };
+      // GPT Image 2 requires quality param; default to high (users don't pick quality)
+      if (input.model === 'openai/gpt-image-2') {
+        replicateInput.quality = 'high';
+      }
     } else {
       // Video model input: existing logic (CLAUDE.md Rule 7: durationSeconds never -1)
       // Build Replicate input — only include reference arrays when non-empty (D-23, D-24).

@@ -46,16 +46,17 @@ export function resolveDurationSeconds(requested: number | 'auto'): number {
 export const SUPPORTED_MODELS = ['bytedance/seedance-2.0-fast', 'bytedance/seedance-2.0-mini', 'bytedance/seedance-2.0'] as const;
 export type SupportedModel = typeof SUPPORTED_MODELS[number];
 
-// Image model flat costs (credits per generation, not per-second)
-// Per 08-CONTEXT.md: flux-schnell=5, flux-dev=15
+// Image model flat costs (credits per generation, not per-second). 1 credit = 1¢.
 export const IMAGE_MODEL_COSTS: Record<string, number> = {
-  'black-forest-labs/flux-schnell': 5,
-  'black-forest-labs/flux-dev': 15,
+  'bytedance/seedream-5-lite': 4,
+  'bytedance/seedream-4.5': 4,
+  'openai/gpt-image-2': 13,
 };
 
 export const SUPPORTED_IMAGE_MODELS = [
-  'black-forest-labs/flux-schnell',
-  'black-forest-labs/flux-dev',
+  'bytedance/seedream-5-lite',
+  'bytedance/seedream-4.5',
+  'openai/gpt-image-2',
 ] as const;
 export type SupportedImageModel = typeof SUPPORTED_IMAGE_MODELS[number];
 
