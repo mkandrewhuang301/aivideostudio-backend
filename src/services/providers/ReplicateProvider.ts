@@ -13,14 +13,16 @@ export class ReplicateProvider implements ModelProvider {
     let replicateInput: Record<string, unknown>;
 
     if (input.mediaType === 'image') {
-      // Image model input: prompt + dimensions only
-      replicateInput = {
-        prompt: input.prompt,
-        width: input.width ?? 1024,
-        height: input.height ?? 1024,
-      };
+      const ar = input.imageAspectRatio ?? '1:1';
       if (input.model === 'openai/gpt-image-2') {
-        replicateInput.quality = 'high';
+        // GPT Image 2 only accepts "1:1", "3:2", "2:3"
+        const landscape = ['4:3', '16:9', '3:2', '21:9'].includes(ar);
+        const portrait  = ['3:4', '9:16', '2:3'].includes(ar);
+        const gptAr = landscape ? '3:2' : portrait ? '2:3' : '1:1';
+        replicateInput = { prompt: input.prompt, aspect_ratio: gptAr, quality: 'high' };
+      } else {
+        // Seedream 5 Lite + Seedream 4.5: use size + aspect_ratio
+        replicateInput = { prompt: input.prompt, aspect_ratio: ar, size: '2K' };
       }
     } else if (input.mediaType === 'avatar') {
       // DreamActor M2.0: portrait image + driving video — no text prompt

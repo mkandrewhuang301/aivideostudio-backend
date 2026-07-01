@@ -44,7 +44,7 @@ export type SupportedModel = typeof SUPPORTED_MODELS[number];
 // Image model flat costs (credits per generation, not per-second). 1 credit = 1¢.
 export const IMAGE_MODEL_COSTS: Record<string, number> = {
   'bytedance/seedream-5-lite': 4,
-  'bytedance/seedream-4.5': 4,
+  'bytedance/seedream-4.5': 5,
   'openai/gpt-image-2': 13,
 };
 

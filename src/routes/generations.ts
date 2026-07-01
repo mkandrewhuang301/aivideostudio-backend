@@ -52,8 +52,7 @@ interface ResolvedGenerationRequest {
   referenceVideos?: string[];
   refUploadIds?: string[];
   // Image-only
-  width?: number;
-  height?: number;
+  imageAspectRatio?: string;
   // Avatar-only (DreamActor M2.0)
   avatarImage?: string;
   avatarDrivingVideo?: string;
@@ -91,8 +90,7 @@ function prepareCost(req: Request, res: Response, next: NextFunction): void {
     reference_videos,
     reference_upload_ids,
     // image-specific
-    width,
-    height,
+    image_aspect_ratio,
     // avatar-specific (DreamActor M2.0)
     avatar_image,
     avatar_driving_video,
@@ -186,8 +184,7 @@ function prepareCost(req: Request, res: Response, next: NextFunction): void {
       res.status(400).json({ error: `model must be one of: ${SUPPORTED_IMAGE_MODELS.join(', ')}`, code: 'INVALID_MODEL' });
       return;
     }
-    const imageWidth = typeof width === 'number' && width > 0 ? width : 1024;
-    const imageHeight = typeof height === 'number' && height > 0 ? height : 1024;
+    const imageAspectRatio = typeof image_aspect_ratio === 'string' ? image_aspect_ratio : '1:1';
     const cost = computeImageCostCredits(imageModel);
 
     req.body.cost_credits = cost;
@@ -195,8 +192,7 @@ function prepareCost(req: Request, res: Response, next: NextFunction): void {
       prompt: prompt as string,
       model: imageModel,
       mediaType: 'image',
-      width: imageWidth,
-      height: imageHeight,
+      imageAspectRatio,
       cost,
     };
     next();
@@ -285,7 +281,7 @@ generationsRouter.post('/', promptModerationMiddleware, prepareCost, creditCheck
   try {
     const params =
       resolved.mediaType === 'image'
-        ? { width: resolved.width, height: resolved.height }
+        ? { aspect_ratio: resolved.imageAspectRatio ?? '1:1' }
         : resolved.mediaType === 'avatar'
         ? { avatar_image: resolved.avatarImage, avatar_driving_video: resolved.avatarDrivingVideo, estimated_duration: resolved.durationSeconds }
         : resolved.mediaType === 'upscale'
@@ -322,8 +318,7 @@ generationsRouter.post('/', promptModerationMiddleware, prepareCost, creditCheck
       referenceImages: resolved.referenceImages?.length ? resolved.referenceImages : undefined,
       referenceVideos: resolved.referenceVideos?.length ? resolved.referenceVideos : undefined,
       // Image-only
-      width: resolved.width,
-      height: resolved.height,
+      imageAspectRatio: resolved.imageAspectRatio,
       // Avatar-only
       avatarImage: resolved.avatarImage,
       avatarDrivingVideo: resolved.avatarDrivingVideo,

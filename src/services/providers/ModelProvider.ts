@@ -14,8 +14,7 @@ export interface GenerationInput {
   referenceImages?: string[];            // presigned R2 URLs; @Image1 auto-appended to prompt (D-23)
   referenceVideos?: string[];            // presigned R2 URLs; @Video1 auto-appended to prompt (D-24)
   // Image-specific (undefined for video/avatar/upscale generations)
-  width?: number;
-  height?: number;
+  imageAspectRatio?: string;  // e.g. "1:1" | "4:3" | "3:4" | "16:9" | "9:16"
   // Avatar-specific — DreamActor M2.0 (bytedance/dreamactor-m2.0)
   avatarImage?: string;        // presigned URL — portrait source image
   avatarDrivingVideo?: string; // presigned URL — motion/expression driver video
