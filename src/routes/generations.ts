@@ -27,13 +27,13 @@ import {
 } from '../services/generationService';
 import { ReplicateProvider } from '../services/providers/ReplicateProvider';
 import { refundCredits } from '../services/creditService';
-import { markRefunded, markFailed } from '../services/generationService';
+import { markFailed } from '../services/generationService';
 import { getGenerationPresignedUrl, getUploadPresignedUrl } from '../services/archivalService';
 import { config } from '../config';
 import type { GenerationInput } from '../services/providers/ModelProvider';
 import { db } from '../db/client';
 import { referenceUploads } from '../db/schema';
-import { eq, inArray } from 'drizzle-orm';
+import { eq, inArray, sql } from 'drizzle-orm';
 
 export const generationsRouter = Router();
 
@@ -184,7 +184,10 @@ function prepareCost(req: Request, res: Response, next: NextFunction): void {
       res.status(400).json({ error: `model must be one of: ${SUPPORTED_IMAGE_MODELS.join(', ')}`, code: 'INVALID_MODEL' });
       return;
     }
-    const imageAspectRatio = typeof image_aspect_ratio === 'string' ? image_aspect_ratio : '1:1';
+    const VALID_IMAGE_ASPECT_RATIOS = ['1:1', '3:4', '4:3', '9:16', '16:9', '2:3', '3:2'];
+    const imageAspectRatio = typeof image_aspect_ratio === 'string' && VALID_IMAGE_ASPECT_RATIOS.includes(image_aspect_ratio)
+      ? image_aspect_ratio
+      : '1:1';
     const cost = computeImageCostCredits(imageModel);
 
     req.body.cost_credits = cost;
@@ -209,6 +212,12 @@ function prepareCost(req: Request, res: Response, next: NextFunction): void {
   const validResolutions = MODEL_RESOLUTIONS[videoModel];
   if (!validResolutions?.includes(resolution)) {
     res.status(400).json({ error: `resolution must be one of: ${validResolutions?.join(', ') ?? '480p, 720p'}`, code: 'INVALID_RESOLUTION' });
+    return;
+  }
+
+  const VALID_VIDEO_ASPECT_RATIOS = ['16:9', '9:16', '1:1', '4:3', '3:4'];
+  if (aspect_ratio !== undefined && !VALID_VIDEO_ASPECT_RATIOS.includes(aspect_ratio)) {
+    res.status(400).json({ error: `aspect_ratio must be one of: ${VALID_VIDEO_ASPECT_RATIOS.join(', ')}`, code: 'INVALID_ASPECT_RATIO' });
     return;
   }
 
@@ -305,7 +314,8 @@ generationsRouter.post('/', promptModerationMiddleware, prepareCost, creditCheck
       media_type: resolved.mediaType,
     });
 
-    const webhookUrl = `${config.publicBaseUrl}/webhooks/replicate`;
+    const webhookUrl = `${config.publicBaseUrl.trim().replace(/^["']|["']$/g, '')}/webhooks/replicate`;
+    console.log(`[generations] webhookUrl="${webhookUrl}"`);
     const input: GenerationInput = {
       prompt: resolved.prompt,
       model: resolved.model,
@@ -335,10 +345,16 @@ generationsRouter.post('/', promptModerationMiddleware, prepareCost, creditCheck
     try {
       ({ providerPredictionId } = await provider.dispatch(input, webhookUrl));
     } catch (dispatchError) {
-      console.error('[generations] Dispatch failed — refunding credits immediately:', dispatchError);
+      const errMsg = dispatchError instanceof Error ? dispatchError.message : String(dispatchError);
+      const isRateLimit = errMsg.includes('429') || errMsg.toLowerCase().includes('throttled');
+      console.error(`[generations] Dispatch failed (model=${resolved.model}): ${errMsg}`);
       await markFailed(generationId);
       await refundCredits(req.user.dbUserId, resolved.cost, `dispatch-failure-${generationId}`);
-      res.status(502).json({ error: 'Generation provider unavailable. Credits have been refunded.' });
+      res.status(502).json({
+        error: isRateLimit
+          ? 'Generation service is busy. Please try again in a moment. Credits have been refunded.'
+          : 'Generation provider unavailable. Credits have been refunded.',
+      });
       return;
     }
 
