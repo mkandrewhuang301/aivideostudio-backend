@@ -10,6 +10,7 @@ import { revenueCatWebhookRouter } from './routes/webhooks/revenuecat';
 import { replicateWebhookRouter } from './routes/webhooks/replicate';
 import { generationsRouter } from './routes/generations';
 import { scheduleReaper } from './queue/reaperWorker';
+import { scheduleUploadReaper } from './queue/uploadReaperWorker';
 import { scheduleYearlyGrant } from './queue/yearlyGrantWorker';
 import './queue/hiveScanWorker';
 import { banCheckMiddleware } from './middleware/banCheck';
@@ -24,6 +25,7 @@ getFirebaseAdmin();
 // Schedule the BullMQ reaper once at startup (Redis persists the repeat schedule across restarts;
 // jobId: 'reaper-singleton' inside scheduleReaper() prevents duplicate schedules on redeploy).
 scheduleReaper().catch((err) => console.error('[server] Failed to schedule reaper:', err));
+scheduleUploadReaper().catch((err) => console.error('[server] Failed to schedule upload reaper:', err));
 scheduleYearlyGrant().catch((err) => console.error('[server] Failed to schedule yearly grant:', err));
 
 // Hive CSAM scanning defaults on; HIVE_SCAN_ENABLED=false disables it deliberately.
