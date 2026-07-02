@@ -8,21 +8,74 @@
 
 import { Router, Request, Response } from 'express';
 import { validateWebhook } from 'replicate';
-import { config } from '../../config';
-import { archiveToR2 } from '../../services/archivalService';
+import { config, getReplicateWebhookUrl } from '../../config';
+import { archiveToR2, getUploadPresignedUrl } from '../../services/archivalService';
 import { scanForCsam } from '../../services/hiveService';
-import { classifyFailureReason, getGenerationByPredictionId, markCompleted, markFailed, markQuarantined } from '../../services/generationService';
+import {
+  classifyFailureReason,
+  getGenerationByPredictionId,
+  isTransientProviderError,
+  markCompleted,
+  markFailed,
+  markQuarantined,
+  reattachForRetry,
+  SUPPORTED_MODELS,
+  type GenerationByPredictionRow,
+} from '../../services/generationService';
 import { refundCredits } from '../../services/creditService';
 import { sendGenerationComplete } from '../../services/apnsService';
 import { hiveScanQueue } from '../../queue/hiveScanWorker';
 import { db } from '../../db/client';
-import { sql } from 'drizzle-orm';
+import { referenceUploads } from '../../db/schema';
+import { sql, inArray } from 'drizzle-orm';
+import { ReplicateProvider } from '../../services/providers/ReplicateProvider';
+import type { GenerationInput } from '../../services/providers/ModelProvider';
 
 export const replicateWebhookRouter = Router();
+
+const provider = new ReplicateProvider();
 
 async function fetchDeviceToken(userId: string): Promise<string | null> {
   const userRows = await db.execute(sql`SELECT apns_device_token FROM users WHERE id = ${userId}::uuid`);
   return (userRows.rows?.[0] as { apns_device_token: string | null } | undefined)?.apns_device_token ?? null;
+}
+
+// Reconstructs the same GenerationInput the original dispatch used, from the generation row's
+// stored model/prompt/params — with FRESH presigned URLs for any reference uploads (the original
+// presigned URLs are 1-hour TTL and may be stale/expired by the time a retry dispatches).
+async function buildRetryInput(generation: GenerationByPredictionRow): Promise<GenerationInput> {
+  const params = (generation.params ?? {}) as Record<string, unknown>;
+  const refUploadIds: string[] = Array.isArray(params.ref_upload_ids) ? (params.ref_upload_ids as string[]) : [];
+
+  let referenceImages: string[] | undefined;
+  let referenceVideos: string[] | undefined;
+  if (refUploadIds.length > 0) {
+    const rows = await db.select().from(referenceUploads).where(inArray(referenceUploads.id, refUploadIds));
+    const byId = new Map(rows.map((r) => [r.id, r]));
+    const images: string[] = [];
+    const videos: string[] = [];
+    for (const id of refUploadIds) {
+      const row = byId.get(id);
+      if (!row) continue;
+      const url = await getUploadPresignedUrl(row.r2_key);
+      if (row.mime_type.startsWith('video/')) videos.push(url);
+      else images.push(url);
+    }
+    referenceImages = images.length > 0 ? images : undefined;
+    referenceVideos = videos.length > 0 ? videos : undefined;
+  }
+
+  return {
+    prompt: generation.prompt ?? '',
+    model: generation.model,
+    mediaType: 'video',
+    durationSeconds: params.duration as number,
+    resolution: params.resolution as GenerationInput['resolution'],
+    aspectRatio: params.aspect_ratio as string,
+    audioEnabled: Boolean(params.audio_enabled),
+    referenceImages,
+    referenceVideos,
+  };
 }
 
 replicateWebhookRouter.post('/', async (req: Request, res: Response) => {
@@ -133,7 +186,36 @@ replicateWebhookRouter.post('/', async (req: Request, res: Response) => {
 
       console.log(`[webhook/replicate] succeeded: generation ${generation.id} archived to ${r2Key}`);
     } else if (payload.status === 'failed' || payload.status === 'canceled') {
-      const reason = classifyFailureReason(payload.error);
+      const isTransient = payload.status === 'failed' && isTransientProviderError(payload.error);
+      const isRetryable =
+        generation.media_type === 'video' &&
+        (SUPPORTED_MODELS as readonly string[]).includes(generation.model) &&
+        generation.retry_count < 1;
+
+      if (isTransient && isRetryable) {
+        try {
+          const retryInput = await buildRetryInput(generation);
+          const { providerPredictionId } = await provider.dispatch(retryInput, getReplicateWebhookUrl());
+          const reattached = await reattachForRetry(generation.id, providerPredictionId);
+          if (reattached) {
+            console.log(`[webhook/replicate] Transient failure retried: generation ${generation.id} redispatched as ${providerPredictionId}`);
+            res.status(200).json({ received: true, retried: true });
+            return;
+          }
+          // Guard didn't match (already retried or no longer processing) — another handler beat
+          // us to it; treat as a duplicate rather than risk a second refund.
+          res.status(200).json({ received: true, duplicate: true });
+          return;
+        } catch (retryError) {
+          console.error(`[webhook/replicate] Retry dispatch failed for generation ${generation.id}:`, retryError);
+          await markFailed(generation.id, 'provider_error');
+          await refundCredits(generation.user_id, generation.cost_credits, payload.id);
+          res.status(200).json({ received: true });
+          return;
+        }
+      }
+
+      const reason = isTransient ? 'provider_error' : classifyFailureReason(payload.error);
       await markFailed(generation.id, reason);
       await refundCredits(generation.user_id, generation.cost_credits, payload.id);
       console.log(`[webhook/replicate] ${payload.status} (${reason}): refunded ${generation.cost_credits} credits to user ${generation.user_id}`);

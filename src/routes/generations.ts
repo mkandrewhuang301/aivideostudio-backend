@@ -31,7 +31,7 @@ import { ReplicateProvider } from '../services/providers/ReplicateProvider';
 import { refundCredits } from '../services/creditService';
 import { classifyFailureReason, markFailed } from '../services/generationService';
 import { getGenerationPresignedUrl, getUploadPresignedUrl } from '../services/archivalService';
-import { config } from '../config';
+import { getReplicateWebhookUrl } from '../config';
 import type { GenerationInput } from '../services/providers/ModelProvider';
 import { db } from '../db/client';
 import { referenceUploads } from '../db/schema';
@@ -374,9 +374,7 @@ generationsRouter.post('/', promptModerationMiddleware, prepareCost, creditCheck
       media_type: resolved.mediaType,
     });
 
-    const baseUrl = config.publicBaseUrl.trim().replace(/^["']|["']$/g, '');
-    const normalizedBase = baseUrl.startsWith('http') ? baseUrl : `https://${baseUrl}`;
-    const webhookUrl = `${normalizedBase}/webhooks/replicate`;
+    const webhookUrl = getReplicateWebhookUrl();
     console.log(`[generations] webhookUrl="${webhookUrl}"`);
     const input: GenerationInput = {
       prompt: resolved.prompt,

@@ -30,6 +30,7 @@ jest.mock('../../../config', () => ({
     port: 3000,
     nodeEnv: 'test',
   },
+  getReplicateWebhookUrl: jest.fn(() => 'https://mock.example.com/webhooks/replicate'),
 }));
 
 jest.mock('replicate', () => ({
@@ -43,6 +44,7 @@ jest.mock('../../../queue/hiveScanWorker', () => ({
 
 jest.mock('../../../services/archivalService', () => ({
   archiveToR2: jest.fn(),
+  getUploadPresignedUrl: jest.fn(),
 }));
 
 jest.mock('../../../services/generationService', () => ({
@@ -50,7 +52,10 @@ jest.mock('../../../services/generationService', () => ({
   markCompleted: jest.fn(),
   markFailed: jest.fn(),
   markQuarantined: jest.fn(),
+  reattachForRetry: jest.fn(),
+  isTransientProviderError: jest.requireActual('../../../services/generationService').isTransientProviderError,
   classifyFailureReason: jest.requireActual('../../../services/generationService').classifyFailureReason,
+  SUPPORTED_MODELS: jest.requireActual('../../../services/generationService').SUPPORTED_MODELS,
 }));
 
 jest.mock('../../../services/hiveService', () => ({
@@ -65,9 +70,16 @@ jest.mock('../../../services/apnsService', () => ({
   sendGenerationComplete: jest.fn(),
 }));
 
+jest.mock('../../../services/providers/ReplicateProvider', () => ({
+  ReplicateProvider: jest.fn().mockImplementation(() => ({
+    dispatch: jest.fn(),
+  })),
+}));
+
 jest.mock('../../../db/client', () => ({
   db: {
     execute: jest.fn(),
+    select: jest.fn(() => ({ from: jest.fn(() => ({ where: jest.fn().mockResolvedValue([]) })) })),
   },
 }));
 
@@ -75,12 +87,17 @@ import express from 'express';
 import request from 'supertest';
 import { validateWebhook } from 'replicate';
 import { archiveToR2 } from '../../../services/archivalService';
-import { getGenerationByPredictionId, markCompleted, markFailed, markQuarantined } from '../../../services/generationService';
+import { getGenerationByPredictionId, markCompleted, markFailed, markQuarantined, reattachForRetry } from '../../../services/generationService';
 import { scanForCsam } from '../../../services/hiveService';
 import { refundCredits } from '../../../services/creditService';
 import { sendGenerationComplete } from '../../../services/apnsService';
+import { ReplicateProvider } from '../../../services/providers/ReplicateProvider';
 import { db } from '../../../db/client';
 import { replicateWebhookRouter } from '../../../routes/webhooks/replicate';
+
+const MockedReplicateProvider = ReplicateProvider as jest.MockedClass<typeof ReplicateProvider>;
+const providerInstance = MockedReplicateProvider.mock.results[0]?.value as { dispatch: jest.Mock };
+const dispatchMock = providerInstance.dispatch;
 
 const app = express();
 app.use(express.raw({ type: 'application/json' }));
@@ -110,6 +127,8 @@ beforeEach(() => {
   (markQuarantined as jest.Mock).mockResolvedValue(true);
   (refundCredits as jest.Mock).mockResolvedValue(undefined);
   (sendGenerationComplete as jest.Mock).mockResolvedValue(undefined);
+  (reattachForRetry as jest.Mock).mockResolvedValue(true);
+  dispatchMock.mockResolvedValue({ providerPredictionId: 'pred_retry_1' });
 });
 
 describe('replicateWebhookRouter', () => {
@@ -336,5 +355,64 @@ describe('replicateWebhookRouter', () => {
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ received: true, skipped: 'generation_not_found' });
     expect(archiveToR2).not.toHaveBeenCalled();
+  });
+
+  describe('transient-failure auto-retry', () => {
+    const retryableGeneration = {
+      id: 'gen-retry-1',
+      user_id: 'u1',
+      status: 'processing',
+      cost_credits: 27,
+      media_type: 'video',
+      model: 'bytedance/seedance-2.0-mini',
+      prompt: 'animate this',
+      params: { duration: 6, resolution: '720p', aspect_ratio: '9:16', audio_enabled: true, ref_upload_ids: [] },
+      retry_count: 0,
+    };
+
+    it('redispatches once on a transient ReadError and does not refund or mark failed', async () => {
+      (validateWebhook as jest.Mock).mockResolvedValue(true);
+      (getGenerationByPredictionId as jest.Mock).mockResolvedValue(retryableGeneration);
+
+      const res = await post({ id: 'pred_transient_1', status: 'failed', error: 'Prediction failed: Async prediction failed: ReadError:' });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ received: true, retried: true });
+      expect(dispatchMock).toHaveBeenCalledTimes(1);
+      expect(dispatchMock.mock.calls[0][0]).toMatchObject({ model: 'bytedance/seedance-2.0-mini', prompt: 'animate this' });
+      expect(reattachForRetry).toHaveBeenCalledWith('gen-retry-1', 'pred_retry_1');
+      expect(markFailed).not.toHaveBeenCalled();
+      expect(refundCredits).not.toHaveBeenCalled();
+    });
+
+    it('marks failed as provider_error and refunds exactly once when retry_count is already 1', async () => {
+      (validateWebhook as jest.Mock).mockResolvedValue(true);
+      (getGenerationByPredictionId as jest.Mock).mockResolvedValue({ ...retryableGeneration, retry_count: 1 });
+
+      const res = await post({ id: 'pred_transient_2', status: 'failed', error: 'Prediction failed: Async prediction failed: ReadError:' });
+
+      expect(res.status).toBe(200);
+      expect(dispatchMock).not.toHaveBeenCalled();
+      expect(markFailed).toHaveBeenCalledTimes(1);
+      expect(markFailed).toHaveBeenCalledWith('gen-retry-1', 'provider_error');
+      expect(refundCredits).toHaveBeenCalledTimes(1);
+      expect(refundCredits).toHaveBeenCalledWith('u1', 27, 'pred_transient_2');
+    });
+
+    it('does not retry a copyright failure even on a retryable model', async () => {
+      (validateWebhook as jest.Mock).mockResolvedValue(true);
+      (getGenerationByPredictionId as jest.Mock).mockResolvedValue(retryableGeneration);
+
+      const res = await post({
+        id: 'pred_copyright_1',
+        status: 'failed',
+        error: 'The request failed because the output video may be related to copyright restrictions.',
+      });
+
+      expect(res.status).toBe(200);
+      expect(dispatchMock).not.toHaveBeenCalled();
+      expect(markFailed).toHaveBeenCalledWith('gen-retry-1', 'copyright');
+      expect(refundCredits).toHaveBeenCalledWith('u1', 27, 'pred_copyright_1');
+    });
   });
 });

@@ -192,9 +192,25 @@ export function classifyFailureReason(error: unknown): 'copyright' | 'content_po
   return 'generic_error';
 }
 
+// Transient provider-side infra failures (Replicate/BytePlus hiccups) that are unrelated to the
+// prompt or reference media — worth one automatic retry. Checked BEFORE classifyFailureReason in
+// the webhook's failure branch; copyright/content-policy errors must never match this and retry.
+export function isTransientProviderError(error: unknown): boolean {
+  if (typeof error !== 'string') return false;
+  const lower = error.toLowerCase();
+  return (
+    lower.includes('readerror') ||
+    lower.includes('timeout') ||
+    lower.includes('econnreset') ||
+    lower.includes('connection') ||
+    lower.includes('internal error') ||
+    lower.includes('service unavailable')
+  );
+}
+
 export async function markFailed(
   generationId: string,
-  reason: 'content_policy' | 'copyright' | 'generic_error' = 'generic_error',
+  reason: 'content_policy' | 'copyright' | 'generic_error' | 'provider_error' = 'generic_error',
 ): Promise<boolean> {
   const result = await db.execute(sql`
     UPDATE generations
@@ -226,15 +242,39 @@ export async function markRefunded(generationId: string): Promise<boolean> {
   return (result.rows?.length ?? 0) > 0;
 }
 
+export interface GenerationByPredictionRow {
+  id: string;
+  user_id: string;
+  status: GenerationStatus;
+  cost_credits: number;
+  media_type: string;
+  model: string;
+  prompt: string | null;
+  params: unknown;
+  retry_count: number;
+}
+
 export async function getGenerationByPredictionId(
   predictionId: string,
-): Promise<{ id: string; user_id: string; status: GenerationStatus; cost_credits: number; media_type: string } | undefined> {
+): Promise<GenerationByPredictionRow | undefined> {
   const result = await db.execute(sql`
-    SELECT id, user_id, status, cost_credits, media_type FROM generations WHERE replicate_prediction_id = ${predictionId}
+    SELECT id, user_id, status, cost_credits, media_type, model, prompt, params, retry_count
+    FROM generations WHERE replicate_prediction_id = ${predictionId}
   `);
-  return result.rows?.[0] as
-    | { id: string; user_id: string; status: GenerationStatus; cost_credits: number; media_type: string }
-    | undefined;
+  return result.rows?.[0] as unknown as GenerationByPredictionRow | undefined;
+}
+
+// Redispatch guard for the transient-failure auto-retry (webhooks/replicate.ts): only fires once
+// per generation (retry_count < 1) and only while still 'processing' — a stale/duplicate webhook
+// racing a second retry attempt will no-op here instead of redispatching twice.
+export async function reattachForRetry(generationId: string, newPredictionId: string): Promise<boolean> {
+  const result = await db.execute(sql`
+    UPDATE generations
+    SET replicate_prediction_id = ${newPredictionId}, retry_count = retry_count + 1
+    WHERE id = ${generationId}::uuid AND status = 'processing' AND retry_count < 1
+    RETURNING id
+  `);
+  return (result.rows?.length ?? 0) > 0;
 }
 
 const HIDDEN_STATUSES: GenerationStatus[] = ['quarantined', 'deleted'];

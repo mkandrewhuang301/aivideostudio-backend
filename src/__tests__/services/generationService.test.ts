@@ -25,6 +25,7 @@ import {
   getGenerationById,
   softDeleteGeneration,
   classifyFailureReason,
+  isTransientProviderError,
 } from '../../services/generationService';
 
 const mockDb = db as jest.Mocked<typeof db>;
@@ -153,6 +154,24 @@ describe('classifyFailureReason', () => {
   it('falls back to generic_error for unrecognized or missing errors', () => {
     expect(classifyFailureReason('Internal server error')).toBe('generic_error');
     expect(classifyFailureReason(undefined)).toBe('generic_error');
+  });
+});
+
+// ─── isTransientProviderError ──────────────────────────────────────────────────
+
+describe('isTransientProviderError', () => {
+  it('classifies the prod ReadError string as transient', () => {
+    expect(isTransientProviderError('Prediction failed: Async prediction failed: ReadError:')).toBe(true);
+  });
+
+  it('does not classify a copyright error as transient', () => {
+    const msg =
+      'Prediction failed: Async prediction failed: Exception: The request failed because the output video may be related to copyright restrictions.';
+    expect(isTransientProviderError(msg)).toBe(false);
+  });
+
+  it('returns false for non-string or missing errors', () => {
+    expect(isTransientProviderError(undefined)).toBe(false);
   });
 });
 

@@ -36,5 +36,7 @@ healthRouter.get('/', async (_req: Request, res: Response) => {
   }
 
   const allOk = Object.values(checks).every((v) => v === 'ok');
-  res.status(allOk ? 200 : 503).json({ status: allOk ? 'ok' : 'degraded', checks });
+  // Railway injects RAILWAY_GIT_COMMIT_SHA automatically; absent in local dev.
+  const version = process.env.RAILWAY_GIT_COMMIT_SHA?.slice(0, 7) ?? 'unknown';
+  res.status(allOk ? 200 : 503).json({ status: allOk ? 'ok' : 'degraded', checks, version });
 });

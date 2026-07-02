@@ -31,3 +31,11 @@ export const config = {
   hiveApiKey: process.env.HIVE_API_KEY ?? '',
   openaiApiKey: requireEnv('OPENAI_API_KEY'),
 } as const;
+
+// Shared by the original dispatch (generations.ts) and retry dispatch (webhooks/replicate.ts)
+// so both send Replicate to the same normalized URL.
+export function getReplicateWebhookUrl(): string {
+  const baseUrl = config.publicBaseUrl.trim().replace(/^["']|["']$/g, '');
+  const normalizedBase = baseUrl.startsWith('http') ? baseUrl : `https://${baseUrl}`;
+  return `${normalizedBase}/webhooks/replicate`;
+}

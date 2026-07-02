@@ -28,6 +28,7 @@ jest.mock('../../config', () => ({
     port: 3000,
     nodeEnv: 'test',
   },
+  getReplicateWebhookUrl: jest.fn(() => 'https://mock.example.com/webhooks/replicate'),
 }));
 
 jest.mock('../../db/client', () => ({
