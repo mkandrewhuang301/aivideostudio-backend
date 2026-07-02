@@ -26,6 +26,10 @@ getFirebaseAdmin();
 scheduleReaper().catch((err) => console.error('[server] Failed to schedule reaper:', err));
 scheduleYearlyGrant().catch((err) => console.error('[server] Failed to schedule yearly grant:', err));
 
+// Hive CSAM scanning defaults on; HIVE_SCAN_ENABLED=false disables it deliberately.
+// Logged at startup so a missing/misconfigured env var doesn't silently disable scanning.
+console.log(`[server] Hive CSAM scanning: ${config.hiveScanEnabled ? 'ENABLED' : 'DISABLED'}`);
+
 const app = express();
 
 // CRITICAL (RESEARCH.md Pitfall 1): Replicate webhook needs the RAW body for validateWebhook()
