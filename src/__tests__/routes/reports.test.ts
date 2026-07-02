@@ -121,56 +121,52 @@ describe('POST /api/reports', () => {
 });
 
 // ─── banCheckMiddleware ───────────────────────────────────────────────────────
+// Perf: banCheckMiddleware no longer queries the DB itself — it reads req.user.banned,
+// populated by authMiddleware's upsert/cache (see auth.ts). No DB mocking needed here.
 
 describe('banCheckMiddleware', () => {
   beforeEach(() => {
     jest.clearAllMocks();
   });
 
-  it('returns 403 Account suspended and does not call next() when user is banned', async () => {
-    mockExecute.mockResolvedValueOnce({ rows: [{ banned: true }] });
-
-    const req = { user: { dbUserId: 'some-uuid' } } as unknown as Request;
+  it('returns 403 Account suspended and does not call next() when req.user.banned is true', () => {
+    const req = { user: { dbUserId: 'some-uuid', banned: true } } as unknown as Request;
     const res = {
       status: jest.fn().mockReturnThis(),
       json: jest.fn().mockReturnThis(),
     } as unknown as Response;
     const next = jest.fn() as NextFunction;
 
-    await banCheckMiddleware(req, res, next);
+    banCheckMiddleware(req, res, next);
 
     expect(res.status).toHaveBeenCalledWith(403);
     expect((res.json as jest.Mock)).toHaveBeenCalledWith({ error: 'Account suspended' });
     expect(next).not.toHaveBeenCalled();
   });
 
-  it('calls next() when user is not banned', async () => {
-    mockExecute.mockResolvedValueOnce({ rows: [{ banned: false }] });
-
-    const req = { user: { dbUserId: 'some-uuid' } } as unknown as Request;
+  it('calls next() when req.user.banned is false', () => {
+    const req = { user: { dbUserId: 'some-uuid', banned: false } } as unknown as Request;
     const res = {
       status: jest.fn().mockReturnThis(),
       json: jest.fn().mockReturnThis(),
     } as unknown as Response;
     const next = jest.fn() as NextFunction;
 
-    await banCheckMiddleware(req, res, next);
+    banCheckMiddleware(req, res, next);
 
     expect(next).toHaveBeenCalledTimes(1);
     expect(res.status).not.toHaveBeenCalled();
   });
 
-  it('fails open and calls next() when DB throws — availability over security for ban check', async () => {
-    mockExecute.mockRejectedValueOnce(new Error('DB connection lost'));
-
-    const req = { user: { dbUserId: 'some-uuid' } } as unknown as Request;
+  it('calls next() when req.user.banned is undefined (e.g. no user context)', () => {
+    const req = { user: undefined } as unknown as Request;
     const res = {
       status: jest.fn().mockReturnThis(),
       json: jest.fn().mockReturnThis(),
     } as unknown as Response;
     const next = jest.fn() as NextFunction;
 
-    await banCheckMiddleware(req, res, next);
+    banCheckMiddleware(req, res, next);
 
     expect(next).toHaveBeenCalledTimes(1);
     expect(res.status).not.toHaveBeenCalled();

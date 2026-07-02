@@ -53,29 +53,33 @@ beforeEach(() => {
 // ─── deductCredits ────────────────────────────────────────────────────────────
 
 describe('deductCredits', () => {
-  it('returns true and inserts ledger row when balance >= cost (1 row affected)', async () => {
-    // Simulate UPDATE returning 1 row (sufficient balance)
-    (mockDb.execute as jest.Mock).mockResolvedValueOnce({ rows: [{ id: 'user-uuid' }] });
+  // Perf: the balance UPDATE and the ledger INSERT are now one data-modifying-CTE statement
+  // (single db.execute, no separate db.insert call) — also fixes a prior non-atomicity gap
+  // between the two writes.
+
+  it('returns true when balance >= cost (1 row affected by the CTE)', async () => {
+    (mockDb.execute as jest.Mock).mockResolvedValueOnce({ rows: [{ user_id: 'user-uuid' }] });
 
     const result = await deductCredits('user-uuid', 50);
 
     expect(result).toBe(true);
-    // Verify atomic UPDATE was called with correct WHERE clause
+    expect(mockDb.execute).toHaveBeenCalledTimes(1);
+    // Verify atomic UPDATE + ledger INSERT are both in the single statement
     const executeCall = (mockDb.execute as jest.Mock).mock.calls[0][0];
     const sqlText = extractSql(executeCall);
     expect(sqlText).toMatch(/credits_balance >= /);
-    // Verify ledger row was inserted
-    expect(mockDb.insert).toHaveBeenCalledTimes(1);
+    expect(sqlText).toMatch(/INSERT INTO credit_transactions/);
+    expect(sqlText).toMatch(/generation_deduct/);
+    // No separate db.insert call — it's part of the same statement
+    expect(mockDb.insert).not.toHaveBeenCalled();
   });
 
-  it('returns false and writes NO ledger row when balance < cost (0 rows affected)', async () => {
-    // Simulate UPDATE affecting 0 rows (insufficient balance)
+  it('returns false when balance < cost (0 rows affected, no ledger row written)', async () => {
     (mockDb.execute as jest.Mock).mockResolvedValueOnce({ rows: [] });
 
     const result = await deductCredits('user-uuid', 999);
 
     expect(result).toBe(false);
-    // No ledger row should be inserted on failure
     expect(mockDb.insert).not.toHaveBeenCalled();
   });
 
@@ -162,20 +166,24 @@ describe('refundCredits', () => {
 // ─── getUserWithBalance ───────────────────────────────────────────────────────
 
 describe('getUserWithBalance', () => {
-  it('returns balance data with active_topup_balance computed from unexpired topup rows', async () => {
-    // 1st execute: expired topups check (returns none)
-    (mockDb.execute as jest.Mock).mockResolvedValueOnce({ rows: [] });
-    // 2nd execute: user row SELECT
+  // Perf: this is now 1 combined query (credits_balance + subscription_allotment +
+  // entitlement_level + active_topup_balance + expired_topups in one round trip) in the
+  // common case — only expired top-ups trigger the clawback loop + a second combined query.
+
+  it('returns balance data in a single query when there are no expired top-ups', async () => {
     (mockDb.execute as jest.Mock).mockResolvedValueOnce({
-      rows: [{ credits_balance: 300, subscription_allotment: 500, entitlement_level: 'basic' }],
-    });
-    // 3rd execute: active topup SUM
-    (mockDb.execute as jest.Mock).mockResolvedValueOnce({
-      rows: [{ active_topup_balance: '150' }],
+      rows: [{
+        credits_balance: 300,
+        subscription_allotment: 500,
+        entitlement_level: 'basic',
+        active_topup_balance: '150',
+        expired_topups: [],
+      }],
     });
 
     const result = await getUserWithBalance('user-uuid');
 
+    expect(mockDb.execute).toHaveBeenCalledTimes(1);
     expect(result).toEqual({
       credits_balance: 300,
       subscription_allotment: 500,
@@ -184,24 +192,33 @@ describe('getUserWithBalance', () => {
     });
   });
 
-  it('expires stale topup_grant rows before returning balance', async () => {
-    // 1st execute: expired topups — returns 1 stale row
+  it('expires stale topup_grant rows, then re-fetches once before returning balance', async () => {
+    // 1st execute: combined query — one expired topup present
     (mockDb.execute as jest.Mock).mockResolvedValueOnce({
-      rows: [{ id: 'topup-tx-uuid', amount: 200, reference_id: 'rc-txn-001' }],
+      rows: [{
+        credits_balance: 250,
+        subscription_allotment: 100,
+        entitlement_level: null,
+        active_topup_balance: '0',
+        expired_topups: [{ id: 'topup-tx-uuid', amount: 200 }],
+      }],
     });
-    // 2nd execute: clawback UPDATE for expired topup
+    // 2nd execute: clawback UPDATE for the expired topup
     (mockDb.execute as jest.Mock).mockResolvedValueOnce({ rows: [] });
-    // 3rd execute: user row SELECT
+    // 3rd execute: re-fetched combined query after clawback
     (mockDb.execute as jest.Mock).mockResolvedValueOnce({
-      rows: [{ credits_balance: 50, subscription_allotment: 100, entitlement_level: null }],
-    });
-    // 4th execute: active topup SUM (should be 0 now that topup is expired)
-    (mockDb.execute as jest.Mock).mockResolvedValueOnce({
-      rows: [{ active_topup_balance: '0' }],
+      rows: [{
+        credits_balance: 50,
+        subscription_allotment: 100,
+        entitlement_level: null,
+        active_topup_balance: '0',
+        expired_topups: [],
+      }],
     });
 
     const result = await getUserWithBalance('user-uuid');
 
+    expect(mockDb.execute).toHaveBeenCalledTimes(3);
     // Verify the expired topup clawback INSERT was called
     expect(mockDb.insert).toHaveBeenCalledTimes(1);
     expect(result.active_topup_balance).toBe(0);
@@ -209,25 +226,51 @@ describe('getUserWithBalance', () => {
   });
 
   it('throws if user not found', async () => {
-    // 1st execute: expired topups (none)
-    (mockDb.execute as jest.Mock).mockResolvedValueOnce({ rows: [] });
-    // 2nd execute: user row SELECT (empty — user not found)
     (mockDb.execute as jest.Mock).mockResolvedValueOnce({ rows: [] });
 
     await expect(getUserWithBalance('nonexistent-uuid')).rejects.toThrow('not found');
   });
 
   it('handles active_topup_balance of null/0 gracefully', async () => {
-    (mockDb.execute as jest.Mock).mockResolvedValueOnce({ rows: [] }); // no expired topups
     (mockDb.execute as jest.Mock).mockResolvedValueOnce({
-      rows: [{ credits_balance: 100, subscription_allotment: 0, entitlement_level: null }],
-    });
-    (mockDb.execute as jest.Mock).mockResolvedValueOnce({
-      rows: [{ active_topup_balance: null }], // NULL from COALESCE if no rows
+      rows: [{
+        credits_balance: 100,
+        subscription_allotment: 0,
+        entitlement_level: null,
+        active_topup_balance: null, // NULL from COALESCE if no rows
+        expired_topups: [],
+      }],
     });
 
     const result = await getUserWithBalance('user-uuid');
 
     expect(result.active_topup_balance).toBe(0);
+  });
+
+  it('handles expired_topups returned as a JSON string (some drivers do not auto-parse)', async () => {
+    (mockDb.execute as jest.Mock).mockResolvedValueOnce({
+      rows: [{
+        credits_balance: 250,
+        subscription_allotment: 100,
+        entitlement_level: null,
+        active_topup_balance: '0',
+        expired_topups: JSON.stringify([{ id: 'topup-tx-uuid', amount: 200 }]),
+      }],
+    });
+    (mockDb.execute as jest.Mock).mockResolvedValueOnce({ rows: [] });
+    (mockDb.execute as jest.Mock).mockResolvedValueOnce({
+      rows: [{
+        credits_balance: 50,
+        subscription_allotment: 100,
+        entitlement_level: null,
+        active_topup_balance: '0',
+        expired_topups: '[]',
+      }],
+    });
+
+    const result = await getUserWithBalance('user-uuid');
+
+    expect(mockDb.insert).toHaveBeenCalledTimes(1);
+    expect(result.credits_balance).toBe(50);
   });
 });

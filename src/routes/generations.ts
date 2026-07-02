@@ -421,8 +421,19 @@ generationsRouter.post('/', promptModerationMiddleware, prepareCost, creditCheck
       return;
     }
 
-    await attachPredictionId(generationId, providerPredictionId);
+    // Perf: respond as soon as dispatch succeeds instead of waiting on one more DB round trip.
+    // Safe because the reaper only reaps 'pending' rows older than 5 minutes (reaperWorker.ts) —
+    // this row is 'pending' with a NULL replicate_prediction_id for milliseconds, not minutes,
+    // and Replicate's webhook can't arrive before the generation actually finishes running.
     res.status(200).json({ generation_id: generationId, status: 'processing' });
+    try {
+      await attachPredictionId(generationId, providerPredictionId);
+    } catch (attachError) {
+      // Response already sent — log only. The reaper's stalled-job pass (processing >30min)
+      // or orphaned-job pass would eventually reconcile a generation stuck without a prediction
+      // id; in practice this write essentially never fails since dispatch just succeeded.
+      console.error(`[generations] attachPredictionId failed for ${generationId}:`, attachError);
+    }
   } catch (error) {
     console.error('[generations] Error dispatching generation:', error);
     res.status(500).json({ error: 'Failed to dispatch generation' });

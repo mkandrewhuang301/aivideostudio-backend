@@ -20,6 +20,11 @@ import { sql } from 'drizzle-orm';
 
 export const replicateWebhookRouter = Router();
 
+async function fetchDeviceToken(userId: string): Promise<string | null> {
+  const userRows = await db.execute(sql`SELECT apns_device_token FROM users WHERE id = ${userId}::uuid`);
+  return (userRows.rows?.[0] as { apns_device_token: string | null } | undefined)?.apns_device_token ?? null;
+}
+
 replicateWebhookRouter.post('/', async (req: Request, res: Response) => {
   const isValid = await validateWebhook({
     id: req.headers['webhook-id'] as string,
@@ -75,8 +80,14 @@ replicateWebhookRouter.post('/', async (req: Request, res: Response) => {
         else contentType = 'image/jpeg';
       }
 
-      // CLAUDE.md Rule 2: archive FIRST, before any DB status write.
-      const r2Key = await archiveToR2(outputUrl, generation.id, contentType);
+      // CLAUDE.md Rule 2: archive FIRST, before any DB status write. The device-token lookup
+      // is a read (not a status write) needed later only for the push — run it concurrently
+      // with the archive instead of serially after markCompleted so it doesn't add to the
+      // completion→push latency chain.
+      const [r2Key, deviceToken] = await Promise.all([
+        archiveToR2(outputUrl, generation.id, contentType),
+        fetchDeviceToken(generation.user_id),
+      ]);
 
       // Hive CSAM scan — skipped when HIVE_SCAN_ENABLED=false.
       if (config.hiveScanEnabled) {
@@ -113,8 +124,6 @@ replicateWebhookRouter.post('/', async (req: Request, res: Response) => {
 
       // Best-effort push — isolated, never blocks this response (CLAUDE.md/RESEARCH.md Pitfall 5).
       try {
-        const userRows = await db.execute(sql`SELECT apns_device_token FROM users WHERE id = ${generation.user_id}::uuid`);
-        const deviceToken = (userRows.rows?.[0] as { apns_device_token: string | null } | undefined)?.apns_device_token;
         if (deviceToken) {
           await sendGenerationComplete(deviceToken, generation.id, mediaType as 'video' | 'image');
         }

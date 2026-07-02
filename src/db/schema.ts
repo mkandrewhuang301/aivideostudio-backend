@@ -11,7 +11,7 @@ import {
   uniqueIndex,
   index,
 } from 'drizzle-orm/pg-core';
-import { sql } from 'drizzle-orm';
+import { sql, desc } from 'drizzle-orm';
 
 // ─── Enums ────────────────────────────────────────────────────────────────────
 
@@ -129,6 +129,14 @@ export const generations = pgTable(
     createdAtIdx: index('generations_created_at_idx').on(table.created_at),
     replicatePredictionIdUniqueIdx: uniqueIndex('generations_replicate_prediction_id_unique_idx').on(
       table.replicate_prediction_id,
+    ),
+    // Perf: covers the hottest query — listGenerations filters user_id and orders by
+    // created_at DESC, id DESC (keyset pagination). Without this, Postgres can use
+    // generations_user_id_idx but must still sort the user's rows for the ORDER BY.
+    userCreatedIdx: index('generations_user_created_idx').on(
+      table.user_id,
+      desc(table.created_at),
+      desc(table.id),
     ),
   }),
 );

@@ -3,8 +3,10 @@
 // NEVER store or return the Replicate output URL to any client; only the R2 key.
 // Phase 8: contentType param added for image support; defaults to 'video/mp4' for backward compat.
 
-import { GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
+import { GetObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { Upload } from '@aws-sdk/lib-storage';
+import { Readable } from 'node:stream';
 import { r2, R2_BUCKET } from '../storage/r2';
 
 export async function archiveToR2(
@@ -16,7 +18,6 @@ export async function archiveToR2(
   if (!response.ok || !response.body) {
     throw new Error(`Failed to fetch Replicate output: ${response.status}`);
   }
-  const buffer = Buffer.from(await response.arrayBuffer());
 
   // Derive file extension from content type
   const ext =
@@ -26,14 +27,22 @@ export async function archiveToR2(
     'jpg';  // default for image/jpeg and any unknown image type
   const key = `generations/${generationId}.${ext}`;
 
-  await r2.send(
-    new PutObjectCommand({
+  // Perf: stream the download straight into the R2 upload instead of buffering the entire
+  // file into memory first (Buffer.from(await response.arrayBuffer())) and only then starting
+  // the upload — that made every archive pay for two full sequential transfers. Upload (from
+  // lib-storage) reads response.body in chunks as they arrive and uploads them concurrently,
+  // multipart when large enough, so download and upload overlap and peak memory drops from
+  // O(file size) to O(chunk size).
+  const upload = new Upload({
+    client: r2,
+    params: {
       Bucket: R2_BUCKET,
       Key: key,
-      Body: buffer,
+      Body: Readable.fromWeb(response.body as import('node:stream/web').ReadableStream),
       ContentType: contentType,
-    }),
-  );
+    },
+  });
+  await upload.done();
 
   return key;
 }
