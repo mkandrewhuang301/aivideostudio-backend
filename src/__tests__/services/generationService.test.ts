@@ -24,6 +24,7 @@ import {
   listGenerations,
   getGenerationById,
   softDeleteGeneration,
+  classifyFailureReason,
 } from '../../services/generationService';
 
 const mockDb = db as jest.Mocked<typeof db>;
@@ -123,7 +124,7 @@ describe('markCompleted', () => {
     expect(result).toBe(true);
     const executeCall = (mockDb.execute as jest.Mock).mock.calls[0][0];
     const sqlText = extractSql(executeCall);
-    expect(sqlText).toMatch(/status = 'processing'/);
+    expect(sqlText).toMatch(/status IN \('pending', 'processing'\)/);
     expect(sqlText).toMatch(/RETURNING id/);
   });
 
@@ -133,6 +134,25 @@ describe('markCompleted', () => {
     const result = await markCompleted('gen-uuid', 'generations/gen-uuid.mp4');
 
     expect(result).toBe(false);
+  });
+});
+
+// ─── classifyFailureReason ─────────────────────────────────────────────────────
+
+describe('classifyFailureReason', () => {
+  it('classifies copyright errors from bytedance/seedance-2.0-mini', () => {
+    const msg =
+      'Prediction failed: Async prediction failed: Exception: The request failed because the output video may be related to copyright restrictions. Request id: 021782...';
+    expect(classifyFailureReason(msg)).toBe('copyright');
+  });
+
+  it('classifies generic content-policy errors', () => {
+    expect(classifyFailureReason('This prompt was flagged as NSFW')).toBe('content_policy');
+  });
+
+  it('falls back to generic_error for unrecognized or missing errors', () => {
+    expect(classifyFailureReason('Internal server error')).toBe('generic_error');
+    expect(classifyFailureReason(undefined)).toBe('generic_error');
   });
 });
 
@@ -177,14 +197,14 @@ describe('markFailed and markRefunded', () => {
 // ─── markQuarantined ──────────────────────────────────────────────────────────
 
 describe('markQuarantined', () => {
-  it('returns true when the guarded UPDATE (WHERE status = processing) affects 1 row', async () => {
+  it('returns true when the guarded UPDATE affects 1 row', async () => {
     (mockDb.execute as jest.Mock).mockResolvedValueOnce({ rows: [{ id: 'gen-uuid' }] });
 
     const result = await markQuarantined('gen-uuid');
 
     expect(result).toBe(true);
     const sqlText = extractSql((mockDb.execute as jest.Mock).mock.calls[0][0]);
-    expect(sqlText).toMatch(/status = 'processing'/);
+    expect(sqlText).toMatch(/status IN \('pending', 'processing'\)/);
     expect(sqlText).toMatch(/RETURNING id/);
   });
 

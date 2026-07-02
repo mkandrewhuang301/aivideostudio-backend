@@ -13,6 +13,7 @@ import {
   computeImageCostCredits,
   computeDreamActorCost,
   computeUpscalerCost,
+  computeGrokImagineCost,
   createGeneration,
   attachPredictionId,
   listGenerations,
@@ -23,11 +24,12 @@ import {
   SUPPORTED_IMAGE_MODELS,
   SUPPORTED_AVATAR_MODELS,
   SUPPORTED_UPSCALER_MODELS,
+  SUPPORTED_GROK_MODELS,
   type SupportedModel,
 } from '../services/generationService';
 import { ReplicateProvider } from '../services/providers/ReplicateProvider';
 import { refundCredits } from '../services/creditService';
-import { markFailed } from '../services/generationService';
+import { classifyFailureReason, markFailed } from '../services/generationService';
 import { getGenerationPresignedUrl, getUploadPresignedUrl } from '../services/archivalService';
 import { config } from '../config';
 import type { GenerationInput } from '../services/providers/ModelProvider';
@@ -38,6 +40,9 @@ import { eq, inArray, sql } from 'drizzle-orm';
 export const generationsRouter = Router();
 
 const provider = new ReplicateProvider();
+
+// Shared by the Seedance fallthrough and the Grok Imagine branch below.
+const VALID_VIDEO_ASPECT_RATIOS = ['16:9', '9:16', '1:1', '4:3', '3:4'];
 
 interface ResolvedGenerationRequest {
   prompt: string;
@@ -53,6 +58,7 @@ interface ResolvedGenerationRequest {
   refUploadIds?: string[];
   // Image-only
   imageAspectRatio?: string;
+  imageQuality?: 'high' | 'medium' | 'low';
   // Avatar-only (DreamActor M2.0)
   avatarImage?: string;
   avatarDrivingVideo?: string;
@@ -91,6 +97,7 @@ function prepareCost(req: Request, res: Response, next: NextFunction): void {
     reference_upload_ids,
     // image-specific
     image_aspect_ratio,
+    image_quality,
     // avatar-specific (DreamActor M2.0)
     avatar_image,
     avatar_driving_video,
@@ -188,6 +195,16 @@ function prepareCost(req: Request, res: Response, next: NextFunction): void {
     const imageAspectRatio = typeof image_aspect_ratio === 'string' && VALID_IMAGE_ASPECT_RATIOS.includes(image_aspect_ratio)
       ? image_aspect_ratio
       : '1:1';
+    const qualityFromModel: Record<string, 'high' | 'medium' | 'low'> = {
+      'openai/gpt-image-2-high':   'high',
+      'openai/gpt-image-2-medium': 'medium',
+      'openai/gpt-image-2-low':    'low',
+    };
+    const validQualities = ['high', 'medium', 'low'] as const;
+    type ImageQuality = typeof validQualities[number];
+    const imageQuality: ImageQuality =
+      qualityFromModel[imageModel] ??
+      (validQualities.includes(image_quality as ImageQuality) ? (image_quality as ImageQuality) : 'high');
     const cost = computeImageCostCredits(imageModel);
 
     req.body.cost_credits = cost;
@@ -196,7 +213,51 @@ function prepareCost(req: Request, res: Response, next: NextFunction): void {
       model: imageModel,
       mediaType: 'image',
       imageAspectRatio,
+      imageQuality,
       cost,
+    };
+    next();
+    return;
+  }
+
+  // xAI Grok Imagine Video 1.5 — image-to-video, mandatory image, flat credit rate,
+  // no bracket-token prompt injection (Grok takes `image` directly, not [Image1] notation).
+  if (model && (SUPPORTED_GROK_MODELS as readonly string[]).includes(model)) {
+    const refImages: string[] = Array.isArray(reference_images)
+      ? reference_images.filter((u: unknown) => typeof u === 'string')
+      : [];
+    if (refImages.length === 0) {
+      res.status(400).json({ error: 'This model requires a reference image.', code: 'INVALID_INPUT' });
+      return;
+    }
+    const validResolutions = MODEL_RESOLUTIONS[model];
+    if (!validResolutions?.includes(resolution)) {
+      res.status(400).json({ error: `resolution must be one of: ${validResolutions?.join(', ')}`, code: 'INVALID_RESOLUTION' });
+      return;
+    }
+    if (aspect_ratio !== undefined && !VALID_VIDEO_ASPECT_RATIOS.includes(aspect_ratio)) {
+      res.status(400).json({ error: `aspect_ratio must be one of: ${VALID_VIDEO_ASPECT_RATIOS.join(', ')}`, code: 'INVALID_ASPECT_RATIO' });
+      return;
+    }
+    let durationSeconds: number;
+    try {
+      durationSeconds = resolveDurationSeconds(duration);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message, code: 'INVALID_DURATION' });
+      return;
+    }
+    const cost = computeGrokImagineCost(durationSeconds);
+    req.body.cost_credits = cost;
+    req._resolved = {
+      prompt: prompt as string,
+      model,
+      mediaType: 'video',
+      durationSeconds,
+      resolution,
+      aspectRatio: aspect_ratio ?? '16:9',
+      audioEnabled: true, // always on — Grok has no audio toggle
+      cost,
+      referenceImages: [refImages[0]],
     };
     next();
     return;
@@ -215,7 +276,6 @@ function prepareCost(req: Request, res: Response, next: NextFunction): void {
     return;
   }
 
-  const VALID_VIDEO_ASPECT_RATIOS = ['16:9', '9:16', '1:1', '4:3', '3:4'];
   if (aspect_ratio !== undefined && !VALID_VIDEO_ASPECT_RATIOS.includes(aspect_ratio)) {
     res.status(400).json({ error: `aspect_ratio must be one of: ${VALID_VIDEO_ASPECT_RATIOS.join(', ')}`, code: 'INVALID_ASPECT_RATIO' });
     return;
@@ -331,6 +391,7 @@ generationsRouter.post('/', promptModerationMiddleware, prepareCost, creditCheck
       referenceVideos: resolved.referenceVideos?.length ? resolved.referenceVideos : undefined,
       // Image-only
       imageAspectRatio: resolved.imageAspectRatio,
+      imageQuality: resolved.imageQuality,
       // Avatar-only
       avatarImage: resolved.avatarImage,
       avatarDrivingVideo: resolved.avatarDrivingVideo,
@@ -350,7 +411,7 @@ generationsRouter.post('/', promptModerationMiddleware, prepareCost, creditCheck
       const errMsg = dispatchError instanceof Error ? dispatchError.message : String(dispatchError);
       const isRateLimit = errMsg.includes('429') || errMsg.toLowerCase().includes('throttled');
       console.error(`[generations] Dispatch failed (model=${resolved.model}): ${errMsg}`);
-      await markFailed(generationId);
+      await markFailed(generationId, classifyFailureReason(errMsg));
       await refundCredits(req.user.dbUserId, resolved.cost, `dispatch-failure-${generationId}`);
       res.status(502).json({
         error: isRateLimit

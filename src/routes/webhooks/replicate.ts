@@ -11,7 +11,7 @@ import { validateWebhook } from 'replicate';
 import { config } from '../../config';
 import { archiveToR2 } from '../../services/archivalService';
 import { scanForCsam } from '../../services/hiveService';
-import { getGenerationByPredictionId, markCompleted, markFailed, markQuarantined } from '../../services/generationService';
+import { classifyFailureReason, getGenerationByPredictionId, markCompleted, markFailed, markQuarantined } from '../../services/generationService';
 import { refundCredits } from '../../services/creditService';
 import { sendGenerationComplete } from '../../services/apnsService';
 import { hiveScanQueue } from '../../queue/hiveScanWorker';
@@ -78,52 +78,56 @@ replicateWebhookRouter.post('/', async (req: Request, res: Response) => {
       // CLAUDE.md Rule 2: archive FIRST, before any DB status write.
       const r2Key = await archiveToR2(outputUrl, generation.id, contentType);
 
-      // Hive CSAM scan — pass r2Key directly; hiveService generates a presigned URL internally.
-      // On scan error: enqueue hiveScanWorker retry (up to ~60s) rather than immediately quarantining.
-      // On scan success with flagged content: quarantine immediately.
-      let hiveFlagged = false;
-      let hiveScanErrored = false;
-      try {
-        const { flagged } = await scanForCsam(r2Key);
-        hiveFlagged = flagged;
-      } catch (hiveError) {
-        console.error('[webhook/replicate] Hive scan error — queuing retry:', hiveError);
-        hiveScanErrored = true;
-      }
-
-      if (hiveScanErrored) {
-        // Video stays in 'processing'; hiveScanWorker delivers or fails+refunds within ~60s.
-        await hiveScanQueue.add('scan', {
-          generationId: generation.id,
-          r2Key,
-          userId: generation.user_id,
-          costCredits: generation.cost_credits,
-        });
-        console.log(`[webhook/replicate] Hive retry queued for generation ${generation.id}`);
-      } else if (hiveFlagged) {
-        await markQuarantined(generation.id);
-        await refundCredits(generation.user_id, generation.cost_credits, `csam-quarantine-${payload.id}`);
-        console.warn(`[webhook/replicate] CSAM flagged: generation ${generation.id} quarantined, credits refunded.`);
-      } else {
-        await markCompleted(generation.id, r2Key);
-
-        // Best-effort push — isolated, never blocks this response (CLAUDE.md/RESEARCH.md Pitfall 5).
+      // Hive CSAM scan — skipped when HIVE_SCAN_ENABLED=false.
+      if (config.hiveScanEnabled) {
+        let hiveFlagged = false;
+        let hiveScanErrored = false;
         try {
-          const userRows = await db.execute(sql`SELECT apns_device_token FROM users WHERE id = ${generation.user_id}::uuid`);
-          const deviceToken = (userRows.rows?.[0] as { apns_device_token: string | null } | undefined)?.apns_device_token;
-          if (deviceToken) {
-            await sendGenerationComplete(deviceToken, generation.id, mediaType as 'video' | 'image');
-          }
-        } catch (pushError) {
-          console.error('[webhook/replicate] Push notification failed (non-blocking):', pushError);
+          const { flagged } = await scanForCsam(r2Key);
+          hiveFlagged = flagged;
+        } catch (hiveError) {
+          console.error('[webhook/replicate] Hive scan error — queuing retry:', hiveError);
+          hiveScanErrored = true;
         }
 
-        console.log(`[webhook/replicate] succeeded: generation ${generation.id} archived to ${r2Key}`);
+        if (hiveScanErrored) {
+          await hiveScanQueue.add('scan', {
+            generationId: generation.id,
+            r2Key,
+            userId: generation.user_id,
+            costCredits: generation.cost_credits,
+          });
+          console.log(`[webhook/replicate] Hive retry queued for generation ${generation.id}`);
+          res.status(200).json({ received: true });
+          return;
+        } else if (hiveFlagged) {
+          await markQuarantined(generation.id);
+          await refundCredits(generation.user_id, generation.cost_credits, `csam-quarantine-${payload.id}`);
+          console.warn(`[webhook/replicate] CSAM flagged: generation ${generation.id} quarantined, credits refunded.`);
+          res.status(200).json({ received: true });
+          return;
+        }
       }
+
+      await markCompleted(generation.id, r2Key);
+
+      // Best-effort push — isolated, never blocks this response (CLAUDE.md/RESEARCH.md Pitfall 5).
+      try {
+        const userRows = await db.execute(sql`SELECT apns_device_token FROM users WHERE id = ${generation.user_id}::uuid`);
+        const deviceToken = (userRows.rows?.[0] as { apns_device_token: string | null } | undefined)?.apns_device_token;
+        if (deviceToken) {
+          await sendGenerationComplete(deviceToken, generation.id, mediaType as 'video' | 'image');
+        }
+      } catch (pushError) {
+        console.error('[webhook/replicate] Push notification failed (non-blocking):', pushError);
+      }
+
+      console.log(`[webhook/replicate] succeeded: generation ${generation.id} archived to ${r2Key}`);
     } else if (payload.status === 'failed' || payload.status === 'canceled') {
-      await markFailed(generation.id);
+      const reason = classifyFailureReason(payload.error);
+      await markFailed(generation.id, reason);
       await refundCredits(generation.user_id, generation.cost_credits, payload.id);
-      console.log(`[webhook/replicate] ${payload.status}: refunded ${generation.cost_credits} credits to user ${generation.user_id}`);
+      console.log(`[webhook/replicate] ${payload.status} (${reason}): refunded ${generation.cost_credits} credits to user ${generation.user_id}`);
     } else {
       console.log(`[webhook/replicate] Unhandled status: ${payload.status}`);
     }
@@ -134,3 +138,4 @@ replicateWebhookRouter.post('/', async (req: Request, res: Response) => {
     res.status(200).json({ received: true, error: 'internal_error' });
   }
 });
+

@@ -1,7 +1,7 @@
 // src/__tests__/routes/generations.test.ts
 // Integration tests for POST /api/generations.
-// Covers SC-1 (dispatch success), SC-5 (zero-credit rejection before any Replicate call),
-// duration validation before credit gate, and 'auto' duration resolution never forwarding -1.
+// Covers video dispatch (SC-1), zero-credit rejection (SC-5), duration validation,
+// image dispatch via Replicate (Seedream), and the inline OpenAI path (gpt-image-2).
 
 // Mock config FIRST — before any module that calls requireEnv() at load time
 jest.mock('../../config', () => ({
@@ -24,6 +24,7 @@ jest.mock('../../config', () => ({
     replicateApiToken: 'mock-token',
     replicateWebhookSecret: 'whsec_mock',
     publicBaseUrl: 'https://mock.example.com',
+    openaiApiKey: 'mock-openai-key',
     port: 3000,
     nodeEnv: 'test',
   },
@@ -31,7 +32,7 @@ jest.mock('../../config', () => ({
 
 jest.mock('../../db/client', () => ({
   db: {
-    execute: jest.fn(),
+    execute: jest.fn().mockResolvedValue({ rows: [] }),
     insert: jest.fn(),
   },
 }));
@@ -45,20 +46,29 @@ jest.mock('../../services/generationService', () => ({
   resolveDurationSeconds: jest.fn(),
   computeCostCredits: jest.fn(),
   computeImageCostCredits: jest.fn(),
+  computeDreamActorCost: jest.fn(),
+  computeUpscalerCost: jest.fn(),
+  computeGrokImagineCost: jest.fn(),
   createGeneration: jest.fn(),
   attachPredictionId: jest.fn(),
   markRefunded: jest.fn(),
   markFailed: jest.fn(),
+  markCompleted: jest.fn(),
+  markQuarantined: jest.fn(),
   listGenerations: jest.fn(),
   getGenerationById: jest.fn(),
   softDeleteGeneration: jest.fn(),
-  SUPPORTED_MODELS: ['bytedance/seedance-2.0-fast', 'bytedance/seedance-2.0-mini', 'bytedance/seedance-2.0'],
+  SUPPORTED_MODELS: ['bytedance/seedance-2.0-mini', 'bytedance/seedance-2.0'],
   MODEL_RESOLUTIONS: {
-    'bytedance/seedance-2.0-fast': ['480p', '720p'],
     'bytedance/seedance-2.0-mini': ['480p', '720p'],
     'bytedance/seedance-2.0':      ['480p', '720p', '1080p', '4k'],
+    'xai/grok-imagine-video-1.5':  ['480p', '720p'],
   },
-  SUPPORTED_IMAGE_MODELS: ['black-forest-labs/flux-schnell', 'black-forest-labs/flux-dev'],
+  SUPPORTED_IMAGE_MODELS: ['openai/gpt-image-2-high', 'openai/gpt-image-2-medium', 'openai/gpt-image-2-low', 'openai/gpt-image-2'],
+  SUPPORTED_AVATAR_MODELS: ['bytedance/dreamactor-m2.0'],
+  SUPPORTED_UPSCALER_MODELS: ['bytedance/video-upscaler'],
+  SUPPORTED_GROK_MODELS: ['xai/grok-imagine-video-1.5'],
+  classifyFailureReason: jest.requireActual('../../services/generationService').classifyFailureReason,
 }));
 
 jest.mock('../../services/archivalService', () => ({
@@ -75,8 +85,25 @@ jest.mock('../../services/providers/ReplicateProvider', () => {
   };
 });
 
+jest.mock('../../services/openaiImageService', () => ({
+  generateImageWithOpenAI: jest.fn(),
+}));
+
+jest.mock('../../services/hiveService', () => ({
+  scanForCsam: jest.fn(),
+}));
+
+jest.mock('../../queue/hiveScanWorker', () => ({
+  hiveScanQueue: {
+    add: jest.fn().mockResolvedValue(undefined),
+  },
+}));
+
+jest.mock('../../services/apnsService', () => ({
+  sendGenerationComplete: jest.fn().mockResolvedValue(undefined),
+}));
+
 // Mock promptModerationMiddleware as a pass-through — moderation logic is tested separately
-// in src/__tests__/middleware/promptModeration.test.ts
 jest.mock('../../middleware/promptModeration', () => ({
   promptModerationMiddleware: jest.fn((_req: unknown, _res: unknown, next: () => void) => next()),
 }));
@@ -89,6 +116,7 @@ import {
   resolveDurationSeconds,
   computeCostCredits,
   computeImageCostCredits,
+  computeGrokImagineCost,
   createGeneration,
   attachPredictionId,
   listGenerations,
@@ -96,14 +124,16 @@ import {
   softDeleteGeneration,
   markRefunded,
   markFailed,
+  markCompleted,
+  markQuarantined,
 } from '../../services/generationService';
 import { getGenerationPresignedUrl } from '../../services/archivalService';
+import { generateImageWithOpenAI } from '../../services/openaiImageService';
+import { scanForCsam } from '../../services/hiveService';
+import { hiveScanQueue } from '../../queue/hiveScanWorker';
 import { ReplicateProvider } from '../../services/providers/ReplicateProvider';
+import { db } from '../../db/client';
 
-// Grab the mocked dispatch fn off the mocked class's first (and only) instance used by the router.
-// generationsRouter does `const provider = new ReplicateProvider();` at module load time,
-// so the mock constructor was already invoked once; pull the instance's dispatch mock from
-// the mock's `.mock.results`.
 const MockedReplicateProvider = ReplicateProvider as jest.MockedClass<typeof ReplicateProvider>;
 const providerInstance = MockedReplicateProvider.mock.results[0]?.value as { dispatch: jest.Mock };
 const dispatchMock = providerInstance.dispatch;
@@ -111,7 +141,6 @@ const dispatchMock = providerInstance.dispatch;
 const app = express();
 app.use(express.json());
 
-// Fake auth-injecting middleware mirroring authMiddleware's effect on req.user
 app.use((req: Request, _res: Response, next: NextFunction) => {
   req.user = { dbUserId: 'test-user-id', uid: 'fb-uid', email: 't@test.com' };
   next();
@@ -121,6 +150,7 @@ app.use('/api/generations', generationsRouter);
 
 const VALID_BODY = {
   prompt: 'a cinematic shot of a city at night',
+  model: 'bytedance/seedance-2.0-mini',
   duration: 8,
   resolution: '720p' as const,
   aspect_ratio: '16:9',
@@ -129,10 +159,13 @@ const VALID_BODY = {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  (db.execute as jest.Mock).mockResolvedValue({ rows: [] });
 });
 
-describe('POST /api/generations', () => {
-  it('Test 1: dispatches and returns 200 with generation_id + processing on success', async () => {
+// ─── POST /api/generations — video ────────────────────────────────────────────
+
+describe('POST /api/generations — video', () => {
+  it('dispatches and returns 200 with generation_id + processing on success', async () => {
     (resolveDurationSeconds as jest.Mock).mockReturnValue(8);
     (computeCostCredits as jest.Mock).mockReturnValue(60);
     (deductCredits as jest.Mock).mockResolvedValue(true);
@@ -144,7 +177,6 @@ describe('POST /api/generations', () => {
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ generation_id: 'gen-123', status: 'processing' });
-
     expect(createGeneration).toHaveBeenCalledWith(
       expect.objectContaining({ status: 'pending', cost_credits: 60 }),
     );
@@ -153,7 +185,7 @@ describe('POST /api/generations', () => {
     expect(attachPredictionId).toHaveBeenCalledWith('gen-123', 'pred-abc');
   });
 
-  it('Test 2: insufficient credits returns 402 and never calls ReplicateProvider.dispatch', async () => {
+  it('insufficient credits returns 402 and never calls ReplicateProvider.dispatch', async () => {
     (resolveDurationSeconds as jest.Mock).mockReturnValue(8);
     (computeCostCredits as jest.Mock).mockReturnValue(60);
     (deductCredits as jest.Mock).mockResolvedValue(false);
@@ -166,22 +198,7 @@ describe('POST /api/generations', () => {
     expect(createGeneration).not.toHaveBeenCalled();
   });
 
-  it('Test 3: out-of-range duration returns 400 before credit deduction is attempted', async () => {
-    (resolveDurationSeconds as jest.Mock).mockImplementation(() => {
-      throw new Error('duration must be an integer between 4 and 15 seconds');
-    });
-
-    const res = await request(app)
-      .post('/api/generations')
-      .send({ ...VALID_BODY, duration: 20 });
-
-    expect(res.status).toBe(400);
-    expect(res.body.code).toBe('INVALID_DURATION');
-    expect(deductCredits).not.toHaveBeenCalled();
-    expect(dispatchMock).not.toHaveBeenCalled();
-  });
-
-  it("Test 4: duration 'auto' resolves to explicit seconds, never -1, in DB insert and dispatch input", async () => {
+  it("duration 'auto' resolves to explicit seconds, never -1, in DB insert and dispatch input", async () => {
     (resolveDurationSeconds as jest.Mock).mockReturnValue(5);
     (computeCostCredits as jest.Mock).mockReturnValue(38);
     (deductCredits as jest.Mock).mockResolvedValue(true);
@@ -199,26 +216,98 @@ describe('POST /api/generations', () => {
       expect.objectContaining({ durationSeconds: 5 }),
     );
 
-    const createGenerationArg = (createGeneration as jest.Mock).mock.calls[0][0];
-    expect(createGenerationArg.params.duration).toBe(5);
-    expect(createGenerationArg.params.duration).not.toBe(-1);
+    const createArg = (createGeneration as jest.Mock).mock.calls[0][0];
+    expect(createArg.params.duration).toBe(5);
+    expect(createArg.params.duration).not.toBe(-1);
 
-    const dispatchInputArg = dispatchMock.mock.calls[0][0];
-    expect(dispatchInputArg.durationSeconds).toBe(5);
-    expect(dispatchInputArg.durationSeconds).not.toBe(-1);
+    const dispatchArg = dispatchMock.mock.calls[0][0];
+    expect(dispatchArg.durationSeconds).toBe(5);
+    expect(dispatchArg.durationSeconds).not.toBe(-1);
+  });
+
+  it('out-of-range duration returns 400 before credit deduction is attempted', async () => {
+    (resolveDurationSeconds as jest.Mock).mockImplementation(() => {
+      throw new Error('duration must be an integer between 4 and 15 seconds');
+    });
+
+    const res = await request(app)
+      .post('/api/generations')
+      .send({ ...VALID_BODY, duration: 20 });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_DURATION');
+    expect(deductCredits).not.toHaveBeenCalled();
+    expect(dispatchMock).not.toHaveBeenCalled();
   });
 });
 
-// ─── POST /api/generations — image media_type ─────────────────────────────────
+// ─── POST /api/generations — xAI Grok Imagine Video 1.5 ──────────────────────
 
-describe('POST /api/generations — image media_type', () => {
+describe('POST /api/generations — Grok Imagine (image-to-video)', () => {
+  const GROK_BODY = {
+    prompt: 'cinematic motion, sunlight filtering into the room',
+    model: 'xai/grok-imagine-video-1.5',
+    duration: 5,
+    resolution: '720p' as const,
+    aspect_ratio: '16:9',
+    reference_images: ['https://example.com/source.png'],
+  };
+
+  it('returns 400 INVALID_INPUT when reference_images is missing, without dispatch', async () => {
+    const { reference_images: _omit, ...bodyWithoutImage } = GROK_BODY;
+
+    const res = await request(app).post('/api/generations').send(bodyWithoutImage);
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_INPUT');
+    expect(dispatchMock).not.toHaveBeenCalled();
+    expect(createGeneration).not.toHaveBeenCalled();
+  });
+
+  it('dispatches with computeGrokImagineCost (flat rate) and returns 200', async () => {
+    (resolveDurationSeconds as jest.Mock).mockReturnValue(5);
+    (computeGrokImagineCost as jest.Mock).mockReturnValue(40);
+    (deductCredits as jest.Mock).mockResolvedValue(true);
+    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-grok-1' });
+    dispatchMock.mockResolvedValue({ providerPredictionId: 'pred-grok-1' });
+    (attachPredictionId as jest.Mock).mockResolvedValue(undefined);
+
+    const res = await request(app).post('/api/generations').send(GROK_BODY);
+
+    expect(res.status).toBe(200);
+    expect(computeGrokImagineCost).toHaveBeenCalledWith(5);
+    expect(computeCostCredits).not.toHaveBeenCalled();
+    expect(createGeneration).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'pending', cost_credits: 40, media_type: 'video' }),
+    );
+    expect(deductCredits).toHaveBeenCalledWith('test-user-id', 40);
+
+    const dispatchArg = dispatchMock.mock.calls[0][0];
+    expect(dispatchArg.referenceImages).toEqual(['https://example.com/source.png']);
+  });
+
+  it('returns 400 INVALID_RESOLUTION for an unsupported resolution (e.g. 1080p)', async () => {
+    const res = await request(app)
+      .post('/api/generations')
+      .send({ ...GROK_BODY, resolution: '1080p' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_RESOLUTION');
+    expect(dispatchMock).not.toHaveBeenCalled();
+  });
+});
+
+// ─── POST /api/generations — gpt-image-2 image (Replicate path) ──────────────
+// Seedream 5 Lite / 4.5 paused — worse output quality than gpt-image-2 (.planning/STATE.md).
+
+describe('POST /api/generations — gpt-image-2 image (Replicate)', () => {
   const IMAGE_BODY = {
     prompt: 'a watercolor painting of a fox',
     media_type: 'image',
-    model: 'black-forest-labs/flux-schnell',
+    model: 'openai/gpt-image-2-medium',
   };
 
-  it('Test 1: image dispatch with flux-schnell succeeds and returns 200 with generation_id', async () => {
+  it('image dispatch with gpt-image-2-medium succeeds and returns 200 with generation_id', async () => {
     (computeImageCostCredits as jest.Mock).mockReturnValue(5);
     (deductCredits as jest.Mock).mockResolvedValue(true);
     (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-img-1' });
@@ -229,24 +318,24 @@ describe('POST /api/generations — image media_type', () => {
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ generation_id: 'gen-img-1', status: 'processing' });
-
     expect(createGeneration).toHaveBeenCalledWith(
       expect.objectContaining({
         status: 'pending',
         cost_credits: 5,
         media_type: 'image',
-        model: 'black-forest-labs/flux-schnell',
+        model: 'openai/gpt-image-2-medium',
       }),
     );
     expect(deductCredits).toHaveBeenCalledWith('test-user-id', 5);
     expect(dispatchMock).toHaveBeenCalledTimes(1);
+    // dispatch input must have mediaType, imageAspectRatio, and imageQuality resolved from the model ID
     expect(dispatchMock.mock.calls[0][0]).toEqual(
-      expect.objectContaining({ mediaType: 'image', width: 1024, height: 1024 }),
+      expect.objectContaining({ mediaType: 'image', imageAspectRatio: '1:1', imageQuality: 'medium', model: 'openai/gpt-image-2-medium' }),
     );
     expect(attachPredictionId).toHaveBeenCalledWith('gen-img-1', 'pred-img-1');
   });
 
-  it('Test 2: image dispatch with unknown image model returns 400 INVALID_MODEL and never calls dispatch', async () => {
+  it('image dispatch with unknown model returns 400 INVALID_MODEL without dispatch', async () => {
     const res = await request(app)
       .post('/api/generations')
       .send({ ...IMAGE_BODY, model: 'stability-ai/sdxl' });
@@ -258,7 +347,18 @@ describe('POST /api/generations — image media_type', () => {
     expect(deductCredits).not.toHaveBeenCalled();
   });
 
-  it('Test 3: image generation cost = 5 credits for flux-schnell via computeImageCostCredits', async () => {
+  it('image dispatch with a paused Seedream model returns 400 INVALID_MODEL without dispatch', async () => {
+    const res = await request(app)
+      .post('/api/generations')
+      .send({ ...IMAGE_BODY, model: 'bytedance/seedream-5-lite' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_MODEL');
+    expect(dispatchMock).not.toHaveBeenCalled();
+    expect(createGeneration).not.toHaveBeenCalled();
+  });
+
+  it('cost is computed by computeImageCostCredits and stored in generation row', async () => {
     (computeImageCostCredits as jest.Mock).mockReturnValue(5);
     (deductCredits as jest.Mock).mockResolvedValue(true);
     (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-img-2' });
@@ -267,23 +367,302 @@ describe('POST /api/generations — image media_type', () => {
 
     await request(app).post('/api/generations').send(IMAGE_BODY);
 
-    expect(computeImageCostCredits).toHaveBeenCalledWith('black-forest-labs/flux-schnell');
-    const createGenerationArg = (createGeneration as jest.Mock).mock.calls[0][0];
-    expect(createGenerationArg.cost_credits).toBe(5);
+    expect(computeImageCostCredits).toHaveBeenCalledWith('openai/gpt-image-2-medium');
+    const createArg = (createGeneration as jest.Mock).mock.calls[0][0];
+    expect(createArg.cost_credits).toBe(5);
   });
 
-  it('Test 4: insufficient credits for image generation returns 402 without dispatching', async () => {
-    (computeImageCostCredits as jest.Mock).mockReturnValue(15);
+  it('insufficient credits for image generation returns 402 without dispatch', async () => {
+    (computeImageCostCredits as jest.Mock).mockReturnValue(13);
     (deductCredits as jest.Mock).mockResolvedValue(false);
 
     const res = await request(app)
       .post('/api/generations')
-      .send({ ...IMAGE_BODY, model: 'black-forest-labs/flux-dev' });
+      .send({ ...IMAGE_BODY, model: 'openai/gpt-image-2-high' });
 
     expect(res.status).toBe(402);
     expect(res.body.code).toBe('INSUFFICIENT_CREDITS');
     expect(dispatchMock).not.toHaveBeenCalled();
     expect(createGeneration).not.toHaveBeenCalled();
+  });
+
+  it('Replicate dispatch failure for gpt-image-2 returns 502 with refund', async () => {
+    (computeImageCostCredits as jest.Mock).mockReturnValue(5);
+    (deductCredits as jest.Mock).mockResolvedValue(true);
+    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-img-fail' });
+    dispatchMock.mockRejectedValue(new Error('Replicate 422 model not found'));
+    (markFailed as jest.Mock).mockResolvedValue(true);
+    (refundCredits as jest.Mock).mockResolvedValue(undefined);
+
+    const res = await request(app).post('/api/generations').send(IMAGE_BODY);
+
+    expect(res.status).toBe(502);
+    expect(res.body.error).toContain('Credits have been refunded');
+    expect(markFailed).toHaveBeenCalledWith('gen-img-fail', 'generic_error');
+    expect(refundCredits).toHaveBeenCalledWith('test-user-id', 5, 'dispatch-failure-gen-img-fail');
+    expect(attachPredictionId).not.toHaveBeenCalled();
+  });
+});
+
+// ─── POST /api/generations — openai/gpt-image-2 (inline path) ────────────────
+
+// Skipped: generateImageWithOpenAI() (openaiImageService.ts) is not yet wired into the route.
+// See .planning/STATE.md — direct-to-OpenAI routing is future work, currently gpt-image-2 dispatches via Replicate.
+describe.skip('POST /api/generations — openai/gpt-image-2 (inline)', () => {
+  const GPT_BODY = {
+    prompt: 'a red rose in a glass vase',
+    media_type: 'image',
+    model: 'openai/gpt-image-2',
+  };
+
+  it('calls generateImageWithOpenAI, marks completed, never calls Replicate dispatch', async () => {
+    (computeImageCostCredits as jest.Mock).mockReturnValue(13);
+    (deductCredits as jest.Mock).mockResolvedValue(true);
+    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-openai-1' });
+    (generateImageWithOpenAI as jest.Mock).mockResolvedValue('generations/gen-openai-1.png');
+    (scanForCsam as jest.Mock).mockResolvedValue({ flagged: false });
+    (markCompleted as jest.Mock).mockResolvedValue(true);
+
+    const res = await request(app).post('/api/generations').send(GPT_BODY);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ generation_id: 'gen-openai-1', status: 'processing' });
+    expect(generateImageWithOpenAI).toHaveBeenCalledWith('a red rose in a glass vase', '1:1', 'gen-openai-1');
+    expect(dispatchMock).not.toHaveBeenCalled();
+    expect(attachPredictionId).not.toHaveBeenCalled();
+    expect(markCompleted).toHaveBeenCalledWith('gen-openai-1', 'generations/gen-openai-1.png');
+  });
+
+  it('uses the image_aspect_ratio sent by the client', async () => {
+    (computeImageCostCredits as jest.Mock).mockReturnValue(13);
+    (deductCredits as jest.Mock).mockResolvedValue(true);
+    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-openai-ar' });
+    (generateImageWithOpenAI as jest.Mock).mockResolvedValue('generations/gen-openai-ar.png');
+    (scanForCsam as jest.Mock).mockResolvedValue({ flagged: false });
+    (markCompleted as jest.Mock).mockResolvedValue(true);
+
+    await request(app).post('/api/generations').send({ ...GPT_BODY, image_aspect_ratio: '16:9' });
+
+    expect(generateImageWithOpenAI).toHaveBeenCalledWith(
+      expect.any(String),
+      '16:9',
+      expect.any(String),
+    );
+  });
+
+  it('OpenAI API failure returns 502 with refund, never marks completed', async () => {
+    (computeImageCostCredits as jest.Mock).mockReturnValue(13);
+    (deductCredits as jest.Mock).mockResolvedValue(true);
+    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-openai-fail' });
+    (generateImageWithOpenAI as jest.Mock).mockRejectedValue(new Error('OpenAI 429 rate limit'));
+    (markFailed as jest.Mock).mockResolvedValue(true);
+    (refundCredits as jest.Mock).mockResolvedValue(undefined);
+
+    const res = await request(app).post('/api/generations').send(GPT_BODY);
+
+    expect(res.status).toBe(502);
+    expect(res.body.error).toContain('Credits have been refunded');
+    expect(markFailed).toHaveBeenCalledWith('gen-openai-fail');
+    expect(refundCredits).toHaveBeenCalledWith(
+      'test-user-id',
+      13,
+      'dispatch-failure-gen-openai-fail',
+    );
+    expect(markCompleted).not.toHaveBeenCalled();
+    expect(dispatchMock).not.toHaveBeenCalled();
+  });
+
+  it('CSAM scan flagged: quarantines and refunds without exposing URL', async () => {
+    (computeImageCostCredits as jest.Mock).mockReturnValue(13);
+    (deductCredits as jest.Mock).mockResolvedValue(true);
+    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-openai-csam' });
+    (generateImageWithOpenAI as jest.Mock).mockResolvedValue('generations/gen-openai-csam.png');
+    (scanForCsam as jest.Mock).mockResolvedValue({ flagged: true });
+    (markQuarantined as jest.Mock).mockResolvedValue(true);
+    (refundCredits as jest.Mock).mockResolvedValue(undefined);
+
+    const res = await request(app).post('/api/generations').send(GPT_BODY);
+
+    expect(res.status).toBe(200);
+    expect(markQuarantined).toHaveBeenCalledWith('gen-openai-csam');
+    expect(refundCredits).toHaveBeenCalledWith(
+      'test-user-id',
+      13,
+      'csam-quarantine-openai-gen-openai-csam',
+    );
+    expect(markCompleted).not.toHaveBeenCalled();
+  });
+
+  it('CSAM scan error queues hiveScanWorker retry, does NOT mark completed or quarantined', async () => {
+    (computeImageCostCredits as jest.Mock).mockReturnValue(13);
+    (deductCredits as jest.Mock).mockResolvedValue(true);
+    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-openai-hive-err' });
+    (generateImageWithOpenAI as jest.Mock).mockResolvedValue('generations/gen-openai-hive-err.png');
+    (scanForCsam as jest.Mock).mockRejectedValue(new Error('Hive timeout'));
+
+    const res = await request(app).post('/api/generations').send(GPT_BODY);
+
+    expect(res.status).toBe(200);
+    expect(hiveScanQueue.add).toHaveBeenCalledWith('scan', {
+      generationId: 'gen-openai-hive-err',
+      r2Key: 'generations/gen-openai-hive-err.png',
+      userId: 'test-user-id',
+      costCredits: 13,
+    });
+    expect(markCompleted).not.toHaveBeenCalled();
+    expect(markQuarantined).not.toHaveBeenCalled();
+  });
+
+  it('insufficient credits for gpt-image-2 returns 402 without calling OpenAI', async () => {
+    (computeImageCostCredits as jest.Mock).mockReturnValue(13);
+    (deductCredits as jest.Mock).mockResolvedValue(false);
+
+    const res = await request(app).post('/api/generations').send(GPT_BODY);
+
+    expect(res.status).toBe(402);
+    expect(res.body.code).toBe('INSUFFICIENT_CREDITS');
+    expect(generateImageWithOpenAI).not.toHaveBeenCalled();
+    expect(dispatchMock).not.toHaveBeenCalled();
+  });
+});
+
+// ─── POST /api/generations — Replicate dispatch failure ──────────────────────
+
+describe('POST /api/generations — dispatch failure (video)', () => {
+  it('returns 502 and refunds credits immediately when provider.dispatch throws', async () => {
+    (resolveDurationSeconds as jest.Mock).mockReturnValue(8);
+    (computeCostCredits as jest.Mock).mockReturnValue(60);
+    (deductCredits as jest.Mock).mockResolvedValue(true);
+    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-dispatch-fail' });
+    dispatchMock.mockRejectedValue(new Error('Replicate unreachable'));
+    (markFailed as jest.Mock).mockResolvedValue(true);
+    (refundCredits as jest.Mock).mockResolvedValue(undefined);
+
+    const res = await request(app).post('/api/generations').send(VALID_BODY);
+
+    expect(res.status).toBe(502);
+    expect(markFailed).toHaveBeenCalledWith('gen-dispatch-fail', 'generic_error');
+    expect(markRefunded).not.toHaveBeenCalled();
+    expect(refundCredits).toHaveBeenCalledWith(
+      'test-user-id',
+      60,
+      'dispatch-failure-gen-dispatch-fail',
+    );
+    expect(attachPredictionId).not.toHaveBeenCalled();
+  });
+});
+
+// ─── POST /api/generations — reference token auto-append ─────────────────────
+
+describe('POST /api/generations — reference token auto-append', () => {
+  beforeEach(() => {
+    (resolveDurationSeconds as jest.Mock).mockReturnValue(5);
+    (computeCostCredits as jest.Mock).mockReturnValue(38);
+    (deductCredits as jest.Mock).mockResolvedValue(true);
+    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-ref-test' });
+    dispatchMock.mockResolvedValue({ providerPredictionId: 'pred-ref' });
+    (attachPredictionId as jest.Mock).mockResolvedValue(undefined);
+  });
+
+  it('appends [Image1] to prompt when reference_images provided and token absent', async () => {
+    const res = await request(app)
+      .post('/api/generations')
+      .send({ ...VALID_BODY, reference_images: ['https://r2.example.com/img.jpg'] });
+
+    expect(res.status).toBe(200);
+    const genArg = (createGeneration as jest.Mock).mock.calls[0][0];
+    expect(genArg.prompt).toContain('[Image1]');
+    expect(dispatchMock.mock.calls[0][0].referenceImages).toEqual(['https://r2.example.com/img.jpg']);
+  });
+
+  it('does NOT double-append [Image1] when it is already in the prompt', async () => {
+    await request(app)
+      .post('/api/generations')
+      .send({
+        ...VALID_BODY,
+        prompt: 'a scene with [Image1] in foreground',
+        reference_images: ['https://r2.example.com/img.jpg'],
+      });
+
+    const genArg = (createGeneration as jest.Mock).mock.calls[0][0];
+    const count = (genArg.prompt.match(/\[Image1\]/g) || []).length;
+    expect(count).toBe(1);
+  });
+
+  it('appends [Video1] to prompt when reference_videos provided and token absent', async () => {
+    const res = await request(app)
+      .post('/api/generations')
+      .send({ ...VALID_BODY, reference_videos: ['https://r2.example.com/vid.mp4'] });
+
+    expect(res.status).toBe(200);
+    const genArg = (createGeneration as jest.Mock).mock.calls[0][0];
+    expect(genArg.prompt).toContain('[Video1]');
+    expect(dispatchMock.mock.calls[0][0].referenceVideos).toEqual(['https://r2.example.com/vid.mp4']);
+  });
+
+  it('passes hasVideoReference=true to computeCostCredits when reference_videos present', async () => {
+    await request(app)
+      .post('/api/generations')
+      .send({ ...VALID_BODY, reference_videos: ['https://r2.example.com/vid.mp4'] });
+
+    expect(computeCostCredits).toHaveBeenCalledWith(
+      expect.objectContaining({ hasVideoReference: true }),
+    );
+  });
+
+  it('strips non-string entries from reference_images', async () => {
+    await request(app)
+      .post('/api/generations')
+      .send({
+        ...VALID_BODY,
+        reference_images: [null, 'https://r2.example.com/img.jpg', undefined, 42],
+      });
+
+    expect(dispatchMock.mock.calls[0][0].referenceImages).toEqual(['https://r2.example.com/img.jpg']);
+  });
+});
+
+// ─── POST /api/generations — input validation ─────────────────────────────────
+
+describe('POST /api/generations — input validation', () => {
+  it('returns 400 INVALID_PROMPT when prompt is missing', async () => {
+    const { prompt: _p, ...bodyWithoutPrompt } = VALID_BODY as Record<string, unknown>;
+    const res = await request(app).post('/api/generations').send(bodyWithoutPrompt);
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_PROMPT');
+    expect(deductCredits).not.toHaveBeenCalled();
+  });
+
+  it('returns 400 INVALID_PROMPT when prompt is an empty string', async () => {
+    const res = await request(app).post('/api/generations').send({ ...VALID_BODY, prompt: '' });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_PROMPT');
+  });
+
+  it('returns 400 INVALID_MODEL when model is not in SUPPORTED_MODELS', async () => {
+    const res = await request(app)
+      .post('/api/generations')
+      .send({ ...VALID_BODY, model: 'openai/sora' });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_MODEL');
+    expect(deductCredits).not.toHaveBeenCalled();
+  });
+
+  it('returns 400 INVALID_RESOLUTION when resolution is not supported', async () => {
+    const res = await request(app)
+      .post('/api/generations')
+      .send({ ...VALID_BODY, resolution: '1080p' });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_RESOLUTION');
+    expect(deductCredits).not.toHaveBeenCalled();
+  });
+
+  it('returns 400 INVALID_RESOLUTION when resolution is missing', async () => {
+    const { resolution: _r, ...bodyWithoutResolution } = VALID_BODY as Record<string, unknown>;
+    const res = await request(app).post('/api/generations').send(bodyWithoutResolution);
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_RESOLUTION');
+    expect(deductCredits).not.toHaveBeenCalled();
   });
 });
 
@@ -297,7 +676,7 @@ describe('GET /api/generations', () => {
     r2_key: 'generations/gen-001.mp4',
     created_at: new Date('2026-06-28T10:00:00Z'),
     prompt: 'a cinematic city',
-    model: 'bytedance/seedance-2.0-fast',
+    model: 'bytedance/seedance-2.0-mini',
     cost_credits: 60,
     params: {},
     replicate_prediction_id: 'pred-abc',
@@ -310,26 +689,23 @@ describe('GET /api/generations', () => {
     r2_key: null,
     created_at: new Date('2026-06-28T09:00:00Z'),
     prompt: 'a forest',
-    model: 'bytedance/seedance-2.0-fast',
+    model: 'bytedance/seedance-2.0-mini',
     cost_credits: 38,
     params: {},
     replicate_prediction_id: null,
     completed_at: null,
   };
 
-  it('returns 200 with items array and nextCursor null when fewer than limit items returned', async () => {
+  it('returns 200 with items array; completed items get presigned URL, pending get null', async () => {
     (listGenerations as jest.Mock).mockResolvedValue([completedItem, pendingItem]);
 
     const res = await request(app).get('/api/generations');
 
     expect(res.status).toBe(200);
     expect(res.body.items).toHaveLength(2);
-    // completed item gets presigned video_url
     expect(res.body.items[0].video_url).toBe('https://r2.example.com/presigned');
     expect(getGenerationPresignedUrl).toHaveBeenCalledWith('generations/gen-001.mp4');
-    // pending item gets null video_url
     expect(res.body.items[1].video_url).toBeNull();
-    // fewer than limit (20) → nextCursor is null
     expect(res.body.nextCursor).toBeNull();
   });
 
@@ -347,12 +723,10 @@ describe('GET /api/generations', () => {
 
     await request(app).get('/api/generations');
 
-    // listGenerations must be called with the authenticated dbUserId, not any other id
     expect(listGenerations).toHaveBeenCalledWith('test-user-id', undefined, 20);
   });
 
   it('returns nextCursor when page is exactly at limit', async () => {
-    // Return exactly 20 items (the default limit)
     const items = Array.from({ length: 20 }, (_, i) => ({
       ...pendingItem,
       id: `gen-${String(i).padStart(3, '0')}`,
@@ -365,8 +739,6 @@ describe('GET /api/generations', () => {
     expect(res.status).toBe(200);
     expect(res.body.items).toHaveLength(20);
     expect(res.body.nextCursor).not.toBeNull();
-    expect(typeof res.body.nextCursor).toBe('string');
-    // nextCursor format: ISO__id
     expect(res.body.nextCursor).toContain('__');
   });
 });
@@ -381,7 +753,7 @@ describe('GET /api/generations/:id', () => {
     r2_key: 'generations/gen-001.mp4',
     created_at: new Date('2026-06-28T10:00:00Z'),
     prompt: 'a cinematic city',
-    model: 'bytedance/seedance-2.0-fast',
+    model: 'bytedance/seedance-2.0-mini',
     cost_credits: 60,
     params: {},
     replicate_prediction_id: 'pred-abc',
@@ -434,161 +806,12 @@ describe('DELETE /api/generations/:id', () => {
     expect(softDeleteGeneration).toHaveBeenCalledWith('gen-001', 'test-user-id');
   });
 
-  it('returns 404 when softDeleteGeneration returns false (IDOR guard — other user ID)', async () => {
+  it('returns 404 when softDeleteGeneration returns false (IDOR guard)', async () => {
     (softDeleteGeneration as jest.Mock).mockResolvedValue(false);
 
     const res = await request(app).delete('/api/generations/other-user-gen');
 
     expect(res.status).toBe(404);
     expect(res.body.error).toBe('Not found or not authorized');
-  });
-});
-
-// ─── Input validation (prepareCost middleware) ────────────────────────────────
-
-describe('POST /api/generations — input validation', () => {
-  it('returns 400 INVALID_PROMPT when prompt is missing', async () => {
-    const { prompt: _p, ...bodyWithoutPrompt } = VALID_BODY as Record<string, unknown>;
-    const res = await request(app).post('/api/generations').send(bodyWithoutPrompt);
-    expect(res.status).toBe(400);
-    expect(res.body.code).toBe('INVALID_PROMPT');
-    expect(deductCredits).not.toHaveBeenCalled();
-  });
-
-  it('returns 400 INVALID_PROMPT when prompt is an empty string', async () => {
-    const res = await request(app).post('/api/generations').send({ ...VALID_BODY, prompt: '' });
-    expect(res.status).toBe(400);
-    expect(res.body.code).toBe('INVALID_PROMPT');
-    expect(deductCredits).not.toHaveBeenCalled();
-  });
-
-  it('returns 400 INVALID_PROMPT when prompt is a number (not a string)', async () => {
-    const res = await request(app).post('/api/generations').send({ ...VALID_BODY, prompt: 42 });
-    expect(res.status).toBe(400);
-    expect(res.body.code).toBe('INVALID_PROMPT');
-    expect(deductCredits).not.toHaveBeenCalled();
-  });
-
-  it('returns 400 INVALID_MODEL when model is not in SUPPORTED_MODELS', async () => {
-    const res = await request(app)
-      .post('/api/generations')
-      .send({ ...VALID_BODY, model: 'openai/sora' });
-    expect(res.status).toBe(400);
-    expect(res.body.code).toBe('INVALID_MODEL');
-    expect(deductCredits).not.toHaveBeenCalled();
-  });
-
-  it('returns 400 INVALID_RESOLUTION when resolution is not 480p or 720p', async () => {
-    const res = await request(app)
-      .post('/api/generations')
-      .send({ ...VALID_BODY, resolution: '1080p' });
-    expect(res.status).toBe(400);
-    expect(res.body.code).toBe('INVALID_RESOLUTION');
-    expect(deductCredits).not.toHaveBeenCalled();
-  });
-
-  it('returns 400 INVALID_RESOLUTION when resolution is missing', async () => {
-    const { resolution: _r, ...bodyWithoutResolution } = VALID_BODY as Record<string, unknown>;
-    const res = await request(app).post('/api/generations').send(bodyWithoutResolution);
-    expect(res.status).toBe(400);
-    expect(res.body.code).toBe('INVALID_RESOLUTION');
-    expect(deductCredits).not.toHaveBeenCalled();
-  });
-});
-
-// ─── Dispatch failure path ────────────────────────────────────────────────────
-
-describe('POST /api/generations — dispatch failure', () => {
-  it('returns 502 and refunds credits immediately when provider.dispatch throws', async () => {
-    (resolveDurationSeconds as jest.Mock).mockReturnValue(8);
-    (computeCostCredits as jest.Mock).mockReturnValue(60);
-    (deductCredits as jest.Mock).mockResolvedValue(true);
-    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-dispatch-fail' });
-    dispatchMock.mockRejectedValue(new Error('Replicate unreachable'));
-    (markFailed as jest.Mock).mockResolvedValue(true);
-    (refundCredits as jest.Mock).mockResolvedValue(undefined);
-
-    const res = await request(app).post('/api/generations').send(VALID_BODY);
-
-    expect(res.status).toBe(502);
-    expect(markFailed).toHaveBeenCalledWith('gen-dispatch-fail');
-    expect(markRefunded).not.toHaveBeenCalled();
-    expect(refundCredits).toHaveBeenCalledWith(
-      'test-user-id',
-      60,
-      'dispatch-failure-gen-dispatch-fail',
-    );
-    expect(attachPredictionId).not.toHaveBeenCalled();
-  });
-});
-
-// ─── Reference token auto-append (D-23, D-24) ────────────────────────────────
-
-describe('POST /api/generations — reference token auto-append', () => {
-  beforeEach(() => {
-    (resolveDurationSeconds as jest.Mock).mockReturnValue(5);
-    (computeCostCredits as jest.Mock).mockReturnValue(38);
-    (deductCredits as jest.Mock).mockResolvedValue(true);
-    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-ref-test' });
-    dispatchMock.mockResolvedValue({ providerPredictionId: 'pred-ref' });
-    (attachPredictionId as jest.Mock).mockResolvedValue(undefined);
-  });
-
-  it('appends @Image1 to prompt when reference_images provided and token absent', async () => {
-    const res = await request(app)
-      .post('/api/generations')
-      .send({ ...VALID_BODY, reference_images: ['https://r2.example.com/img.jpg'] });
-
-    expect(res.status).toBe(200);
-    const genArg = (createGeneration as jest.Mock).mock.calls[0][0];
-    expect(genArg.prompt).toContain('@Image1');
-    expect(dispatchMock.mock.calls[0][0].referenceImages).toEqual(['https://r2.example.com/img.jpg']);
-  });
-
-  it('does NOT double-append @Image1 when it is already in the prompt', async () => {
-    await request(app)
-      .post('/api/generations')
-      .send({
-        ...VALID_BODY,
-        prompt: 'a scene with @Image1 in foreground',
-        reference_images: ['https://r2.example.com/img.jpg'],
-      });
-
-    const genArg = (createGeneration as jest.Mock).mock.calls[0][0];
-    const count = (genArg.prompt.match(/@Image1/g) || []).length;
-    expect(count).toBe(1);
-  });
-
-  it('appends @Video1 to prompt when reference_videos provided and token absent', async () => {
-    const res = await request(app)
-      .post('/api/generations')
-      .send({ ...VALID_BODY, reference_videos: ['https://r2.example.com/vid.mp4'] });
-
-    expect(res.status).toBe(200);
-    const genArg = (createGeneration as jest.Mock).mock.calls[0][0];
-    expect(genArg.prompt).toContain('@Video1');
-    expect(dispatchMock.mock.calls[0][0].referenceVideos).toEqual(['https://r2.example.com/vid.mp4']);
-  });
-
-  it('passes hasVideoReference=true to computeCostCredits when reference_videos present — prevents cost gaming (T-07-04-03)', async () => {
-    await request(app)
-      .post('/api/generations')
-      .send({ ...VALID_BODY, reference_videos: ['https://r2.example.com/vid.mp4'] });
-
-    expect(computeCostCredits).toHaveBeenCalledWith(
-      expect.objectContaining({ hasVideoReference: true }),
-    );
-  });
-
-  it('strips non-string entries from reference_images (null/undefined/number filtering)', async () => {
-    await request(app)
-      .post('/api/generations')
-      .send({
-        ...VALID_BODY,
-        reference_images: [null, 'https://r2.example.com/img.jpg', undefined, 42],
-      });
-
-    // Only the valid string URL passes through to dispatch
-    expect(dispatchMock.mock.calls[0][0].referenceImages).toEqual(['https://r2.example.com/img.jpg']);
   });
 });

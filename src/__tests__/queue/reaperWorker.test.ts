@@ -3,6 +3,10 @@
 // the shared-guard race protection (RESEARCH.md Pitfall 2), and the 5-minute repeatable schedule.
 // All BullMQ, DB, and provider calls are mocked: no live Redis/Postgres/Replicate connection required.
 
+jest.mock('../../config', () => ({
+  config: { hiveScanEnabled: true },
+}));
+
 jest.mock('bullmq', () => {
   const QueueMock = jest.fn().mockImplementation(() => ({
     add: jest.fn(),

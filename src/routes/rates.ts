@@ -3,7 +3,7 @@
 // credit costs client-side without hardcoding values in the app bundle.
 
 import { Router } from 'express';
-import { MODEL_RATES, CREDITS_PER_DOLLAR, IMAGE_MODEL_COSTS, DREAMACTOR_RATE, VIDEO_UPSCALER_RATES } from '../services/generationService';
+import { MODEL_RATES, CREDITS_PER_DOLLAR, IMAGE_MODEL_COSTS, DREAMACTOR_RATE, VIDEO_UPSCALER_RATES, GROK_IMAGINE_CREDITS_PER_SEC } from '../services/generationService';
 
 export const ratesRouter = Router();
 
@@ -34,5 +34,11 @@ ratesRouter.get('/', (_req, res) => {
     ) as typeof VIDEO_UPSCALER_RATES['pro'],
   };
 
-  res.json({ rates: creditRates, imageCosts: IMAGE_MODEL_COSTS, dreamactorRate: dreamactorCreditRate, upscalerRates: upscalerCreditRates });
+  res.json({
+    rates: creditRates,
+    imageCosts: IMAGE_MODEL_COSTS,
+    dreamactorRate: dreamactorCreditRate,
+    upscalerRates: upscalerCreditRates,
+    grokImagineRate: GROK_IMAGINE_CREDITS_PER_SEC, // already in credits, flat — no CREDITS_PER_DOLLAR multiply
+  });
 });

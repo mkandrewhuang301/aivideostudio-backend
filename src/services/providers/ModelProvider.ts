@@ -15,6 +15,8 @@ export interface GenerationInput {
   referenceVideos?: string[];            // presigned R2 URLs; @Video1 auto-appended to prompt (D-24)
   // Image-specific (undefined for video/avatar/upscale generations)
   imageAspectRatio?: string;  // e.g. "1:1" | "4:3" | "3:4" | "16:9" | "9:16"
+  imageSize?: '2K' | '3K';   // Seedream output resolution; '2K' = 2048px (default), '3K' = 3072px
+  imageQuality?: 'high' | 'medium' | 'low'; // GPT Image 2 only — controls output fidelity vs. cost
   // Avatar-specific — DreamActor M2.0 (bytedance/dreamactor-m2.0)
   avatarImage?: string;        // presigned URL — portrait source image
   avatarDrivingVideo?: string; // presigned URL — motion/expression driver video

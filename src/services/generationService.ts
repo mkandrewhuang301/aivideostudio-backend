@@ -23,9 +23,24 @@ export const MODEL_RATES: Record<string, { nonVideoIn: Record<string, number>; v
 
 // Per-model supported resolutions — used for request validation in generations.ts
 export const MODEL_RESOLUTIONS: Record<string, readonly string[]> = {
-  'bytedance/seedance-2.0-mini': ['480p', '720p'],
-  'bytedance/seedance-2.0':      ['480p', '720p', '1080p', '4k'],
+  'bytedance/seedance-2.0-mini':   ['480p', '720p'],
+  'bytedance/seedance-2.0':        ['480p', '720p', '1080p', '4k'],
+  'xai/grok-imagine-video-1.5':    ['480p', '720p'],
 };
+
+// ─── xAI Grok Imagine Video 1.5 (image-to-video, synced audio) ────────────────
+// $0.08/sec Replicate cost → 8 credits/sec flat, same across 480p/720p.
+// 1 credit = 1¢ direct mapping (IMAGE_MODEL_COSTS convention) — NOT run through
+// CREDITS_PER_DOLLAR, which is calibrated for the Seedance-family $/sec rates.
+// Mandatory image input (image-to-video only, no text-only mode). Audio is
+// always synchronized/on — Replicate schema has no audio toggle for this model.
+export const GROK_IMAGINE_CREDITS_PER_SEC = 8;
+export const SUPPORTED_GROK_MODELS = ['xai/grok-imagine-video-1.5'] as const;
+export type SupportedGrokModel = typeof SUPPORTED_GROK_MODELS[number];
+
+export function computeGrokImagineCost(durationSeconds: number): number {
+  return Math.ceil(durationSeconds * GROK_IMAGINE_CREDITS_PER_SEC);
+}
 
 export function resolveDurationSeconds(requested: number | 'auto'): number {
   if (requested === 'auto') {
@@ -42,15 +57,19 @@ export const SUPPORTED_MODELS = ['bytedance/seedance-2.0-mini', 'bytedance/seeda
 export type SupportedModel = typeof SUPPORTED_MODELS[number];
 
 // Image model flat costs (credits per generation, not per-second). 1 credit = 1¢.
+// Quality is encoded in the model ID; "openai/gpt-image-2" retained for regen of older items.
+// Seedream 5 Lite / 4.5 paused (worse output quality than gpt-image-2) — see .planning/STATE.md.
 export const IMAGE_MODEL_COSTS: Record<string, number> = {
-  'bytedance/seedream-5-lite': 4,
-  'bytedance/seedream-4.5': 5,
-  'openai/gpt-image-2': 13,
+  'openai/gpt-image-2-high':   13, // $0.128/image
+  'openai/gpt-image-2-medium': 5,  // $0.047/image
+  'openai/gpt-image-2-low':    2,  // $0.012/image
+  'openai/gpt-image-2':        13, // backward compat — defaults to high cost
 };
 
 export const SUPPORTED_IMAGE_MODELS = [
-  'bytedance/seedream-5-lite',
-  'bytedance/seedream-4.5',
+  'openai/gpt-image-2-high',
+  'openai/gpt-image-2-medium',
+  'openai/gpt-image-2-low',
   'openai/gpt-image-2',
 ] as const;
 export type SupportedImageModel = typeof SUPPORTED_IMAGE_MODELS[number];
@@ -138,19 +157,48 @@ export async function attachPredictionId(generationId: string, predictionId: str
 }
 
 export async function markCompleted(generationId: string, r2Key: string): Promise<boolean> {
+  // Accepts 'pending' in addition to 'processing' to support the OpenAI inline path,
+  // where the generation completes in the same request without going through 'processing'.
   const result = await db.execute(sql`
     UPDATE generations
     SET status = 'completed', r2_key = ${r2Key}, completed_at = now()
-    WHERE id = ${generationId}::uuid AND status = 'processing'
+    WHERE id = ${generationId}::uuid AND status IN ('pending', 'processing')
     RETURNING id
   `);
   return (result.rows?.length ?? 0) > 0;
 }
 
-export async function markFailed(generationId: string): Promise<boolean> {
+// Order matters: copyright errors ("...may be related to copyright restrictions")
+// also contain generic moderation words, so check the copyright keywords first.
+export function classifyFailureReason(error: unknown): 'copyright' | 'content_policy' | 'generic_error' {
+  if (typeof error !== 'string') return 'generic_error';
+  const lower = error.toLowerCase();
+  if (lower.includes('copyright') || lower.includes('intellectual property') || lower.includes('trademark')) {
+    return 'copyright';
+  }
+  if (
+    lower.includes('nsfw') ||
+    lower.includes('content policy') ||
+    lower.includes('safety') ||
+    lower.includes('inappropriate') ||
+    lower.includes('violat') ||
+    lower.includes('prohibited') ||
+    lower.includes('not allowed') ||
+    lower.includes('restricted') ||
+    lower.includes('restriction')
+  ) {
+    return 'content_policy';
+  }
+  return 'generic_error';
+}
+
+export async function markFailed(
+  generationId: string,
+  reason: 'content_policy' | 'copyright' | 'generic_error' = 'generic_error',
+): Promise<boolean> {
   const result = await db.execute(sql`
     UPDATE generations
-    SET status = 'failed', completed_at = now()
+    SET status = 'failed', completed_at = now(), failure_reason = ${reason}
     WHERE id = ${generationId}::uuid AND status IN ('pending', 'processing')
     RETURNING id
   `);
@@ -158,10 +206,11 @@ export async function markFailed(generationId: string): Promise<boolean> {
 }
 
 export async function markQuarantined(generationId: string): Promise<boolean> {
+  // Accepts 'pending' in addition to 'processing' for the OpenAI inline path.
   const result = await db.execute(sql`
     UPDATE generations
     SET status = 'quarantined', completed_at = now()
-    WHERE id = ${generationId}::uuid AND status = 'processing'
+    WHERE id = ${generationId}::uuid AND status IN ('pending', 'processing')
     RETURNING id
   `);
   return (result.rows?.length ?? 0) > 0;

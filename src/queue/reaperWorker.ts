@@ -14,6 +14,7 @@ import { refundCredits } from '../services/creditService';
 import { archiveToR2 } from '../services/archivalService';
 import { scanForCsam } from '../services/hiveService';
 import { ReplicateProvider } from '../services/providers/ReplicateProvider';
+import { config } from '../config';
 
 const QUEUE_NAME = 'generation-reaper';
 
@@ -71,12 +72,14 @@ export async function reapStalledJobs(): Promise<void> {
         const r2Key = await archiveToR2(prediction.outputUrl, row.id);
 
         let hiveFlagged = false;
-        try {
-          const { flagged } = await scanForCsam(r2Key);
-          hiveFlagged = flagged;
-        } catch (hiveErr) {
-          console.error(`[reaper] Hive scan failed for ${row.id} — quarantining:`, hiveErr);
-          hiveFlagged = true;
+        if (config.hiveScanEnabled) {
+          try {
+            const { flagged } = await scanForCsam(r2Key);
+            hiveFlagged = flagged;
+          } catch (hiveErr) {
+            console.error(`[reaper] Hive scan failed for ${row.id} — quarantining:`, hiveErr);
+            hiveFlagged = true;
+          }
         }
 
         if (hiveFlagged) {

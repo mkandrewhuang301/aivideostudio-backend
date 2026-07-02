@@ -98,6 +98,87 @@ describe('ReplicateProvider.dispatch', () => {
   });
 });
 
+describe('ReplicateProvider.dispatch — image models', () => {
+  beforeEach(() => {
+    mockCreate.mockReset();
+    mockGet.mockReset();
+  });
+
+  it('Seedream image dispatch sends prompt + aspect_ratio only — no size parameter', async () => {
+    mockCreate.mockResolvedValue({ id: 'pred-img-1' });
+
+    const provider = new ReplicateProvider();
+    const result = await provider.dispatch(
+      {
+        prompt: 'a fox in a forest',
+        model: 'bytedance/seedream-5-lite',
+        mediaType: 'image',
+        imageAspectRatio: '16:9',
+      },
+      'https://example.com/webhooks/replicate',
+    );
+
+    expect(result).toEqual({ providerPredictionId: 'pred-img-1' });
+    const callArgs = mockCreate.mock.calls[0][0];
+    expect(callArgs.model).toBe('bytedance/seedream-5-lite');
+    expect(callArgs.input.prompt).toBe('a fox in a forest');
+    expect(callArgs.input.aspect_ratio).toBe('16:9');
+    // No size parameter — it was removed because it caused Replicate validation errors
+    expect(callArgs.input.size).toBeUndefined();
+    expect(callArgs.webhook_events_filter).toEqual(['completed']);
+  });
+
+  it('Seedream image dispatch defaults aspect_ratio to 1:1 when imageAspectRatio is omitted', async () => {
+    mockCreate.mockResolvedValue({ id: 'pred-img-2' });
+
+    const provider = new ReplicateProvider();
+    await provider.dispatch(
+      { prompt: 'a cat', model: 'bytedance/seedream-4.5', mediaType: 'image' },
+      'https://example.com/webhooks/replicate',
+    );
+
+    const callArgs = mockCreate.mock.calls[0][0];
+    expect(callArgs.input.aspect_ratio).toBe('1:1');
+    expect(callArgs.input.size).toBeUndefined();
+  });
+});
+
+describe('ReplicateProvider.dispatch — xAI Grok Imagine Video 1.5', () => {
+  beforeEach(() => {
+    mockCreate.mockReset();
+    mockGet.mockReset();
+  });
+
+  it('sends a single image field and never a generate_audio or reference_images key', async () => {
+    mockCreate.mockResolvedValue({ id: 'pred-grok-1' });
+
+    const provider = new ReplicateProvider();
+    await provider.dispatch(
+      {
+        prompt: 'the woman looks up into the sunlight',
+        model: 'xai/grok-imagine-video-1.5',
+        mediaType: 'video',
+        durationSeconds: 5,
+        resolution: '720p',
+        aspectRatio: '16:9',
+        audioEnabled: true,
+        referenceImages: ['https://example.com/source.png'],
+      },
+      'https://example.com/webhooks/replicate',
+    );
+
+    const callArgs = mockCreate.mock.calls[0][0];
+    expect(callArgs.model).toBe('xai/grok-imagine-video-1.5');
+    expect(callArgs.input.image).toBe('https://example.com/source.png');
+    expect(callArgs.input.duration).toBe(5);
+    expect(callArgs.input.resolution).toBe('720p');
+    expect(callArgs.input.aspect_ratio).toBe('16:9');
+    expect(callArgs.input.generate_audio).toBeUndefined();
+    expect(callArgs.input.reference_images).toBeUndefined();
+    expect(callArgs.input.reference_videos).toBeUndefined();
+  });
+});
+
 describe('ReplicateProvider.getStatus', () => {
   beforeEach(() => {
     mockCreate.mockReset();

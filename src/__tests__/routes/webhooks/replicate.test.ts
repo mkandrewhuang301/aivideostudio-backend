@@ -11,6 +11,7 @@
 jest.mock('../../../config', () => ({
   config: {
     replicateWebhookSecret: 'whsec_test-secret',
+    hiveScanEnabled: true,
     databaseUrl: 'mock://db',
     redisUrl: 'redis://localhost',
     r2AccountId: 'mock',
@@ -49,6 +50,7 @@ jest.mock('../../../services/generationService', () => ({
   markCompleted: jest.fn(),
   markFailed: jest.fn(),
   markQuarantined: jest.fn(),
+  classifyFailureReason: jest.requireActual('../../../services/generationService').classifyFailureReason,
 }));
 
 jest.mock('../../../services/hiveService', () => ({
@@ -212,8 +214,24 @@ describe('replicateWebhookRouter', () => {
     const res = await post({ id: 'pred_456', status: 'failed' });
 
     expect(res.status).toBe(200);
-    expect(markFailed).toHaveBeenCalledWith('gen-2');
+    expect(markFailed).toHaveBeenCalledWith('gen-2', 'generic_error');
     expect(refundCredits).toHaveBeenCalledWith('u1', 45, 'pred_456');
+  });
+
+  it('marks failed with content_policy reason when Replicate error mentions nsfw/safety', async () => {
+    (validateWebhook as jest.Mock).mockResolvedValue(true);
+    (getGenerationByPredictionId as jest.Mock).mockResolvedValue({
+      id: 'gen-3',
+      user_id: 'u1',
+      status: 'processing',
+      cost_credits: 45,
+    });
+
+    const res = await post({ id: 'pred_nsfw', status: 'failed', error: 'NSFW content detected by safety filter' });
+
+    expect(res.status).toBe(200);
+    expect(markFailed).toHaveBeenCalledWith('gen-3', 'content_policy');
+    expect(refundCredits).toHaveBeenCalledWith('u1', 45, 'pred_nsfw');
   });
 
   it('still returns 200 when sendGenerationComplete throws (push failure isolated)', async () => {

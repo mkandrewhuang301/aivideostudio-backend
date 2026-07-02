@@ -11,19 +11,26 @@ const replicate = new Replicate({ auth: config.replicateApiToken });
 export class ReplicateProvider implements ModelProvider {
   async dispatch(input: GenerationInput, webhookUrl: string): Promise<DispatchResult> {
     let replicateInput: Record<string, unknown>;
+    // GPT Image 2 virtual IDs encode quality; resolve to the real Replicate model slug.
+    const GPT_QUALITY: Record<string, string> = {
+      'openai/gpt-image-2-high':   'high',
+      'openai/gpt-image-2-medium': 'medium',
+      'openai/gpt-image-2-low':    'low',
+      'openai/gpt-image-2':        'high',
+    };
+    const replicateModel = input.model in GPT_QUALITY ? 'openai/gpt-image-2' : input.model;
 
     if (input.mediaType === 'image') {
-      const ar = input.imageAspectRatio ?? '1:1';
-      if (input.model === 'openai/gpt-image-2') {
-        // GPT Image 2 only accepts "1:1", "3:2", "2:3"
-        const landscape = ['4:3', '16:9', '3:2', '21:9'].includes(ar);
-        const portrait  = ['3:4', '9:16', '2:3'].includes(ar);
-        const gptAr = landscape ? '3:2' : portrait ? '2:3' : '1:1';
-        replicateInput = { prompt: input.prompt, aspect_ratio: gptAr, quality: 'high' };
-      } else {
-        // Seedream 5 Lite + Seedream 4.5: use size + aspect_ratio
-        replicateInput = { prompt: input.prompt, aspect_ratio: ar, size: '2K' };
-      }
+      const isGptImage = input.model in GPT_QUALITY;
+      const gptQuality = GPT_QUALITY[input.model] ?? input.imageQuality ?? 'high';
+      replicateInput = {
+        prompt: input.prompt,
+        aspect_ratio: input.imageAspectRatio ?? '1:1',
+        ...(isGptImage ? { quality: gptQuality } : {}),
+        ...(input.referenceImages?.length
+          ? { [isGptImage ? 'input_images' : 'image_input']: input.referenceImages }
+          : {}),
+      };
     } else if (input.mediaType === 'avatar') {
       // DreamActor M2.0: portrait image + driving video — no text prompt
       replicateInput = {
@@ -41,6 +48,16 @@ export class ReplicateProvider implements ModelProvider {
         ...(input.upscalerTargetResolution ? { target_resolution: input.upscalerTargetResolution } : {}),
         ...(input.upscalerTargetFps ? { target_fps: input.upscalerTargetFps } : {}),
       };
+    } else if (input.model === 'xai/grok-imagine-video-1.5') {
+      // Image-to-video, mandatory single `image` field — no bracket-token references,
+      // no generate_audio (Replicate schema has no audio toggle; always synchronized).
+      replicateInput = {
+        prompt: input.prompt,
+        image: input.referenceImages?.[0],
+        duration: input.durationSeconds,
+        resolution: input.resolution,
+        aspect_ratio: input.aspectRatio,
+      };
     } else {
       // Video model input (CLAUDE.md Rule 7: durationSeconds never -1)
       replicateInput = {
@@ -48,14 +65,14 @@ export class ReplicateProvider implements ModelProvider {
         duration: input.durationSeconds,
         resolution: input.resolution,
         aspect_ratio: input.aspectRatio,
-        audio: input.audioEnabled,
+        generate_audio: input.audioEnabled,
       };
       if (input.referenceImages?.length) replicateInput.reference_images = input.referenceImages;
       if (input.referenceVideos?.length) replicateInput.reference_videos = input.referenceVideos;
     }
 
     const prediction = await replicate.predictions.create({
-      model: input.model as `${string}/${string}`,
+      model: replicateModel as `${string}/${string}`,
       input: replicateInput,
       webhook: webhookUrl,
       webhook_events_filter: ['completed'],

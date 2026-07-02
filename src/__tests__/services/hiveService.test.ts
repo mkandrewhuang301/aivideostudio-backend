@@ -52,19 +52,19 @@ function makeHiveResponse(frames: Array<{ class_name: string; value: number }[]>
 describe('scanForCsam', () => {
   beforeEach(() => mockFetch.mockReset());
 
-  it('returns flagged=true when a frame has yes_child_present >= 0.8 AND general_nsfw >= 0.85', async () => {
+  it('returns flagged=true when a frame has yes_child_present >= 0.92 AND yes_female_nudity >= 0.85', async () => {
     mockFetch.mockResolvedValue(makeHiveResponse([[
       { class_name: 'yes_child_present', value: 0.95 },
-      { class_name: 'general_nsfw', value: 0.92 },
+      { class_name: 'yes_female_nudity', value: 0.92 },
     ]]));
     const result = await scanForCsam('https://r2.example.com/video.mp4');
     expect(result.flagged).toBe(true);
   });
 
-  it('returns flagged=false when child_present is high but no sexual content', async () => {
+  it('returns flagged=false when child_present is high but no explicit sexual content (general_nsfw alone does not flag)', async () => {
     mockFetch.mockResolvedValue(makeHiveResponse([[
       { class_name: 'yes_child_present', value: 0.95 },
-      { class_name: 'general_nsfw', value: 0.1 },
+      { class_name: 'general_nsfw', value: 0.99 },
     ]]));
     const result = await scanForCsam('https://r2.example.com/video.mp4');
     expect(result.flagged).toBe(false);
@@ -79,10 +79,10 @@ describe('scanForCsam', () => {
     expect(result.flagged).toBe(false);
   });
 
-  it('returns flagged=false when yes_child_present is below threshold (0.79)', async () => {
+  it('returns flagged=false when yes_child_present is below threshold (0.91)', async () => {
     mockFetch.mockResolvedValue(makeHiveResponse([[
-      { class_name: 'yes_child_present', value: 0.79 },
-      { class_name: 'general_nsfw', value: 0.99 },
+      { class_name: 'yes_child_present', value: 0.91 },
+      { class_name: 'yes_female_nudity', value: 0.99 },
     ]]));
     const result = await scanForCsam('https://r2.example.com/video.mp4');
     expect(result.flagged).toBe(false);
@@ -103,7 +103,7 @@ describe('scanForCsam', () => {
       // Frame 0: clean
       [{ class_name: 'yes_child_present', value: 0.1 }, { class_name: 'general_nsfw', value: 0.1 }],
       // Frame 1: flagged
-      [{ class_name: 'yes_child_present', value: 0.9 }, { class_name: 'yes_female_nudity', value: 0.9 }],
+      [{ class_name: 'yes_child_present', value: 0.93 }, { class_name: 'yes_female_nudity', value: 0.9 }],
     ]));
     const result = await scanForCsam('https://r2.example.com/video.mp4');
     expect(result.flagged).toBe(true);

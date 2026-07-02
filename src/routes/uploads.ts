@@ -3,17 +3,19 @@
 // stores to R2 under uploads/{userId}/{uuid}.{ext}, persists record to reference_uploads,
 // returns presigned URL (1-hour TTL). SECURITY: MIME whitelist via multer fileFilter. 50MB limit.
 // GET /api/uploads — lists user's uploaded reference media with fresh presigned URLs.
+// POST /api/uploads/from-generation — promotes a completed generation's output into the
+// permanent reference library (copies the R2 object so the reference is independently owned).
 // DELETE /api/uploads/:id — deletes upload from R2 and DB; IDOR-guarded by user ownership.
 // CLAUDE.md Rule 2: raw r2_key never returned — always presigned URL.
 
 import { Router, Request, Response } from 'express';
 import multer from 'multer';
 import { randomUUID } from 'crypto';
-import { PutObjectCommand, GetObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
+import { PutObjectCommand, GetObjectCommand, DeleteObjectCommand, CopyObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { r2, R2_BUCKET } from '../storage/r2';
 import { db } from '../db/client';
-import { referenceUploads } from '../db/schema';
+import { referenceUploads, generations } from '../db/schema';
 import { eq, desc, and, sql } from 'drizzle-orm';
 
 export const uploadsRouter = Router();
@@ -23,6 +25,13 @@ const ALLOWED_MIMES: Record<string, string> = {
   'image/png': 'png',
   'image/webp': 'webp',
   'video/mp4': 'mp4',
+};
+
+const EXT_TO_MIME: Record<string, string> = {
+  jpg: 'image/jpeg',
+  png: 'image/png',
+  webp: 'image/webp',
+  mp4: 'video/mp4',
 };
 
 const upload = multer({
@@ -112,6 +121,70 @@ uploadsRouter.get('/', async (req: Request, res: Response) => {
   } catch (err) {
     console.error('[uploads] Error listing uploads:', err);
     res.status(500).json({ error: 'Failed to list uploads' });
+  }
+});
+
+// POST /api/uploads/from-generation — promote a completed generation's output into the
+// permanent reference library. Copies the R2 object under uploads/{userId}/{uuid}.{ext} so
+// the new reference_uploads row is independently owned: deleting it (or the original
+// generation) never affects the other's media.
+uploadsRouter.post('/from-generation', async (req: Request, res: Response) => {
+  if (!req.user?.dbUserId) {
+    res.status(401).json({ error: 'Not authenticated' });
+    return;
+  }
+  const { generation_id, display_name } = req.body ?? {};
+  if (typeof generation_id !== 'string') {
+    res.status(400).json({ error: 'generation_id is required' });
+    return;
+  }
+  try {
+    const [gen] = await db
+      .select({ r2_key: generations.r2_key, status: generations.status })
+      .from(generations)
+      .where(and(eq(generations.id, generation_id), eq(generations.user_id, req.user.dbUserId)));
+    if (!gen || gen.status !== 'completed' || !gen.r2_key) {
+      res.status(404).json({ error: 'Generation not found or not completed' });
+      return;
+    }
+
+    const ext = gen.r2_key.split('.').pop() ?? 'mp4';
+    const mimeType = EXT_TO_MIME[ext] ?? 'video/mp4';
+    const key = `uploads/${req.user.dbUserId}/${randomUUID()}.${ext}`;
+
+    await r2.send(
+      new CopyObjectCommand({
+        Bucket: R2_BUCKET,
+        CopySource: `${R2_BUCKET}/${gen.r2_key}`,
+        Key: key,
+        ContentType: mimeType,
+      }),
+    );
+
+    const trimmed = typeof display_name === 'string'
+      ? display_name.replace(/[\[\]]/g, '').trim().slice(0, 40)
+      : '';
+    const [insertedRow] = await db
+      .insert(referenceUploads)
+      .values({
+        user_id: req.user.dbUserId,
+        r2_key: key,
+        mime_type: mimeType,
+        display_name: trimmed.length > 0 ? trimmed : null,
+      })
+      .returning({ id: referenceUploads.id, display_name: referenceUploads.display_name });
+
+    const url = await getSignedUrl(r2, new GetObjectCommand({ Bucket: R2_BUCKET, Key: key }), { expiresIn: 3600 });
+
+    res.status(200).json({
+      id: insertedRow?.id ?? null,
+      url,
+      mime_type: mimeType,
+      display_name: insertedRow?.display_name ?? null,
+    });
+  } catch (err) {
+    console.error('[uploads] Error creating reference from generation:', err);
+    res.status(500).json({ error: 'Failed to save reference' });
   }
 });
 
