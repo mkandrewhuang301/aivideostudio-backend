@@ -35,6 +35,11 @@ jest.mock('../../db/client', () => ({
   db: {
     execute: jest.fn().mockResolvedValue({ rows: [] }),
     insert: jest.fn(),
+    select: jest.fn(() => ({
+      from: jest.fn(() => ({
+        where: jest.fn().mockResolvedValue([]),
+      })),
+    })),
   },
 }));
 
@@ -75,7 +80,7 @@ jest.mock('../../services/generationService', () => ({
 jest.mock('../../services/archivalService', () => ({
   archiveToR2: jest.fn(),
   getGenerationPresignedUrl: jest.fn().mockResolvedValue('https://r2.example.com/presigned'),
-  getUploadPresignedUrl: jest.fn(),
+  getUploadPresignedUrl: jest.fn().mockResolvedValue('https://r2.example.com/fresh-signed-ref?X-Amz-Expires=3600'),
 }));
 
 jest.mock('../../services/providers/ReplicateProvider', () => {
@@ -128,7 +133,7 @@ import {
   markCompleted,
   markQuarantined,
 } from '../../services/generationService';
-import { getGenerationPresignedUrl } from '../../services/archivalService';
+import { getGenerationPresignedUrl, getUploadPresignedUrl } from '../../services/archivalService';
 import { generateImageWithOpenAI } from '../../services/openaiImageService';
 import { scanForCsam } from '../../services/hiveService';
 import { hiveScanQueue } from '../../queue/hiveScanWorker';
@@ -620,6 +625,64 @@ describe('POST /api/generations — reference token auto-append', () => {
       });
 
     expect(dispatchMock.mock.calls[0][0].referenceImages).toEqual(['https://r2.example.com/img.jpg']);
+  });
+});
+
+// ─── POST /api/generations — reference URL re-signing (Issue 4) ──────────────
+
+describe('POST /api/generations — reference URL re-signing', () => {
+  beforeEach(() => {
+    (resolveDurationSeconds as jest.Mock).mockReturnValue(5);
+    (computeCostCredits as jest.Mock).mockReturnValue(38);
+    (deductCredits as jest.Mock).mockResolvedValue(true);
+    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-resign-test' });
+    dispatchMock.mockResolvedValue({ providerPredictionId: 'pred-resign' });
+    (attachPredictionId as jest.Mock).mockResolvedValue(undefined);
+  });
+
+  it('re-signs a stale reference_images URL when reference_image_upload_ids provides the owning id', async () => {
+    (db.select as jest.Mock).mockReturnValue({
+      from: jest.fn(() => ({
+        where: jest.fn().mockResolvedValue([
+          { id: 'upload-real-id', user_id: 'test-user-id', r2_key: 'uploads/test-user-id/real.jpg', mime_type: 'image/jpeg' },
+        ]),
+      })),
+    });
+
+    const res = await request(app).post('/api/generations').send({
+      ...VALID_BODY,
+      reference_images: ['https://r2.example.com/stale-signed-url?X-Amz-Expires=1'],
+      reference_image_upload_ids: ['upload-real-id'],
+    });
+
+    expect(res.status).toBe(200);
+    expect(getUploadPresignedUrl).toHaveBeenCalledWith('uploads/test-user-id/real.jpg');
+    // Same index (0), freshly-signed URL substituted for the stale client-sent one.
+    expect(dispatchMock.mock.calls[0][0].referenceImages).toEqual([
+      'https://r2.example.com/fresh-signed-ref?X-Amz-Expires=3600',
+    ]);
+  });
+
+  it('leaves the client-sent URL untouched at indices with no upload id (null placeholder)', async () => {
+    (db.select as jest.Mock).mockReturnValue({
+      from: jest.fn(() => ({
+        where: jest.fn().mockResolvedValue([
+          { id: 'upload-real-id', user_id: 'test-user-id', r2_key: 'uploads/test-user-id/real.jpg', mime_type: 'image/jpeg' },
+        ]),
+      })),
+    });
+
+    const res = await request(app).post('/api/generations').send({
+      ...VALID_BODY,
+      reference_images: ['https://r2.example.com/no-id-url.jpg', 'https://r2.example.com/stale.jpg'],
+      reference_image_upload_ids: [null, 'upload-real-id'],
+    });
+
+    expect(res.status).toBe(200);
+    expect(dispatchMock.mock.calls[0][0].referenceImages).toEqual([
+      'https://r2.example.com/no-id-url.jpg', // untouched — no id at this index
+      'https://r2.example.com/fresh-signed-ref?X-Amz-Expires=3600', // re-signed
+    ]);
   });
 });
 

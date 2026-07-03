@@ -35,7 +35,7 @@ import { getReplicateWebhookUrl } from '../config';
 import type { GenerationInput } from '../services/providers/ModelProvider';
 import { db } from '../db/client';
 import { referenceUploads } from '../db/schema';
-import { eq, inArray, sql } from 'drizzle-orm';
+import { eq, inArray, and, sql } from 'drizzle-orm';
 
 export const generationsRouter = Router();
 
@@ -76,6 +76,62 @@ declare global {
   namespace Express {
     interface Request {
       _resolved?: ResolvedGenerationRequest;
+    }
+  }
+}
+
+// Issue 4 fix: client-supplied presigned reference URLs can be hours old by the time the user
+// submits (uploads list hydrates from a days-old disk snapshot; @-mention library URLs are
+// 1-hour TTL). Re-sign in place from the owning reference_uploads/generations row right before
+// dispatch so Replicate always receives a URL it can actually fetch. `uploadIds`/`generationIds`
+// are parallel arrays aligned by index to `urls` (id-or-null); entries with no id are left as the
+// client-sent URL unchanged. Ownership-scoped to `userId` — never re-signs another user's media.
+async function resignReferenceUrls(
+  urls: string[],
+  uploadIds: Array<string | null | undefined> | undefined,
+  generationIds: Array<string | null | undefined> | undefined,
+  userId: string,
+): Promise<string[]> {
+  if (urls.length === 0) return urls;
+  const result = [...urls];
+
+  const uploadEntries = urls
+    .map((_, i) => ({ i, id: uploadIds?.[i] }))
+    .filter((e): e is { i: number; id: string } => typeof e.id === 'string' && e.id.length > 0);
+  if (uploadEntries.length > 0) {
+    const rows = await db
+      .select()
+      .from(referenceUploads)
+      .where(and(inArray(referenceUploads.id, uploadEntries.map((e) => e.id)), eq(referenceUploads.user_id, userId)));
+    const rowById = Object.fromEntries(rows.map((r) => [r.id, r]));
+    for (const { i, id } of uploadEntries) {
+      const row = rowById[id];
+      if (row) result[i] = await getUploadPresignedUrl(row.r2_key);
+    }
+  }
+
+  const generationEntries = urls
+    .map((_, i) => ({ i, id: generationIds?.[i] }))
+    .filter((e): e is { i: number; id: string } => typeof e.id === 'string' && e.id.length > 0);
+  for (const { i, id } of generationEntries) {
+    const gen = await getGenerationById(id, userId);
+    if (gen && gen.status === 'completed' && gen.r2_key) {
+      result[i] = await getGenerationPresignedUrl(gen.r2_key);
+    }
+  }
+
+  return result;
+}
+
+// Diagnostic only — host + expiry query param, never the full URL (carries the presign
+// signature). Lets a prod "reference didn't apply" report be triaged from Railway logs alone.
+function logReferenceUrlDiagnostics(label: string, urls: string[] | undefined): void {
+  for (const url of urls ?? []) {
+    try {
+      const parsed = new URL(url);
+      console.log(`[generations] dispatching ${label} reference host=${parsed.host} expires=${parsed.searchParams.get('X-Amz-Expires')} issued=${parsed.searchParams.get('X-Amz-Date')}`);
+    } catch {
+      console.log(`[generations] dispatching ${label} reference (unparseable URL)`);
     }
   }
 }
@@ -348,6 +404,29 @@ generationsRouter.post('/', promptModerationMiddleware, prepareCost, creditCheck
   const resolved = req._resolved as ResolvedGenerationRequest;
 
   try {
+    // Re-sign reference URLs from their owning upload/generation row (Issue 4: client-sent
+    // presigned URLs can be stale by submit time). Parallel id arrays are aligned by index to
+    // reference_images/reference_videos as sent by the client — order/count must match resolved.
+    const refImageUploadIds = Array.isArray(req.body?.reference_image_upload_ids)
+      ? (req.body.reference_image_upload_ids as Array<string | null>) : undefined;
+    const refVideoUploadIds = Array.isArray(req.body?.reference_video_upload_ids)
+      ? (req.body.reference_video_upload_ids as Array<string | null>) : undefined;
+    const refImageGenerationIds = Array.isArray(req.body?.reference_image_generation_ids)
+      ? (req.body.reference_image_generation_ids as Array<string | null>) : undefined;
+    const refVideoGenerationIds = Array.isArray(req.body?.reference_video_generation_ids)
+      ? (req.body.reference_video_generation_ids as Array<string | null>) : undefined;
+
+    if (resolved.referenceImages?.length) {
+      resolved.referenceImages = await resignReferenceUrls(
+        resolved.referenceImages, refImageUploadIds, refImageGenerationIds, req.user.dbUserId,
+      );
+    }
+    if (resolved.referenceVideos?.length) {
+      resolved.referenceVideos = await resignReferenceUrls(
+        resolved.referenceVideos, refVideoUploadIds, refVideoGenerationIds, req.user.dbUserId,
+      );
+    }
+
     const params =
       resolved.mediaType === 'image'
         ? { aspect_ratio: resolved.imageAspectRatio ?? '1:1' }
@@ -401,6 +480,9 @@ generationsRouter.post('/', promptModerationMiddleware, prepareCost, creditCheck
       upscalerTargetResolution: resolved.upscalerTargetResolution,
       upscalerTargetFps: resolved.upscalerTargetFps as GenerationInput['upscalerTargetFps'],
     };
+
+    logReferenceUrlDiagnostics('image', input.referenceImages);
+    logReferenceUrlDiagnostics('video', input.referenceVideos);
 
     let providerPredictionId: string;
     try {
