@@ -173,7 +173,15 @@ export async function markCompleted(generationId: string, r2Key: string): Promis
 export function classifyFailureReason(error: unknown): 'copyright' | 'content_policy' | 'generic_error' {
   if (typeof error !== 'string') return 'generic_error';
   const lower = error.toLowerCase();
-  if (lower.includes('copyright') || lower.includes('intellectual property') || lower.includes('trademark')) {
+  if (
+    lower.includes('copyright') ||
+    lower.includes('intellectual property') ||
+    lower.includes('trademark') ||
+    lower.includes('famous') ||
+    lower.includes('celebrity') ||
+    lower.includes('likeness') ||
+    lower.includes('public figure')
+  ) {
     return 'copyright';
   }
   if (

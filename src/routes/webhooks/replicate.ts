@@ -218,7 +218,7 @@ replicateWebhookRouter.post('/', async (req: Request, res: Response) => {
       const reason = isTransient ? 'provider_error' : classifyFailureReason(payload.error);
       await markFailed(generation.id, reason);
       await refundCredits(generation.user_id, generation.cost_credits, payload.id);
-      console.log(`[webhook/replicate] ${payload.status} (${reason}): refunded ${generation.cost_credits} credits to user ${generation.user_id}`);
+      console.log(`[webhook/replicate] ${payload.status} (${reason}) raw error: ${JSON.stringify(payload.error)} — refunded ${generation.cost_credits} credits to user ${generation.user_id}`);
     } else {
       console.log(`[webhook/replicate] Unhandled status: ${payload.status}`);
     }

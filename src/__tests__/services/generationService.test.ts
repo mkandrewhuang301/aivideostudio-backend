@@ -151,6 +151,11 @@ describe('classifyFailureReason', () => {
     expect(classifyFailureReason('This prompt was flagged as NSFW')).toBe('content_policy');
   });
 
+  it('classifies celebrity/likeness errors as copyright', () => {
+    expect(classifyFailureReason('The request was blocked: prompt references a famous celebrity')).toBe('copyright');
+    expect(classifyFailureReason('Cannot generate a real public figure likeness')).toBe('copyright');
+  });
+
   it('falls back to generic_error for unrecognized or missing errors', () => {
     expect(classifyFailureReason('Internal server error')).toBe('generic_error');
     expect(classifyFailureReason(undefined)).toBe('generic_error');
