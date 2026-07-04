@@ -27,6 +27,10 @@ export interface HiveScanJobData {
   r2Key: string;
   userId: string;
   costCredits: number;
+  // CSAM scanning applies to both media types, so a scan retry can land on either — without
+  // this, the retry path had no way to tell the two apart and the completion push always said
+  // "video" regardless of what was actually generated.
+  mediaType: 'video' | 'image';
 }
 
 export const hiveScanQueue = new Queue<HiveScanJobData>(QUEUE_NAME, {
@@ -41,7 +45,7 @@ export const hiveScanQueue = new Queue<HiveScanJobData>(QUEUE_NAME, {
 
 // Exported for testing — BullMQ retries this automatically on throw.
 export async function processHiveScan(data: HiveScanJobData): Promise<void> {
-  const { generationId, r2Key, userId, costCredits } = data;
+  const { generationId, r2Key, userId, costCredits, mediaType } = data;
 
   // Throws on Hive API error — BullMQ catches and retries automatically.
   const { flagged } = await scanForCsam(r2Key);
@@ -58,7 +62,7 @@ export async function processHiveScan(data: HiveScanJobData): Promise<void> {
     try {
       const userRows = await db.execute(sql`SELECT apns_device_token FROM users WHERE id = ${userId}::uuid`);
       const token = (userRows.rows?.[0] as { apns_device_token: string | null } | undefined)?.apns_device_token;
-      if (token) await sendGenerationComplete(token, generationId);
+      if (token) await sendGenerationComplete(token, generationId, mediaType);
     } catch (pushErr) {
       console.error('[hive-scan-retry] Push notification failed (non-blocking):', pushErr);
     }

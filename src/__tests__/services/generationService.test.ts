@@ -101,9 +101,9 @@ describe('resolveDurationSeconds', () => {
 // ─── computeCostCredits ───────────────────────────────────────────────────────
 
 describe('computeCostCredits', () => {
-  it('computes exact cost for 6s at 720p mini: ceil(6 * 0.09 * 50) = 27', () => {
+  it('computes exact cost for 6s at 720p mini: ceil(6 * 0.09 * 100) = 54', () => {
     const cost = computeCostCredits({ durationSeconds: 6, resolution: '720p', model: 'bytedance/seedance-2.0-mini' });
-    expect(cost).toBe(27);
+    expect(cost).toBe(54);
   });
 
   it('returns a positive integer for 480p (lower than 720p)', () => {
@@ -429,22 +429,22 @@ describe('computeCostCredits — extended', () => {
       hasVideoReference: false,
     });
     expect(withVideo).toBeGreaterThan(withoutVideo);
-    // videoIn 720p mini: ceil(6 * 0.11 * 50) = ceil(33) = 33 credits
-    expect(withVideo).toBe(33);
+    // videoIn 720p mini: ceil(6 * 0.11 * 100) = ceil(66) = 66 credits
+    expect(withVideo).toBe(66);
   });
 
   it('mini costs less than 2.0 standard', () => {
     const miniCost = computeCostCredits({ durationSeconds: 6, resolution: '720p', model: 'bytedance/seedance-2.0-mini' });
     const standardCost = computeCostCredits({ durationSeconds: 6, resolution: '720p', model: 'bytedance/seedance-2.0' });
     expect(miniCost).toBeLessThan(standardCost);
-    // mini 720p nonVideoIn: ceil(6 * 0.09 * 50) = 27 credits
-    expect(miniCost).toBe(27);
+    // mini 720p nonVideoIn: ceil(6 * 0.09 * 100) = 54 credits
+    expect(miniCost).toBe(54);
   });
 
   it('applies ceiling to fractional credit costs (never underbills)', () => {
-    // mini 5s * 0.09 * 50 = 22.5 → ceil = 23
+    // mini 5s * 0.09 * 100 = 45 → ceil = 45
     const cost = computeCostCredits({ durationSeconds: 5, resolution: '720p', model: 'bytedance/seedance-2.0-mini' });
-    expect(cost).toBe(23);
+    expect(cost).toBe(45);
   });
 
   it('applies 480p half-rate for mini videoIn', () => {
@@ -454,7 +454,7 @@ describe('computeCostCredits — extended', () => {
       model: 'bytedance/seedance-2.0-mini',
       hasVideoReference: true,
     });
-    // mini 480p videoIn: ceil(4 * 0.05 * 50) = ceil(10) = 10
-    expect(cost).toBe(10);
+    // mini 480p videoIn: ceil(4 * 0.05 * 100) = ceil(20) = 20
+    expect(cost).toBe(20);
   });
 });

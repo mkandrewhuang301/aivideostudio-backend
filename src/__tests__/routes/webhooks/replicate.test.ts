@@ -306,10 +306,35 @@ describe('replicateWebhookRouter', () => {
       r2Key: 'generations/gen-1.mp4',
       userId: 'u1',
       costCredits: 45,
+      mediaType: 'video',
     });
     expect(markQuarantined).not.toHaveBeenCalled();
     expect(markCompleted).not.toHaveBeenCalled();
     expect(refundCredits).not.toHaveBeenCalled();
+  });
+
+  it('queues hiveScanWorker retry with mediaType: image for an image generation — regression guard for the retry path defaulting to the video push copy', async () => {
+    (validateWebhook as jest.Mock).mockResolvedValue(true);
+    (getGenerationByPredictionId as jest.Mock).mockResolvedValue({
+      id: 'gen-img-err',
+      user_id: 'u1',
+      status: 'processing',
+      cost_credits: 5,
+      media_type: 'image',
+    });
+    (archiveToR2 as jest.Mock).mockResolvedValue('generations/gen-img-err.jpg');
+    (scanForCsam as jest.Mock).mockRejectedValue(new Error('Hive timeout'));
+
+    const res = await post({ id: 'pred_img_err', status: 'succeeded', output: ['https://replicate.delivery/flux-out.bin'] });
+
+    expect(res.status).toBe(200);
+    expect(mockHiveScanQueueAdd).toHaveBeenCalledWith('scan', {
+      generationId: 'gen-img-err',
+      r2Key: 'generations/gen-img-err.jpg',
+      userId: 'u1',
+      costCredits: 5,
+      mediaType: 'image',
+    });
   });
 
   it('returns 200 with duplicate:true when status is already quarantined', async () => {

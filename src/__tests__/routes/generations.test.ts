@@ -64,8 +64,9 @@ jest.mock('../../services/generationService', () => ({
   listGenerations: jest.fn(),
   getGenerationById: jest.fn(),
   softDeleteGeneration: jest.fn(),
-  SUPPORTED_MODELS: ['bytedance/seedance-2.0-mini', 'bytedance/seedance-2.0'],
+  SUPPORTED_MODELS: ['bytedance/seedance-2.0-fast', 'bytedance/seedance-2.0-mini', 'bytedance/seedance-2.0'],
   MODEL_RESOLUTIONS: {
+    'bytedance/seedance-2.0-fast': ['480p', '720p'],
     'bytedance/seedance-2.0-mini': ['480p', '720p'],
     'bytedance/seedance-2.0':      ['480p', '720p', '1080p', '4k'],
     'xai/grok-imagine-video-1.5':  ['480p', '720p'],

@@ -160,6 +160,7 @@ replicateWebhookRouter.post('/', async (req: Request, res: Response) => {
             r2Key,
             userId: generation.user_id,
             costCredits: generation.cost_credits,
+            mediaType: mediaType as 'video' | 'image',
           });
           console.log(`[webhook/replicate] Hive retry queued for generation ${generation.id}`);
           res.status(200).json({ received: true });

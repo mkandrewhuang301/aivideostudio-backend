@@ -8,9 +8,18 @@ import { generations } from '../db/schema';
 import { sql, desc, lt, eq, and, notInArray, or } from 'drizzle-orm';
 import type { GenerationStatus, NewGeneration } from '../db/schema';
 
-export const CREDITS_PER_DOLLAR = 50; // mirrors SUBSCRIPTION_CREDITS/TOPUP_CREDITS scale in revenuecat.ts (500 credits ≈ $9.99)
+export const CREDITS_PER_DOLLAR = 50; // subscription/topup grant scale only (revenuecat.ts: 500 credits ≈ $9.99) — NEVER use for per-generation cost math
+
+// Per-generation cost rule (user-specified): 1 credit = 1 cent of provider cost, rounded up.
+// Do not use CREDITS_PER_DOLLAR here — that constant prices credit *grants*, not consumption,
+// and is calibrated to a different (2¢/credit) scale. Using it for cost math undercharges by 2x.
+export const CENTS_PER_DOLLAR = 100;
 
 export const MODEL_RATES: Record<string, { nonVideoIn: Record<string, number>; videoIn: Record<string, number> }> = {
+  'bytedance/seedance-2.0-fast': {
+    nonVideoIn: { '480p': 0.07, '720p': 0.15 },
+    videoIn:    { '480p': 0.08, '720p': 0.17 },
+  },
   'bytedance/seedance-2.0-mini': {
     nonVideoIn: { '480p': 0.04, '720p': 0.09 },
     videoIn:    { '480p': 0.05, '720p': 0.11 },
@@ -23,6 +32,7 @@ export const MODEL_RATES: Record<string, { nonVideoIn: Record<string, number>; v
 
 // Per-model supported resolutions — used for request validation in generations.ts
 export const MODEL_RESOLUTIONS: Record<string, readonly string[]> = {
+  'bytedance/seedance-2.0-fast':   ['480p', '720p'],
   'bytedance/seedance-2.0-mini':   ['480p', '720p'],
   'bytedance/seedance-2.0':        ['480p', '720p', '1080p', '4k'],
   'xai/grok-imagine-video-1.5':    ['480p', '720p'],
@@ -30,8 +40,8 @@ export const MODEL_RESOLUTIONS: Record<string, readonly string[]> = {
 
 // ─── xAI Grok Imagine Video 1.5 (image-to-video, synced audio) ────────────────
 // $0.08/sec Replicate cost → 8 credits/sec flat, same across 480p/720p.
-// 1 credit = 1¢ direct mapping (IMAGE_MODEL_COSTS convention) — NOT run through
-// CREDITS_PER_DOLLAR, which is calibrated for the Seedance-family $/sec rates.
+// 1 credit = 1¢ direct mapping (IMAGE_MODEL_COSTS convention, same as CENTS_PER_DOLLAR below) —
+// hardcoded as a flat constant here rather than computed, since Grok has no per-resolution tiers.
 // Mandatory image input (image-to-video only, no text-only mode). Audio is
 // always synchronized/on — Replicate schema has no audio toggle for this model.
 export const GROK_IMAGINE_CREDITS_PER_SEC = 8;
@@ -53,7 +63,7 @@ export function resolveDurationSeconds(requested: number | 'auto'): number {
   return requested;
 }
 
-export const SUPPORTED_MODELS = ['bytedance/seedance-2.0-mini', 'bytedance/seedance-2.0'] as const;
+export const SUPPORTED_MODELS = ['bytedance/seedance-2.0-fast', 'bytedance/seedance-2.0-mini', 'bytedance/seedance-2.0'] as const;
 export type SupportedModel = typeof SUPPORTED_MODELS[number];
 
 // Image model flat costs (credits per generation, not per-second). 1 credit = 1¢.
@@ -90,7 +100,7 @@ export const SUPPORTED_AVATAR_MODELS = ['bytedance/dreamactor-m2.0'] as const;
 export type SupportedAvatarModel = typeof SUPPORTED_AVATAR_MODELS[number];
 
 export function computeDreamActorCost(estimatedDurationSeconds: number): number {
-  return Math.ceil(estimatedDurationSeconds * DREAMACTOR_RATE * CREDITS_PER_DOLLAR);
+  return Math.ceil(estimatedDurationSeconds * DREAMACTOR_RATE * CENTS_PER_DOLLAR);
 }
 
 // ─── ByteDance Video Upscaler ─────────────────────────────────────────────────
@@ -128,7 +138,7 @@ export function computeUpscalerCost(
   const tierRates = VIDEO_UPSCALER_RATES[tier] ?? VIDEO_UPSCALER_RATES.standard;
   const resRates = tierRates[targetResolution] ?? tierRates['720p'];
   const rate = targetFps > 30 ? resRates.gt30 : resRates.lte30;
-  return Math.ceil(estimatedDurationSeconds * rate * CREDITS_PER_DOLLAR);
+  return Math.ceil(estimatedDurationSeconds * rate * CENTS_PER_DOLLAR);
 }
 
 export function computeCostCredits(input: {
@@ -140,7 +150,7 @@ export function computeCostCredits(input: {
   const rates = MODEL_RATES[input.model];
   const rateSet = input.hasVideoReference ? rates.videoIn : rates.nonVideoIn;
   const ratePerSec = rateSet[input.resolution];
-  return Math.ceil(input.durationSeconds * ratePerSec * CREDITS_PER_DOLLAR);
+  return Math.ceil(input.durationSeconds * ratePerSec * CENTS_PER_DOLLAR);
 }
 
 export async function createGeneration(row: NewGeneration): Promise<{ id: string }> {

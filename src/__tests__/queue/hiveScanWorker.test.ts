@@ -44,6 +44,7 @@ const JOB_DATA = {
   r2Key: 'generations/gen-hive-1.mp4',
   userId: 'user-1',
   costCredits: 60,
+  mediaType: 'video' as const,
 };
 
 beforeEach(() => {
@@ -64,9 +65,17 @@ describe('processHiveScan', () => {
 
     expect(scanForCsam).toHaveBeenCalledWith(JOB_DATA.r2Key);
     expect(markCompleted).toHaveBeenCalledWith(JOB_DATA.generationId, JOB_DATA.r2Key);
-    expect(sendGenerationComplete).toHaveBeenCalledWith('token-abc', JOB_DATA.generationId);
+    expect(sendGenerationComplete).toHaveBeenCalledWith('token-abc', JOB_DATA.generationId, 'video');
     expect(markQuarantined).not.toHaveBeenCalled();
     expect(refundCredits).not.toHaveBeenCalled();
+  });
+
+  it('passes mediaType through so an image retry never sends the video push copy', async () => {
+    (scanForCsam as jest.Mock).mockResolvedValue({ flagged: false });
+
+    await processHiveScan({ ...JOB_DATA, r2Key: 'generations/gen-hive-1.jpg', mediaType: 'image' });
+
+    expect(sendGenerationComplete).toHaveBeenCalledWith('token-abc', JOB_DATA.generationId, 'image');
   });
 
   it('quarantines and refunds when scan flags the video — never marks completed', async () => {
