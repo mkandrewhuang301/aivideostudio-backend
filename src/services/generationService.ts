@@ -341,3 +341,16 @@ export async function softDeleteGeneration(generationId: string, userId: string)
   `);
   return (result.rows?.length ?? 0) > 0;
 }
+
+// IDOR guard: userId in WHERE — a user can only favorite their own rows (FAV-01)
+export async function setGenerationFavorite(
+  generationId: string, userId: string, isFavorite: boolean,
+): Promise<boolean> {
+  const result = await db.execute(sql`
+    UPDATE generations SET is_favorite = ${isFavorite}
+    WHERE id = ${generationId}::uuid AND user_id = ${userId}::uuid
+      AND status NOT IN ('deleted', 'quarantined')
+    RETURNING id
+  `);
+  return (result.rows?.length ?? 0) > 0;
+}

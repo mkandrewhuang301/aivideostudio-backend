@@ -19,6 +19,7 @@ import {
   listGenerations,
   getGenerationById,
   softDeleteGeneration,
+  setGenerationFavorite,
   SUPPORTED_MODELS,
   MODEL_RESOLUTIONS,
   SUPPORTED_IMAGE_MODELS,
@@ -604,6 +605,25 @@ generationsRouter.get('/:id', async (req: Request, res: Response) => {
   } catch (err) {
     console.error('[generations] Error fetching generation:', err);
     res.status(500).json({ error: 'Failed to fetch generation' });
+  }
+});
+
+// PATCH /api/generations/:id/favorite — toggle favorite flag (FAV-01)
+// SECURITY: setGenerationFavorite WHERE clause includes user_id guard (IDOR mitigated)
+generationsRouter.patch('/:id/favorite', async (req: Request, res: Response) => {
+  if (!req.user?.dbUserId) { res.status(401).json({ error: 'Not authenticated' }); return; }
+  const isFavorite = req.body?.is_favorite;
+  if (typeof isFavorite !== 'boolean') {
+    res.status(400).json({ error: 'is_favorite (boolean) is required', code: 'INVALID_INPUT' });
+    return;
+  }
+  try {
+    const ok = await setGenerationFavorite(req.params.id as string, req.user.dbUserId, isFavorite);
+    if (!ok) { res.status(404).json({ error: 'Not found or not authorized' }); return; }
+    res.status(204).send();
+  } catch (err) {
+    console.error('[generations] Error setting favorite:', err);
+    res.status(500).json({ error: 'Failed to update favorite' });
   }
 });
 

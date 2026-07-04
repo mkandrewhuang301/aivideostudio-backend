@@ -119,6 +119,7 @@ export const generations = pgTable(
     media_type: text('media_type').notNull().default('video'), // 'video' | 'image'; validated at application layer (prepareCost middleware)
     failure_reason: text('failure_reason'), // nullable; 'content_policy' | 'copyright' | 'generic_error' | 'provider_error' — set when status transitions to 'failed'
     retry_count: integer('retry_count').notNull().default(0), // bumped on transient-provider-error auto-retry (webhooks/replicate.ts); capped at 1
+    is_favorite: boolean('is_favorite').notNull().default(false), // FAV-01: user-toggled favorite flag, display-only server state
     created_at: timestamp('created_at', { withTimezone: true })
       .notNull()
       .default(sql`now()`),
