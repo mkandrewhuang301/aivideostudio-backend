@@ -155,6 +155,7 @@ export const referenceUploads = pgTable(
     r2_key: text('r2_key').notNull(),
     mime_type: text('mime_type').notNull(), // 'image/jpeg' | 'image/png' | 'image/webp' | 'video/mp4'
     display_name: text('display_name'), // nullable; user-assigned name shown as [name] token in prompt
+    kind: text('kind').notNull().default('reference'), // 'reference' | 'look'; plain text (app-validated), not pgEnum — avoids extra push round-trip (08-01 pattern)
     created_at: timestamp('created_at', { withTimezone: true }).notNull().default(sql`now()`),
   },
   (table) => ({
