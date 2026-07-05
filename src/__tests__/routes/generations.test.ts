@@ -54,6 +54,7 @@ jest.mock('../../services/generationService', () => ({
   computeImageCostCredits: jest.fn(),
   computeDreamActorCost: jest.fn(),
   computeUpscalerCost: jest.fn(),
+  computeImageUpscaleCost: jest.fn(),
   computeGrokImagineCost: jest.fn(),
   createGeneration: jest.fn(),
   attachPredictionId: jest.fn(),
@@ -74,6 +75,7 @@ jest.mock('../../services/generationService', () => ({
   SUPPORTED_IMAGE_MODELS: ['openai/gpt-image-2-high', 'openai/gpt-image-2-medium', 'openai/gpt-image-2-low', 'openai/gpt-image-2'],
   SUPPORTED_AVATAR_MODELS: ['bytedance/dreamactor-m2.0'],
   SUPPORTED_UPSCALER_MODELS: ['bytedance/video-upscaler'],
+  SUPPORTED_IMAGE_UPSCALE_MODELS: ['recraft-ai/recraft-crisp-upscale'],
   SUPPORTED_GROK_MODELS: ['xai/grok-imagine-video-1.5'],
   classifyFailureReason: jest.requireActual('../../services/generationService').classifyFailureReason,
 }));
@@ -123,6 +125,9 @@ import {
   resolveDurationSeconds,
   computeCostCredits,
   computeImageCostCredits,
+  computeDreamActorCost,
+  computeUpscalerCost,
+  computeImageUpscaleCost,
   computeGrokImagineCost,
   createGeneration,
   attachPredictionId,
@@ -687,6 +692,278 @@ describe('POST /api/generations — reference URL re-signing', () => {
   });
 });
 
+// ─── POST /api/generations — presets (09.1-04: presetResolver) ───────────────
+// SC2: preset_id expands server template, overwrites model/media_type/prompt, bills correct
+// cost per preset. SC3/T-09.1-02/T-09.1-07: tampering-proof + duration clamp (D-16).
+
+function mockUploadRows(rows: Array<{ id: string; r2_key: string }>): void {
+  (db.select as jest.Mock).mockReturnValue({
+    from: jest.fn(() => ({
+      where: jest.fn().mockResolvedValue(
+        rows.map((r) => ({ ...r, user_id: 'test-user-id', mime_type: 'image/jpeg' })),
+      ),
+    })),
+  });
+}
+
+describe('POST /api/generations — presets', () => {
+  beforeEach(() => {
+    (getUploadPresignedUrl as jest.Mock).mockImplementation((key: string) =>
+      Promise.resolve(`https://r2.example.com/signed/${key}`),
+    );
+  });
+
+  it('hairstyle: expands template with the validated style label, overwrites model/media_type, bills computeImageCostCredits', async () => {
+    mockUploadRows([{ id: 'upload-photo', r2_key: 'uploads/test-user-id/photo.jpg' }]);
+    (computeImageCostCredits as jest.Mock).mockReturnValue(5);
+    (deductCredits as jest.Mock).mockResolvedValue(true);
+    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-hairstyle' });
+    dispatchMock.mockResolvedValue({ providerPredictionId: 'pred-hairstyle' });
+    (attachPredictionId as jest.Mock).mockResolvedValue(undefined);
+
+    const res = await request(app).post('/api/generations').send({
+      preset_id: 'hairstyle',
+      style_id: 'bob',
+      preset_input_upload_ids: ['upload-photo'],
+    });
+
+    expect(res.status).toBe(200);
+    expect(computeImageCostCredits).toHaveBeenCalledWith('openai/gpt-image-2-medium');
+    expect(createGeneration).toHaveBeenCalledWith(
+      expect.objectContaining({
+        media_type: 'image',
+        model: 'openai/gpt-image-2-medium',
+        cost_credits: 5,
+        prompt: expect.stringContaining('Bob'),
+        params: expect.objectContaining({
+          preset_id: 'hairstyle',
+          preset_input_upload_ids: ['upload-photo'],
+        }),
+      }),
+    );
+    expect(dispatchMock.mock.calls[0][0]).toEqual(
+      expect.objectContaining({
+        mediaType: 'image',
+        model: 'openai/gpt-image-2-medium',
+        referenceImages: ['https://r2.example.com/signed/uploads/test-user-id/photo.jpg'],
+      }),
+    );
+  });
+
+  it('enhancer-video: overwrites model to bytedance/video-upscaler, bills computeUpscalerCost from the real duration', async () => {
+    mockUploadRows([{ id: 'upload-video', r2_key: 'uploads/test-user-id/clip.mp4' }]);
+    (computeUpscalerCost as jest.Mock).mockReturnValue(7);
+    (deductCredits as jest.Mock).mockResolvedValue(true);
+    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-enh-video' });
+    dispatchMock.mockResolvedValue({ providerPredictionId: 'pred-enh-video' });
+    (attachPredictionId as jest.Mock).mockResolvedValue(undefined);
+
+    const res = await request(app).post('/api/generations').send({
+      preset_id: 'enhancer-video',
+      preset_input_upload_ids: ['upload-video'],
+      estimated_duration_seconds: 20,
+    });
+
+    expect(res.status).toBe(200);
+    expect(computeUpscalerCost).toHaveBeenCalledWith(20, 'standard', '720p', 30);
+    expect(createGeneration).toHaveBeenCalledWith(
+      expect.objectContaining({ media_type: 'upscale', model: 'bytedance/video-upscaler', cost_credits: 7 }),
+    );
+    expect(dispatchMock.mock.calls[0][0]).toEqual(
+      expect.objectContaining({
+        mediaType: 'upscale',
+        upscalerInputVideo: 'https://r2.example.com/signed/uploads/test-user-id/clip.mp4',
+      }),
+    );
+  });
+
+  it('enhancer-image: routes to the recraft-crisp-upscale image path (not the video upscaler), bills computeImageUpscaleCost', async () => {
+    mockUploadRows([{ id: 'upload-image', r2_key: 'uploads/test-user-id/photo2.jpg' }]);
+    (computeImageUpscaleCost as jest.Mock).mockReturnValue(1);
+    (deductCredits as jest.Mock).mockResolvedValue(true);
+    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-enh-image' });
+    dispatchMock.mockResolvedValue({ providerPredictionId: 'pred-enh-image' });
+    (attachPredictionId as jest.Mock).mockResolvedValue(undefined);
+
+    const res = await request(app).post('/api/generations').send({
+      preset_id: 'enhancer-image',
+      preset_input_upload_ids: ['upload-image'],
+    });
+
+    expect(res.status).toBe(200);
+    expect(computeImageUpscaleCost).toHaveBeenCalled();
+    expect(computeUpscalerCost).not.toHaveBeenCalled();
+    expect(createGeneration).toHaveBeenCalledWith(
+      expect.objectContaining({ media_type: 'upscale', model: 'recraft-ai/recraft-crisp-upscale', cost_credits: 1 }),
+    );
+    expect(dispatchMock.mock.calls[0][0]).toEqual(
+      expect.objectContaining({
+        mediaType: 'upscale',
+        model: 'recraft-ai/recraft-crisp-upscale',
+        upscalerInputImage: 'https://r2.example.com/signed/uploads/test-user-id/photo2.jpg',
+      }),
+    );
+  });
+
+  it('anime-yourself: image path, single reference image mapped, bills computeImageCostCredits', async () => {
+    mockUploadRows([{ id: 'upload-anime', r2_key: 'uploads/test-user-id/selfie.jpg' }]);
+    (computeImageCostCredits as jest.Mock).mockReturnValue(5);
+    (deductCredits as jest.Mock).mockResolvedValue(true);
+    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-anime' });
+    dispatchMock.mockResolvedValue({ providerPredictionId: 'pred-anime' });
+    (attachPredictionId as jest.Mock).mockResolvedValue(undefined);
+
+    const res = await request(app).post('/api/generations').send({
+      preset_id: 'anime-yourself',
+      preset_input_upload_ids: ['upload-anime'],
+    });
+
+    expect(res.status).toBe(200);
+    expect(createGeneration).toHaveBeenCalledWith(
+      expect.objectContaining({
+        media_type: 'image',
+        model: 'openai/gpt-image-2-medium',
+        cost_credits: 5,
+        prompt: expect.stringContaining('anime'),
+      }),
+    );
+  });
+
+  it('polaroid: two image slots mapped onto reference_images in order', async () => {
+    mockUploadRows([
+      { id: 'upload-p1', r2_key: 'uploads/test-user-id/p1.jpg' },
+      { id: 'upload-p2', r2_key: 'uploads/test-user-id/p2.jpg' },
+    ]);
+    (computeImageCostCredits as jest.Mock).mockReturnValue(5);
+    (deductCredits as jest.Mock).mockResolvedValue(true);
+    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-polaroid' });
+    dispatchMock.mockResolvedValue({ providerPredictionId: 'pred-polaroid' });
+    (attachPredictionId as jest.Mock).mockResolvedValue(undefined);
+
+    const res = await request(app).post('/api/generations').send({
+      preset_id: 'polaroid',
+      preset_input_upload_ids: ['upload-p1', 'upload-p2'],
+    });
+
+    expect(res.status).toBe(200);
+    expect(dispatchMock.mock.calls[0][0].referenceImages).toEqual([
+      'https://r2.example.com/signed/uploads/test-user-id/p1.jpg',
+      'https://r2.example.com/signed/uploads/test-user-id/p2.jpg',
+    ]);
+  });
+
+  it('animate-old-photo: video path, fixed duration from the preset max_seconds cap (no user duration slot)', async () => {
+    mockUploadRows([{ id: 'upload-old', r2_key: 'uploads/test-user-id/old.jpg' }]);
+    (resolveDurationSeconds as jest.Mock).mockReturnValue(5);
+    (computeCostCredits as jest.Mock).mockReturnValue(45);
+    (deductCredits as jest.Mock).mockResolvedValue(true);
+    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-old-photo' });
+    dispatchMock.mockResolvedValue({ providerPredictionId: 'pred-old-photo' });
+    (attachPredictionId as jest.Mock).mockResolvedValue(undefined);
+
+    const res = await request(app).post('/api/generations').send({
+      preset_id: 'animate-old-photo',
+      preset_input_upload_ids: ['upload-old'],
+    });
+
+    expect(res.status).toBe(200);
+    expect(resolveDurationSeconds).toHaveBeenCalledWith(5);
+    expect(computeCostCredits).toHaveBeenCalledWith(
+      expect.objectContaining({
+        durationSeconds: 5,
+        resolution: '720p',
+        model: 'bytedance/seedance-2.0-mini',
+        hasVideoReference: false,
+      }),
+    );
+    expect(createGeneration).toHaveBeenCalledWith(
+      expect.objectContaining({ media_type: 'video', model: 'bytedance/seedance-2.0-mini', cost_credits: 45 }),
+    );
+  });
+
+  it('motion-transfer: clamps a 40s client-claimed duration to 30s BEFORE billing (D-16/Pitfall 4 — 150 credits)', async () => {
+    mockUploadRows([
+      { id: 'upload-photo', r2_key: 'uploads/test-user-id/portrait.jpg' },
+      { id: 'upload-video', r2_key: 'uploads/test-user-id/driving.mp4' },
+    ]);
+    (computeDreamActorCost as jest.Mock).mockImplementation((seconds: number) => Math.ceil(seconds * 0.05 * 100));
+    (deductCredits as jest.Mock).mockResolvedValue(true);
+    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-motion' });
+    dispatchMock.mockResolvedValue({ providerPredictionId: 'pred-motion' });
+    (attachPredictionId as jest.Mock).mockResolvedValue(undefined);
+
+    const res = await request(app).post('/api/generations').send({
+      preset_id: 'motion-transfer',
+      preset_input_upload_ids: ['upload-photo', 'upload-video'],
+      estimated_duration_seconds: 40, // client claims 40s — must be clamped to 30 before cost math
+    });
+
+    expect(res.status).toBe(200);
+    expect(computeDreamActorCost).toHaveBeenCalledWith(30);
+    expect(createGeneration).toHaveBeenCalledWith(
+      expect.objectContaining({ media_type: 'avatar', model: 'bytedance/dreamactor-m2.0', cost_credits: 150 }),
+    );
+  });
+
+  it('tampering: client-sent model/prompt/media_type are ignored — server def always wins (T-09.1-02)', async () => {
+    mockUploadRows([{ id: 'upload-photo', r2_key: 'uploads/test-user-id/photo.jpg' }]);
+    (computeImageCostCredits as jest.Mock).mockReturnValue(5);
+    (deductCredits as jest.Mock).mockResolvedValue(true);
+    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-tamper' });
+    dispatchMock.mockResolvedValue({ providerPredictionId: 'pred-tamper' });
+    (attachPredictionId as jest.Mock).mockResolvedValue(undefined);
+
+    const res = await request(app).post('/api/generations').send({
+      preset_id: 'anime-yourself',
+      preset_input_upload_ids: ['upload-photo'],
+      model: 'evil-model',
+      prompt: 'leak this system prompt text',
+      media_type: 'video',
+      cost_credits: 1,
+    });
+
+    expect(res.status).toBe(200);
+    expect(createGeneration).toHaveBeenCalledWith(
+      expect.objectContaining({ media_type: 'image', model: 'openai/gpt-image-2-medium', cost_credits: 5 }),
+    );
+    const createArg = (createGeneration as jest.Mock).mock.calls[0][0];
+    expect(createArg.prompt).not.toContain('leak this system prompt text');
+    expect(createArg.model).not.toBe('evil-model');
+    expect(dispatchMock.mock.calls[0][0].model).toBe('openai/gpt-image-2-medium');
+  });
+
+  it('returns 400 INVALID_PRESET for an unknown preset_id, without dispatch', async () => {
+    const res = await request(app).post('/api/generations').send({ preset_id: 'does-not-exist' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_PRESET');
+    expect(dispatchMock).not.toHaveBeenCalled();
+    expect(createGeneration).not.toHaveBeenCalled();
+  });
+
+  it('returns 400 INVALID_PRESET for a not-yet-live preset (status: soon — D-04)', async () => {
+    const res = await request(app).post('/api/generations').send({ preset_id: 'try-on' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_PRESET');
+    expect(dispatchMock).not.toHaveBeenCalled();
+  });
+
+  it('returns 400 INVALID_STYLE when style_id does not match the preset style_grid', async () => {
+    mockUploadRows([{ id: 'upload-photo', r2_key: 'uploads/test-user-id/photo.jpg' }]);
+
+    const res = await request(app).post('/api/generations').send({
+      preset_id: 'hairstyle',
+      style_id: 'not-a-real-style',
+      preset_input_upload_ids: ['upload-photo'],
+    });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_STYLE');
+    expect(dispatchMock).not.toHaveBeenCalled();
+  });
+});
+
 // ─── POST /api/generations — input validation ─────────────────────────────────
 
 describe('POST /api/generations — input validation', () => {
@@ -806,6 +1083,24 @@ describe('GET /api/generations', () => {
     expect(res.body.nextCursor).not.toBeNull();
     expect(res.body.nextCursor).toContain('__');
   });
+
+  // D-11/SC3/T-09.1-03: the expanded server template must never leak through the list endpoint.
+  it('nulls prompt for a completed preset row but retains params.preset_id (list)', async () => {
+    const presetItem = {
+      ...completedItem,
+      id: 'gen-preset-1',
+      prompt: 'the full expanded server template that must never leak to the client',
+      params: { preset_id: 'hairstyle', preset_input_upload_ids: ['upload-1'] },
+    };
+    (listGenerations as jest.Mock).mockResolvedValue([presetItem]);
+
+    const res = await request(app).get('/api/generations');
+
+    expect(res.status).toBe(200);
+    expect(res.body.items[0].prompt).toBeNull();
+    expect(res.body.items[0].params.preset_id).toBe('hairstyle');
+    expect(res.body.items[0].params.preset_input_upload_ids).toEqual(['upload-1']);
+  });
 });
 
 // ─── GET /api/generations/:id ─────────────────────────────────────────────────
@@ -856,6 +1151,22 @@ describe('GET /api/generations/:id', () => {
     expect(res.status).toBe(200);
     expect(res.body.video_url).toBeNull();
     expect(getGenerationPresignedUrl).not.toHaveBeenCalled();
+  });
+
+  // D-11/SC3/T-09.1-03: the expanded server template must never leak through the detail endpoint.
+  it('nulls prompt for a completed preset row but retains params.preset_id (detail)', async () => {
+    (getGenerationById as jest.Mock).mockResolvedValue({
+      ...completedGen,
+      prompt: 'the full expanded server template that must never leak to the client',
+      params: { preset_id: 'hairstyle', preset_input_upload_ids: ['upload-1'] },
+    });
+
+    const res = await request(app).get('/api/generations/gen-001');
+
+    expect(res.status).toBe(200);
+    expect(res.body.prompt).toBeNull();
+    expect(res.body.params.preset_id).toBe('hairstyle');
+    expect(res.body.params.preset_input_upload_ids).toEqual(['upload-1']);
   });
 });
 

@@ -7,12 +7,14 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { creditCheckMiddleware } from '../middleware/creditCheck';
 import { promptModerationMiddleware } from '../middleware/promptModeration';
+import { presetResolver } from '../middleware/presetResolver';
 import {
   resolveDurationSeconds,
   computeCostCredits,
   computeImageCostCredits,
   computeDreamActorCost,
   computeUpscalerCost,
+  computeImageUpscaleCost,
   computeGrokImagineCost,
   createGeneration,
   attachPredictionId,
@@ -25,6 +27,7 @@ import {
   SUPPORTED_IMAGE_MODELS,
   SUPPORTED_AVATAR_MODELS,
   SUPPORTED_UPSCALER_MODELS,
+  SUPPORTED_IMAGE_UPSCALE_MODELS,
   SUPPORTED_GROK_MODELS,
   type SupportedModel,
 } from '../services/generationService';
@@ -70,6 +73,8 @@ interface ResolvedGenerationRequest {
   upscalerScene?: string;
   upscalerTargetResolution?: string;
   upscalerTargetFps?: number;
+  // Upscale-only (Recraft Crisp Upscale — image path; distinct from the video upscaler above)
+  upscalerInputImage?: string;
   cost: number;
 }
 
@@ -165,11 +170,15 @@ function prepareCost(req: Request, res: Response, next: NextFunction): void {
     scene,
     target_resolution,
     target_fps,
+    // upscale-specific (Recraft Crisp Upscale — image path)
+    upscale_image_url,
     // shared for avatar + upscale billing (duration not known upfront)
     estimated_duration_seconds,
   } = req.body ?? {};
 
-  if (!prompt || typeof prompt !== 'string') {
+  // avatar/upscale branches take no text prompt (D-16/D-22 presets: motion-transfer, enhancer-video,
+  // enhancer-image all have an empty prompt_template) — only image/video/grok branches require one.
+  if (media_type !== 'avatar' && media_type !== 'upscale' && (!prompt || typeof prompt !== 'string')) {
     res.status(400).json({ error: 'prompt is required', code: 'INVALID_PROMPT' });
     return;
   }
@@ -208,6 +217,27 @@ function prepareCost(req: Request, res: Response, next: NextFunction): void {
 
   if (media_type === 'upscale') {
     const upscalerModel = model ?? 'bytedance/video-upscaler';
+
+    if ((SUPPORTED_IMAGE_UPSCALE_MODELS as readonly string[]).includes(upscalerModel)) {
+      // Recraft Crisp Upscale (Enhancer — image path): flat per-image cost, single `image` field —
+      // distinct from the per-second ByteDance video upscaler below (T-09.1 enhancer-image preset).
+      if (!upscale_image_url || typeof upscale_image_url !== 'string') {
+        res.status(400).json({ error: 'upscale_image_url (presigned URL of image to upscale) is required', code: 'INVALID_INPUT' });
+        return;
+      }
+      const cost = computeImageUpscaleCost();
+      req.body.cost_credits = cost;
+      req._resolved = {
+        prompt: '',
+        model: upscalerModel,
+        mediaType: 'upscale',
+        upscalerInputImage: upscale_image_url as string,
+        cost,
+      };
+      next();
+      return;
+    }
+
     if (!(SUPPORTED_UPSCALER_MODELS as readonly string[]).includes(upscalerModel)) {
       res.status(400).json({ error: `model must be one of: ${SUPPORTED_UPSCALER_MODELS.join(', ')}`, code: 'INVALID_MODEL' });
       return;
@@ -264,6 +294,13 @@ function prepareCost(req: Request, res: Response, next: NextFunction): void {
       (validQualities.includes(image_quality as ImageQuality) ? (image_quality as ImageQuality) : 'high');
     const cost = computeImageCostCredits(imageModel);
 
+    // Reference images (e.g. try-on/hairstyle/anime-yourself/polaroid presets) — GPT-Image-2's
+    // input_images. Not previously read by this branch; ReplicateProvider already maps
+    // referenceImages -> input_images for gpt-image-2 models (verified in ReplicateProvider.ts).
+    const refImages: string[] = Array.isArray(reference_images)
+      ? reference_images.filter((u: unknown) => typeof u === 'string')
+      : [];
+
     req.body.cost_credits = cost;
     req._resolved = {
       prompt: prompt as string,
@@ -272,6 +309,7 @@ function prepareCost(req: Request, res: Response, next: NextFunction): void {
       imageAspectRatio,
       imageQuality,
       cost,
+      referenceImages: refImages.length > 0 ? refImages : undefined,
     };
     next();
     return;
@@ -396,7 +434,7 @@ function prepareCost(req: Request, res: Response, next: NextFunction): void {
   next();
 }
 
-generationsRouter.post('/', promptModerationMiddleware, prepareCost, creditCheckMiddleware, async (req: Request, res: Response) => {
+generationsRouter.post('/', promptModerationMiddleware, presetResolver, prepareCost, creditCheckMiddleware, async (req: Request, res: Response) => {
   if (!req.user?.dbUserId) {
     res.status(401).json({ error: 'Not authenticated' });
     return;
@@ -434,7 +472,9 @@ generationsRouter.post('/', promptModerationMiddleware, prepareCost, creditCheck
         : resolved.mediaType === 'avatar'
         ? { avatar_image: resolved.avatarImage, avatar_driving_video: resolved.avatarDrivingVideo, estimated_duration: resolved.durationSeconds }
         : resolved.mediaType === 'upscale'
-        ? { source_video_url: resolved.upscalerInputVideo, processing_type: resolved.upscalerTier, scene: resolved.upscalerScene, target_resolution: resolved.upscalerTargetResolution, target_fps: resolved.upscalerTargetFps, estimated_duration: resolved.durationSeconds }
+        ? (resolved.upscalerInputImage
+            ? { upscale_image_url: resolved.upscalerInputImage }
+            : { source_video_url: resolved.upscalerInputVideo, processing_type: resolved.upscalerTier, scene: resolved.upscalerScene, target_resolution: resolved.upscalerTargetResolution, target_fps: resolved.upscalerTargetFps, estimated_duration: resolved.durationSeconds })
         : {
             resolution: resolved.resolution,
             duration: resolved.durationSeconds,
@@ -444,12 +484,19 @@ generationsRouter.post('/', promptModerationMiddleware, prepareCost, creditCheck
             ref_upload_ids: resolved.refUploadIds ?? [],
           };
 
+    // Stamp preset_id + preset_input_upload_ids (set by presetResolver) onto the row — needed for
+    // the client's preset-badged card rendering + Remix reopen (D-11), never overwrites the
+    // media-type-specific params computed above.
+    const presetParams = req._preset
+      ? { preset_id: req._preset.preset_id, preset_input_upload_ids: req._preset.input_upload_ids }
+      : {};
+
     const { id: generationId } = await createGeneration({
       user_id: req.user.dbUserId,
       model: resolved.model,
       status: 'pending',
       prompt: resolved.prompt || null,
-      params,
+      params: { ...params, ...presetParams },
       cost_credits: resolved.cost,
       media_type: resolved.mediaType,
     });
@@ -480,6 +527,7 @@ generationsRouter.post('/', promptModerationMiddleware, prepareCost, creditCheck
       upscalerScene: resolved.upscalerScene as GenerationInput['upscalerScene'],
       upscalerTargetResolution: resolved.upscalerTargetResolution,
       upscalerTargetFps: resolved.upscalerTargetFps as GenerationInput['upscalerTargetFps'],
+      upscalerInputImage: resolved.upscalerInputImage,
     };
 
     logReferenceUrlDiagnostics('image', input.referenceImages);
@@ -562,6 +610,10 @@ generationsRouter.get('/', async (req: Request, res: Response) => {
         );
         return {
           ...item,
+          // D-11/SC3/T-09.1-03: the expanded server template lives in this column for preset
+          // rows — never let it reach the client. params.preset_id/preset_input_upload_ids are
+          // retained (needed for the badge + Remix reopen).
+          prompt: p?.preset_id ? null : item.prompt,
           video_url: item.status === 'completed' && item.r2_key
             ? await getGenerationPresignedUrl(item.r2_key)
             : null,
@@ -601,7 +653,9 @@ generationsRouter.get('/:id', async (req: Request, res: Response) => {
           isVideo: r.mime_type.startsWith('video/'),
         })))
       : null;
-    res.status(200).json({ ...item, video_url, reference_urls });
+    // D-11/SC3/T-09.1-03: null the expanded template for preset rows; params.preset_id retained.
+    const prompt = p?.preset_id ? null : item.prompt;
+    res.status(200).json({ ...item, prompt, video_url, reference_urls });
   } catch (err) {
     console.error('[generations] Error fetching generation:', err);
     res.status(500).json({ error: 'Failed to fetch generation' });
