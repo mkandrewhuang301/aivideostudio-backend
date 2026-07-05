@@ -141,6 +141,21 @@ export function computeUpscalerCost(
   return Math.ceil(estimatedDurationSeconds * rate * CENTS_PER_DOLLAR);
 }
 
+// ─── Recraft Crisp Upscale (Enhancer — image path) ────────────────────────────
+// Flat per-image cost, distinct from the per-second video upscaler above.
+// Input schema is a single field: { image: <uri> } — verified live via Replicate API.
+// $0.006/image → cents rule: Math.ceil(0.006 * CENTS_PER_DOLLAR) = 1 credit.
+// Source: https://replicate.com/recraft-ai/recraft-crisp-upscale (RESEARCH.md Standard Stack, verified 2026-07-04)
+
+export const RECRAFT_UPSCALE_RATE_DOLLARS = 0.006; // $/image
+
+export const SUPPORTED_IMAGE_UPSCALE_MODELS = ['recraft-ai/recraft-crisp-upscale'] as const;
+export type SupportedImageUpscaleModel = typeof SUPPORTED_IMAGE_UPSCALE_MODELS[number];
+
+export function computeImageUpscaleCost(): number {
+  return Math.ceil(RECRAFT_UPSCALE_RATE_DOLLARS * CENTS_PER_DOLLAR);
+}
+
 export function computeCostCredits(input: {
   durationSeconds: number;
   resolution: '480p' | '720p' | '1080p' | '4k';

@@ -14,6 +14,10 @@ import { db } from '../../db/client';
 import {
   resolveDurationSeconds,
   computeCostCredits,
+  computeDreamActorCost,
+  computeUpscalerCost,
+  computeImageUpscaleCost,
+  SUPPORTED_IMAGE_UPSCALE_MODELS,
   markCompleted,
   markFailed,
   markRefunded,
@@ -111,6 +115,27 @@ describe('computeCostCredits', () => {
     expect(Number.isInteger(cost)).toBe(true);
     expect(cost).toBeGreaterThan(0);
     expect(cost).toBeLessThan(computeCostCredits({ durationSeconds: 6, resolution: '720p', model: 'bytedance/seedance-2.0-mini' }));
+  });
+});
+
+// ─── Cents-rule regression (D-21 / RESEARCH.md Pitfall 1) + recraft cost fn ───
+
+describe('cents-rule cost functions (verified, not re-broken)', () => {
+  it('computeDreamActorCost(1s) == 5 credits (ceil(1 * 0.05 * 100))', () => {
+    expect(computeDreamActorCost(1)).toBe(5);
+  });
+
+  it('computeUpscalerCost stays on the cents scale (standard/720p/<=30fps for 1s == 1 credit)', () => {
+    // rate = 3.443/1000 $/sec; ceil(1 * 0.003443 * 100) = ceil(0.3443) = 1
+    expect(computeUpscalerCost(1, 'standard', '720p', 30)).toBe(1);
+  });
+
+  it('computeImageUpscaleCost (recraft) == 1 credit (ceil(0.006 * 100) = ceil(0.6))', () => {
+    expect(computeImageUpscaleCost()).toBe(1);
+  });
+
+  it('SUPPORTED_IMAGE_UPSCALE_MODELS registers recraft-ai/recraft-crisp-upscale', () => {
+    expect(SUPPORTED_IMAGE_UPSCALE_MODELS).toContain('recraft-ai/recraft-crisp-upscale');
   });
 });
 
