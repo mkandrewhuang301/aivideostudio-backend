@@ -18,6 +18,7 @@ import { reportsRouter } from './routes/reports';
 import { uploadsRouter } from './routes/uploads';
 import { privacyRouter } from './routes/privacy';
 import { ratesRouter } from './routes/rates';
+import { presetsRouter } from './routes/presets';
 
 // Eagerly initialize Firebase Admin at startup — prevents double-init on concurrent requests
 getFirebaseAdmin();
@@ -50,6 +51,11 @@ app.use('/health', healthRouter);
 // RevenueCat webhook — OUTSIDE /api, no Firebase JWT required (server-to-server).
 // RevenueCat authenticates with Authorization Bearer header set in RC dashboard.
 app.use('/webhooks/revenuecat', revenueCatWebhookRouter);
+
+// Public preset registry — mounted under /api/presets but BEFORE the /api auth gate below
+// (Express matches middleware by registration order, not path nesting depth) so it stays
+// public like ratesRouter, per 09.1-01-PLAN.md's explicit /api/presets mount instruction.
+app.use('/api/presets', presetsRouter);
 
 app.use('/api', authMiddleware, banCheckMiddleware);
 app.use('/api/me', meRouter);
