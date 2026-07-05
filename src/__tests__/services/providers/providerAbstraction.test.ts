@@ -179,6 +179,42 @@ describe('ReplicateProvider.dispatch — xAI Grok Imagine Video 1.5', () => {
   });
 });
 
+describe('ReplicateProvider.dispatch — Recraft Crisp Upscale (Enhancer image path)', () => {
+  beforeEach(() => {
+    mockCreate.mockReset();
+    mockGet.mockReset();
+  });
+
+  it('sends only a single { image } field for recraft-ai/recraft-crisp-upscale', async () => {
+    mockCreate.mockResolvedValue({ id: 'pred-recraft-1' });
+
+    const provider = new ReplicateProvider();
+    await provider.dispatch(
+      {
+        prompt: '',
+        model: 'recraft-ai/recraft-crisp-upscale',
+        mediaType: 'upscale',
+        upscalerInputImage: 'https://example.com/source.png',
+      },
+      'https://example.com/webhooks/replicate',
+    );
+
+    const callArgs = mockCreate.mock.calls[0][0];
+    expect(callArgs.model).toBe('recraft-ai/recraft-crisp-upscale');
+    expect(callArgs.input).toEqual({ image: 'https://example.com/source.png' });
+    expect(callArgs.webhook_events_filter).toEqual(['completed']);
+  });
+
+  it('does not add a try-on or haircut dispatch branch (out of scope this plan)', () => {
+    const fs = require('fs');
+    const source = fs.readFileSync(
+      require.resolve('../../../services/providers/ReplicateProvider'),
+      'utf-8',
+    );
+    expect(source).not.toMatch(/try-on|haircut|change-haircut|p-image-try-on/);
+  });
+});
+
 describe('ReplicateProvider.getStatus', () => {
   beforeEach(() => {
     mockCreate.mockReset();

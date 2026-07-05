@@ -27,6 +27,9 @@ export interface GenerationInput {
   upscalerScene?: 'aigc' | 'short_series' | 'ugc' | 'old_film' | 'common';
   upscalerTargetResolution?: string;   // '720p' | '1080p' | '2k' | '4k'
   upscalerTargetFps?: 24 | 30 | 60 | 120;
+  // Image-upscale-specific — Recraft Crisp Upscale (recraft-ai/recraft-crisp-upscale)
+  // Distinct field from upscalerInputVideo: this is an image enhancer, not the video upscaler.
+  upscalerInputImage?: string;         // presigned URL — image to upscale; entire model input is { image }
 }
 
 export interface DispatchResult {

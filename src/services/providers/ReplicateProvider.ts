@@ -38,6 +38,12 @@ export class ReplicateProvider implements ModelProvider {
         video: input.avatarDrivingVideo,
         ...(input.cutFirstSecond !== undefined ? { cut_first_second: input.cutFirstSecond } : {}),
       };
+    } else if (input.mediaType === 'upscale' && input.model === 'recraft-ai/recraft-crisp-upscale') {
+      // Recraft Crisp Upscale (Enhancer — image path): single-field schema, the entire model
+      // input is { image }. Distinct flat-cost image enhancer, not the per-second video upscaler.
+      replicateInput = {
+        image: input.upscalerInputImage,
+      };
     } else if (input.mediaType === 'upscale') {
       // ByteDance Video Upscaler: input video + optional quality params
       // 'pro' tier is Replicate-allowlist-only; always 'standard' unless explicitly set
