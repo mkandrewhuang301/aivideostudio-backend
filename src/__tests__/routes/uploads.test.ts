@@ -43,6 +43,7 @@ jest.mock('../../db/client', () => ({
     execute: jest.fn(),
     insert: jest.fn(),
     select: jest.fn(),
+    delete: jest.fn(),
   },
 }));
 
@@ -53,7 +54,7 @@ import { r2 } from '../../storage/r2';
 import { db } from '../../db/client';
 
 const r2Mock = r2 as unknown as { send: jest.Mock };
-const dbMock = db as unknown as { insert: jest.Mock; select: jest.Mock; execute: jest.Mock };
+const dbMock = db as unknown as { insert: jest.Mock; select: jest.Mock; execute: jest.Mock; delete: jest.Mock };
 
 const app = express();
 
@@ -98,6 +99,7 @@ beforeEach(() => {
 
   // Default db select chain: returns empty list
   dbMock.select.mockReturnValue(makeSelectChain([]));
+  dbMock.delete.mockReturnValue({ where: jest.fn().mockResolvedValue(undefined) });
 });
 
 describe('POST /api/uploads', () => {
@@ -262,6 +264,82 @@ describe('POST /api/uploads — DB integration', () => {
   });
 });
 
+// ─── POST /api/uploads — kind='look' singleton ────────────────────────────────
+
+describe("POST /api/uploads — kind='look' singleton (D-14)", () => {
+  it("defaults kind to 'reference' when omitted, and never queries/deletes prior rows", async () => {
+    const valuesFn = jest.fn().mockReturnValue({
+      returning: jest.fn().mockResolvedValue([{ id: 'ref-row' }]),
+    });
+    dbMock.insert.mockReturnValue({ values: valuesFn });
+
+    await request(app)
+      .post('/api/uploads')
+      .attach('file', Buffer.from('fake-jpg'), { filename: 'test.jpg', contentType: 'image/jpeg' });
+
+    expect(dbMock.select).not.toHaveBeenCalled();
+    expect(dbMock.delete).not.toHaveBeenCalled();
+    expect(valuesFn).toHaveBeenCalledWith(expect.objectContaining({ kind: 'reference' }));
+  });
+
+  it("rejects an invalid kind with 400 and never touches R2 or the DB", async () => {
+    const res = await request(app)
+      .post('/api/uploads')
+      .field('kind', 'bogus')
+      .attach('file', Buffer.from('fake-jpg'), { filename: 'test.jpg', contentType: 'image/jpeg' });
+
+    expect(res.status).toBe(400);
+    expect(r2Mock.send).not.toHaveBeenCalled();
+    expect(dbMock.insert).not.toHaveBeenCalled();
+  });
+
+  it("replace-on-insert: a second kind='look' upload deletes the prior look row + R2 object before inserting, leaving exactly one look row", async () => {
+    // Prior look row exists for this user
+    dbMock.select.mockReturnValue(
+      makeSelectChain([{ id: 'old-look-id', r2_key: 'uploads/test-db-user-id/old-look.jpg' }]),
+    );
+    const deleteWhereFn = jest.fn().mockResolvedValue(undefined);
+    dbMock.delete.mockReturnValue({ where: deleteWhereFn });
+    const valuesFn = jest.fn().mockReturnValue({
+      returning: jest.fn().mockResolvedValue([{ id: 'new-look-id' }]),
+    });
+    dbMock.insert.mockReturnValue({ values: valuesFn });
+
+    const res = await request(app)
+      .post('/api/uploads')
+      .field('kind', 'look')
+      .attach('file', Buffer.from('fake-jpg'), { filename: 'newlook.jpg', contentType: 'image/jpeg' });
+
+    expect(res.status).toBe(200);
+    // Prior look's R2 object deleted before the new one is inserted
+    expect(r2Mock.send).toHaveBeenCalledTimes(2); // 1 Put (new) + 1 Delete (old)
+    const deleteCall = r2Mock.send.mock.calls.find((c) => c[0] instanceof (require('@aws-sdk/client-s3').DeleteObjectCommand));
+    expect(deleteCall?.[0].input.Key).toBe('uploads/test-db-user-id/old-look.jpg');
+    // Prior look row deleted exactly once
+    expect(dbMock.delete).toHaveBeenCalledTimes(1);
+    expect(deleteWhereFn).toHaveBeenCalledTimes(1);
+    // New row inserted with kind='look' — exactly one look row remains (delete-then-insert)
+    expect(valuesFn).toHaveBeenCalledWith(expect.objectContaining({ kind: 'look' }));
+  });
+
+  it("no prior look exists: kind='look' upload inserts without any delete call", async () => {
+    dbMock.select.mockReturnValue(makeSelectChain([]));
+    const valuesFn = jest.fn().mockReturnValue({
+      returning: jest.fn().mockResolvedValue([{ id: 'first-look-id' }]),
+    });
+    dbMock.insert.mockReturnValue({ values: valuesFn });
+
+    const res = await request(app)
+      .post('/api/uploads')
+      .field('kind', 'look')
+      .attach('file', Buffer.from('fake-jpg'), { filename: 'firstlook.jpg', contentType: 'image/jpeg' });
+
+    expect(res.status).toBe(200);
+    expect(dbMock.delete).not.toHaveBeenCalled();
+    expect(valuesFn).toHaveBeenCalledWith(expect.objectContaining({ kind: 'look' }));
+  });
+});
+
 // ─── GET /api/uploads ─────────────────────────────────────────────────────────
 
 describe('GET /api/uploads', () => {
@@ -320,5 +398,27 @@ describe('GET /api/uploads', () => {
 
     // The where() call must have been made (user scoping happens in where clause)
     expect(chain.where).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects an invalid kind query param with 400", async () => {
+    const res = await request(app).get('/api/uploads?kind=bogus');
+    expect(res.status).toBe(400);
+  });
+
+  it("kind=look filter returns only the caller's look rows, scoped by user_id and kind", async () => {
+    const chain = makeSelectChain([
+      { id: 'look-1', r2_key: 'uploads/test-db-user-id/look.jpg', mime_type: 'image/jpeg', kind: 'look', created_at: new Date('2026-06-03') },
+    ]);
+    dbMock.select.mockReturnValue(chain);
+
+    const res = await request(app).get('/api/uploads?kind=look');
+
+    expect(res.status).toBe(200);
+    expect(res.body.uploads).toHaveLength(1);
+    expect(res.body.uploads[0].kind).toBe('look');
+    // where() must be invoked exactly once — user_id + kind scoping happens inside a single
+    // combined predicate (and(...)), never a separate unscoped query (IDOR + filter combined)
+    expect(chain.where).toHaveBeenCalledTimes(1);
+    expect(chain.where.mock.calls[0][0]).toBeDefined();
   });
 });

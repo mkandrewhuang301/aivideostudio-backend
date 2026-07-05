@@ -20,6 +20,8 @@ import { eq, desc, and, sql } from 'drizzle-orm';
 
 export const uploadsRouter = Router();
 
+const ALLOWED_KINDS = new Set(['reference', 'look']);
+
 const ALLOWED_MIMES: Record<string, string> = {
   'image/jpeg': 'jpg',
   'image/png': 'png',
@@ -51,6 +53,11 @@ uploadsRouter.post('/', upload.single('file'), async (req: Request, res: Respons
     res.status(400).json({ error: 'No file provided or unsupported file type' });
     return;
   }
+  const kind = typeof req.body?.kind === 'string' && req.body.kind.length > 0 ? req.body.kind : 'reference';
+  if (!ALLOWED_KINDS.has(kind)) {
+    res.status(400).json({ error: "kind must be 'reference' or 'look'" });
+    return;
+  }
   try {
     const ext = ALLOWED_MIMES[req.file.mimetype];
     const key = `uploads/${req.user.dbUserId}/${randomUUID()}.${ext}`;
@@ -64,11 +71,35 @@ uploadsRouter.post('/', upload.single('file'), async (req: Request, res: Respons
       }),
     );
 
+    // D-14 singleton: kind='look' replaces any prior look for this user (Pitfall 6 — avoid
+    // orphaned R2 objects by deleting the prior row + object before inserting the new one).
+    if (kind === 'look') {
+      const priorLooks = await db
+        .select({ id: referenceUploads.id, r2_key: referenceUploads.r2_key })
+        .from(referenceUploads)
+        .where(and(eq(referenceUploads.user_id, req.user.dbUserId), eq(referenceUploads.kind, 'look')))
+        .limit(5);
+
+      for (const prior of priorLooks) {
+        try {
+          await r2.send(new DeleteObjectCommand({ Bucket: R2_BUCKET, Key: prior.r2_key }));
+        } catch (err) {
+          console.error('[uploads] Best-effort delete of prior look R2 object failed:', err);
+        }
+      }
+      if (priorLooks.length > 0) {
+        await db
+          .delete(referenceUploads)
+          .where(and(eq(referenceUploads.user_id, req.user.dbUserId), eq(referenceUploads.kind, 'look')));
+      }
+    }
+
     // Persist upload record so the user can reference it later via GET /api/uploads
     const [insertedRow] = await db.insert(referenceUploads).values({
       user_id: req.user.dbUserId,
       r2_key: key,
       mime_type: req.file.mimetype,
+      kind,
     }).returning({ id: referenceUploads.id });
 
     // 1-hour presigned URL (CLAUDE.md Rule 2: never expose raw key)
@@ -92,11 +123,20 @@ uploadsRouter.get('/', async (req: Request, res: Response) => {
     res.status(401).json({ error: 'Not authenticated' });
     return;
   }
+  const kindFilter = typeof req.query.kind === 'string' ? req.query.kind : undefined;
+  if (kindFilter !== undefined && !ALLOWED_KINDS.has(kindFilter)) {
+    res.status(400).json({ error: "kind must be 'reference' or 'look'" });
+    return;
+  }
   try {
+    const whereClause = kindFilter
+      ? and(eq(referenceUploads.user_id, req.user.dbUserId), eq(referenceUploads.kind, kindFilter))
+      : eq(referenceUploads.user_id, req.user.dbUserId);
+
     const rows = await db
       .select()
       .from(referenceUploads)
-      .where(eq(referenceUploads.user_id, req.user.dbUserId))
+      .where(whereClause)
       .orderBy(desc(referenceUploads.created_at))
       .limit(50);
 
@@ -112,6 +152,7 @@ uploadsRouter.get('/', async (req: Request, res: Response) => {
           url,
           mime_type: row.mime_type,
           display_name: row.display_name ?? null,
+          kind: row.kind,
           created_at: row.created_at,
         };
       }),
