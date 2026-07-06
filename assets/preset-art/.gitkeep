@@ -1,0 +1,29 @@
+Preset card art ingestion folder (09.1-CONTEXT.md D-09).
+
+Convention: drop one folder per preset here, named by preset_id, containing:
+
+  assets/preset-art/<preset_id>/poster.jpg   (required if ffmpeg is not installed)
+  assets/preset-art/<preset_id>/loop.mp4     (required)
+
+Example:
+
+  assets/preset-art/motion-transfer/poster.jpg
+  assets/preset-art/motion-transfer/loop.mp4
+  assets/preset-art/try-on/poster.jpg
+  assets/preset-art/try-on/loop.mp4
+
+Then run:
+
+  npm run upload:preset-art
+
+This scans every folder here, uploads to version-suffixed R2 keys
+(presets/<preset_id>/poster-v<N>.jpg, loop-v<N>.mp4), and prints the
+resulting stable URLs to paste into src/config/presets.ts.
+
+If ffmpeg is installed locally, loop.mp4 is transcoded to the card-art
+contract (~480x640, H.264 baseline, no audio) and poster.jpg is
+auto-extracted from the first frame if you didn't supply one. If ffmpeg
+is not installed, files are uploaded as-is — supply pre-encoded files.
+
+Files in this folder are local-only working files, not committed to git
+(see .gitignore) other than this placeholder.

@@ -6,3 +6,8 @@ dist/
 .env.*.local
 .DS_Store
 drizzle/
+
+# Local-only preset art working files (09.1-CONTEXT.md D-09) — uploaded to R2 via
+# `npm run upload:preset-art`, never committed. Keep the folder convention doc tracked.
+assets/preset-art/*
+!assets/preset-art/.gitkeep

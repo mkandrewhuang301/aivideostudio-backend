@@ -13,6 +13,7 @@
     "db:migrate": "drizzle-kit migrate",
     "smoke:queue": "tsx src/queue/testWorker.ts",
     "smoke:r2": "tsx src/storage/smokeTest.ts",
+    "upload:preset-art": "tsx src/scripts/uploadPresetArt.ts",
     "eslint": "eslint src --ext .ts",
     "test": "jest --passWithNoTests"
   },
