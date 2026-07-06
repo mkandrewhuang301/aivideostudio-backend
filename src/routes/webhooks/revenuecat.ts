@@ -82,13 +82,22 @@ revenueCatWebhookRouter.post('/', async (req: Request, res: Response) => {
     app_user_id: firebaseUid,
     transaction_id: transactionId,
     product_id: productId,
+    environment,
   } = event as {
     type: string;
     app_user_id: string;
     transaction_id: string;
     product_id: string;
     entitlement_ids?: string[];
+    environment?: string;
   };
+
+  // Diagnostic log for every event — cheap, and turns "did the webhook even fire, and for
+  // which user/product" into a one-line grep instead of a multi-step investigation. In
+  // particular this surfaces `$RCAnonymousID:...` app_user_ids, which indicate the purchase
+  // was made before Purchases.shared.logIn(firebaseUid) completed on the client — those
+  // purchases can never be matched to a user below and are silently skipped.
+  console.log('[webhook/revenuecat] event', { eventType, app_user_id: firebaseUid, productId, transactionId, environment });
 
   // ALWAYS wrap business logic in try/catch and return 200 (Pitfall 6)
   try {
