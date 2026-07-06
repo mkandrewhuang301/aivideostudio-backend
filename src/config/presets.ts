@@ -9,16 +9,15 @@
 // D-11: `prompt_template` is server-only and must NEVER reach the client. `CLIENT_PRESETS`
 //       below is the sanitized projection served by GET /api/presets (see routes/presets.ts).
 //
-// NOTE on `section` taxonomy: 09.1-CONTEXT.md D-02 (revised 2026-07-05) merged the original
-// "Photo Tools" and "Effects" Home sections into a single "Photo" section — the split was
-// arbitrary (Anime Yourself/Polaroid are photo tools too, same as Try-On/Hairstyle). This
-// registry uses the post-revision 4-section taxonomy (hero | photo | avatar_center |
-// shows_vlogs) to match 09.1-06-PLAN.md's Home grouping, which already assumes a single
-// merged "Photo" section per that decision.
+// NOTE on `section` taxonomy: 09.1-CONTEXT.md D-02 was first revised 2026-07-05 to merge
+// "Photo Tools" and "Effects" into a single "Photo" section (that split felt arbitrary), then
+// revised again 2026-07-06 to split by OUTPUT media type instead: "Video Effects" (presets that
+// produce a video) and "Photo Effects" (presets that produce a still image), video section first.
+// This is a different axis than the original tools-vs-effects split — see D-02 in CONTEXT.md.
 
 export const PRESETS_VERSION = 1;
 
-export type PresetSection = 'hero' | 'photo' | 'avatar_center' | 'shows_vlogs';
+export type PresetSection = 'hero' | 'video_effects' | 'photo_effects' | 'avatar_center' | 'shows_vlogs';
 export type PresetStatus = 'live' | 'soon';
 export type PresetBadge = 'NEW' | 'HOT';
 export type PresetMediaType = 'video' | 'image' | 'avatar' | 'upscale';
@@ -102,11 +101,65 @@ export const SERVER_PRESETS: PresetDef[] = [
     tile: { ...placeholderTile('cinema-studio'), aspect: '16:9' },
   },
 
-  // ─── Photo (merged Photo Tools + Effects — D-02 revised 2026-07-05) ───────
+  // ─── Video Effects (output = video — D-02 revised 2026-07-06, above Photo Effects) ─
+  {
+    preset_id: 'animate-old-photo',
+    title: 'Animate Old Photo',
+    section: 'video_effects',
+    sort_order: 1,
+    status: 'live',
+    badge: 'HOT',
+    media_type: 'video',
+    model: 'bytedance/seedance-2.0-mini',
+    prompt_template:
+      'Bring this old photo to life with subtle, natural motion — gentle breathing, slight head ' +
+      'movement, soft ambient background motion — keep the vintage look and colors intact, no audio.',
+    input_schema: {
+      slots: [{ kind: 'image', label: 'Old photo', source: 'any' }],
+    },
+    cost: { type: 'per_second', credits_per_sec: 9, max_seconds: 5 },
+    tile: placeholderTile('animate-old-photo'),
+  },
+  {
+    preset_id: 'motion-transfer',
+    title: 'Motion Transfer',
+    section: 'video_effects',
+    sort_order: 2,
+    status: 'live',
+    media_type: 'avatar',
+    model: 'bytedance/dreamactor-m2.0',
+    prompt_template: '', // avatar path uses no text prompt
+    input_schema: {
+      slots: [
+        { kind: 'image', label: 'Your photo', source: 'any' },
+        { kind: 'video', label: 'Driving video', source: 'any' },
+      ],
+    },
+    cost: { type: 'per_second', credits_per_sec: 5, max_seconds: 30 },
+    tile: placeholderTile('motion-transfer'),
+  },
+  {
+    preset_id: 'enhancer-video',
+    title: 'AI Enhance',
+    subtitle: 'Video',
+    section: 'video_effects',
+    sort_order: 3,
+    status: 'live',
+    media_type: 'upscale',
+    model: 'bytedance/video-upscaler',
+    prompt_template: '', // upscale path takes no text prompt
+    input_schema: {
+      slots: [{ kind: 'video', label: 'Video to enhance', source: 'any' }],
+    },
+    cost: { type: 'per_second', credits_per_sec: 1 },
+    tile: placeholderTile('enhancer-video'),
+  },
+
+  // ─── Photo Effects (output = still image — D-02 revised 2026-07-06, below Video Effects) ─
   {
     preset_id: 'try-on',
     title: 'AI Try-On',
-    section: 'photo',
+    section: 'photo_effects',
     sort_order: 1,
     status: 'soon',
     badge: 'NEW',
@@ -117,7 +170,7 @@ export const SERVER_PRESETS: PresetDef[] = [
   {
     preset_id: 'hairstyle',
     title: 'Hairstyle',
-    section: 'photo',
+    section: 'photo_effects',
     sort_order: 2,
     status: 'live',
     media_type: 'image',
@@ -146,42 +199,10 @@ export const SERVER_PRESETS: PresetDef[] = [
     tile: placeholderTile('hairstyle'),
   },
   {
-    preset_id: 'enhancer-video',
-    title: 'AI Enhance',
-    subtitle: 'Video',
-    section: 'photo',
-    sort_order: 3,
-    status: 'live',
-    media_type: 'upscale',
-    model: 'bytedance/video-upscaler',
-    prompt_template: '', // upscale path takes no text prompt
-    input_schema: {
-      slots: [{ kind: 'video', label: 'Video to enhance', source: 'any' }],
-    },
-    cost: { type: 'per_second', credits_per_sec: 1 },
-    tile: placeholderTile('enhancer-video'),
-  },
-  {
-    preset_id: 'enhancer-image',
-    title: 'AI Enhance',
-    subtitle: 'Photo',
-    section: 'photo',
-    sort_order: 4,
-    status: 'live',
-    media_type: 'upscale',
-    model: 'recraft-ai/recraft-crisp-upscale',
-    prompt_template: '', // upscale path takes no text prompt
-    input_schema: {
-      slots: [{ kind: 'image', label: 'Image to enhance', source: 'any' }],
-    },
-    cost: { type: 'flat', credits: 1 },
-    tile: placeholderTile('enhancer-image'),
-  },
-  {
     preset_id: 'anime-yourself',
     title: 'Anime Yourself',
-    section: 'photo',
-    sort_order: 5,
+    section: 'photo_effects',
+    sort_order: 3,
     status: 'live',
     media_type: 'image',
     model: 'openai/gpt-image-2-medium', // D-22: medium tier, 5 credits
@@ -197,8 +218,8 @@ export const SERVER_PRESETS: PresetDef[] = [
   {
     preset_id: 'polaroid',
     title: 'Polaroid Hug',
-    section: 'photo',
-    sort_order: 6,
+    section: 'photo_effects',
+    sort_order: 4,
     status: 'live',
     media_type: 'image',
     model: 'openai/gpt-image-2-medium', // D-22: medium tier, 5 credits
@@ -216,46 +237,26 @@ export const SERVER_PRESETS: PresetDef[] = [
     tile: placeholderTile('polaroid'),
   },
   {
-    preset_id: 'animate-old-photo',
-    title: 'Animate Old Photo',
-    section: 'photo',
-    sort_order: 7,
+    preset_id: 'enhancer-image',
+    title: 'AI Enhance',
+    subtitle: 'Photo',
+    section: 'photo_effects',
+    sort_order: 5,
     status: 'live',
-    badge: 'HOT',
-    media_type: 'video',
-    model: 'bytedance/seedance-2.0-mini',
-    prompt_template:
-      'Bring this old photo to life with subtle, natural motion — gentle breathing, slight head ' +
-      'movement, soft ambient background motion — keep the vintage look and colors intact, no audio.',
+    media_type: 'upscale',
+    model: 'recraft-ai/recraft-crisp-upscale',
+    prompt_template: '', // upscale path takes no text prompt
     input_schema: {
-      slots: [{ kind: 'image', label: 'Old photo', source: 'any' }],
+      slots: [{ kind: 'image', label: 'Image to enhance', source: 'any' }],
     },
-    cost: { type: 'per_second', credits_per_sec: 9, max_seconds: 5 },
-    tile: placeholderTile('animate-old-photo'),
-  },
-  {
-    preset_id: 'motion-transfer',
-    title: 'Motion Transfer',
-    section: 'photo',
-    sort_order: 8,
-    status: 'live',
-    media_type: 'avatar',
-    model: 'bytedance/dreamactor-m2.0',
-    prompt_template: '', // avatar path uses no text prompt
-    input_schema: {
-      slots: [
-        { kind: 'image', label: 'Your photo', source: 'any' },
-        { kind: 'video', label: 'Driving video', source: 'any' },
-      ],
-    },
-    cost: { type: 'per_second', credits_per_sec: 5, max_seconds: 30 },
-    tile: placeholderTile('motion-transfer'),
+    cost: { type: 'flat', credits: 1 },
+    tile: placeholderTile('enhancer-image'),
   },
   {
     preset_id: 'faceswap',
     title: 'Faceswap',
-    section: 'photo',
-    sort_order: 9,
+    section: 'photo_effects',
+    sort_order: 6,
     status: 'soon',
     tile: placeholderTile('faceswap'),
   },
