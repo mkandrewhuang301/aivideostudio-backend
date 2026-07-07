@@ -10,7 +10,8 @@
 // Client contract: `preset_id` (string), `preset_input_upload_ids` (string[] of reference_uploads
 // ids, index-aligned to the preset's `input_schema.slots`), optional `style_id` (must match one
 // of the preset's `input_schema.style_grid` entries), optional `estimated_duration_seconds` for
-// avatar/video-upscale presets (used only as a starting point — clamped server-side, D-16).
+// avatar/video-upscale/character-replace presets (used only as a starting point — clamped
+// server-side, D-16).
 //
 // D-16 / Pitfall 4 / T-09.1-07: for any preset whose cost declares `max_seconds`, the resolved
 // duration is clamped to that cap BEFORE prepareCost computes cost — this must happen here, not
@@ -30,7 +31,10 @@ const PRESETS_BY_ID: Record<string, PresetDef> = Object.fromEntries(
 declare global {
   namespace Express {
     interface Request {
-      _preset?: { preset_id: string; input_upload_ids: string[] };
+      // input_upload_ids preserves null placeholders for empty optional slots (09.1-11) so a
+      // later Remix/reopen can reconstruct which slots were left blank, index-aligned to the
+      // preset's input_schema.slots.
+      _preset?: { preset_id: string; input_upload_ids: Array<string | null> };
     }
   }
 }
@@ -72,20 +76,27 @@ export async function presetResolver(req: Request, res: Response, next: NextFunc
     // Resolve slot inputs: client sends reference_uploads ids (index-aligned to input_schema.slots),
     // never raw URLs — look each up ownership-scoped and presign a fresh URL (Issue 4 pattern:
     // never trust a client-sent presigned URL, which may already be stale).
-    const uploadIds: string[] = Array.isArray(req.body.preset_input_upload_ids)
-      ? (req.body.preset_input_upload_ids as unknown[]).filter((id): id is string => typeof id === 'string')
+    //
+    // 09.1-11: preserve array LENGTH and index alignment — a non-string entry (null, the
+    // client's placeholder for a skipped optional slot) becomes `null` here rather than being
+    // filtered out, so slotUrls stays index-aligned to input_schema.slots below. Do NOT compact
+    // this array; a shorter array would silently misalign every slot after the first gap.
+    const uploadIds: Array<string | null> = Array.isArray(req.body.preset_input_upload_ids)
+      ? (req.body.preset_input_upload_ids as unknown[]).map((id) => (typeof id === 'string' ? id : null))
       : [];
 
     const userId = req.user?.dbUserId;
+    const nonNullIds = uploadIds.filter((id): id is string => id !== null);
     let slotUrls: string[] = [];
-    if (uploadIds.length > 0 && userId) {
+    if (nonNullIds.length > 0 && userId) {
       const rows = await db
         .select()
         .from(referenceUploads)
-        .where(and(inArray(referenceUploads.id, uploadIds), eq(referenceUploads.user_id, userId)));
+        .where(and(inArray(referenceUploads.id, nonNullIds), eq(referenceUploads.user_id, userId)));
       const rowById = Object.fromEntries((rows as Array<{ id: string; r2_key: string }>).map((r) => [r.id, r]));
       slotUrls = await Promise.all(
         uploadIds.map(async (id) => {
+          if (id === null) return '';
           const row = rowById[id];
           return row ? await getUploadPresignedUrl(row.r2_key) : '';
         }),
@@ -112,6 +123,19 @@ export async function presetResolver(req: Request, res: Response, next: NextFunc
         req.body.estimated_duration_seconds = maxSeconds ? Math.min(clientDuration, maxSeconds) : clientDuration;
         break;
       }
+      case 'character_replace': {
+        // AI Influencer (D-23): user's own video (motion/background source) + a character image
+        // that replaces them — the inverse framing from Motion Transfer, which keeps the PHOTO's
+        // background rather than the user's own video's background.
+        req.body.character_replace_video = slotUrls[0];
+        req.body.character_replace_image = slotUrls[1];
+        const clientDuration =
+          typeof req.body.estimated_duration_seconds === 'number' && req.body.estimated_duration_seconds > 0
+            ? req.body.estimated_duration_seconds
+            : 5;
+        req.body.estimated_duration_seconds = maxSeconds ? Math.min(clientDuration, maxSeconds) : clientDuration;
+        break;
+      }
       case 'upscale': {
         if (def.model === 'recraft-ai/recraft-crisp-upscale') {
           // Enhancer (image path) — flat cost, single image field.
@@ -128,8 +152,19 @@ export async function presetResolver(req: Request, res: Response, next: NextFunc
         break;
       }
       case 'image': {
-        // Try-On/Hairstyle/Anime Yourself/Polaroid — 1-2 reference image slots, no user duration.
-        req.body.reference_images = slotUrls;
+        // Clothes Swap/Hairstyle/Anime Yourself/Polaroid — 1-4 reference image slots, no user
+        // duration. 09.1-11: slots may declare `optional: true` (Clothes Swap's 2 extra outfit
+        // references) — every NON-optional slot must resolve to a real presigned URL, or reject
+        // before any billing/dispatch happens. This is a no-op for every preset whose slots
+        // declare no `optional` flag (hairstyle/anime-yourself/polaroid) since all of theirs are
+        // implicitly required, matching their pre-existing behavior exactly.
+        const slots = def.input_schema?.slots ?? [];
+        const missingRequired = slots.some((slot, index) => !slot.optional && !slotUrls[index]);
+        if (missingRequired) {
+          res.status(400).json({ error: 'Missing required image', code: 'INVALID_PRESET_INPUT' });
+          return;
+        }
+        req.body.reference_images = slotUrls.filter(Boolean);
         break;
       }
       case 'video': {

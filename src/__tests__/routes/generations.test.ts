@@ -942,11 +942,165 @@ describe('POST /api/generations — presets', () => {
   });
 
   it('returns 400 INVALID_PRESET for a not-yet-live preset (status: soon — D-04)', async () => {
-    const res = await request(app).post('/api/generations').send({ preset_id: 'try-on' });
+    // 'try-on' was activated as the live 'clothes-swap' preset (09.1-11) — 'faceswap' remains
+    // SOON and exercises the same not-live rejection path.
+    const res = await request(app).post('/api/generations').send({ preset_id: 'faceswap' });
 
     expect(res.status).toBe(400);
     expect(res.body.code).toBe('INVALID_PRESET');
     expect(dispatchMock).not.toHaveBeenCalled();
+  });
+
+  // ─── Clothes Swap (09.1-11) — sparse/optional image slots ───────────────────
+  // Slots: [0] Your photo (required), [1] Outfit (required), [2]/[3] Add reference (optional).
+  describe('clothes-swap: sparse/optional image slots', () => {
+    it('resolves reference_images from person + one outfit ref, with nulls for the two optional slots, person first', async () => {
+      mockUploadRows([
+        { id: 'upload-person', r2_key: 'uploads/test-user-id/person.jpg' },
+        { id: 'upload-outfit', r2_key: 'uploads/test-user-id/outfit.jpg' },
+      ]);
+      (computeImageCostCredits as jest.Mock).mockReturnValue(5);
+      (deductCredits as jest.Mock).mockResolvedValue(true);
+      (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-clothes-swap' });
+      dispatchMock.mockResolvedValue({ providerPredictionId: 'pred-clothes-swap' });
+      (attachPredictionId as jest.Mock).mockResolvedValue(undefined);
+
+      const res = await request(app).post('/api/generations').send({
+        preset_id: 'clothes-swap',
+        preset_input_upload_ids: ['upload-person', 'upload-outfit', null, null],
+      });
+
+      expect(res.status).toBe(200);
+      expect(createGeneration).toHaveBeenCalledWith(
+        expect.objectContaining({ media_type: 'image', model: 'openai/gpt-image-2-medium', cost_credits: 5 }),
+      );
+      expect(dispatchMock.mock.calls[0][0].referenceImages).toEqual([
+        'https://r2.example.com/signed/uploads/test-user-id/person.jpg',
+        'https://r2.example.com/signed/uploads/test-user-id/outfit.jpg',
+      ]);
+    });
+
+    it('resolves all 4 slots in order when every optional reference is also filled', async () => {
+      mockUploadRows([
+        { id: 'upload-person', r2_key: 'uploads/test-user-id/person.jpg' },
+        { id: 'upload-outfit', r2_key: 'uploads/test-user-id/outfit.jpg' },
+        { id: 'upload-extra1', r2_key: 'uploads/test-user-id/extra1.jpg' },
+        { id: 'upload-extra2', r2_key: 'uploads/test-user-id/extra2.jpg' },
+      ]);
+      (computeImageCostCredits as jest.Mock).mockReturnValue(5);
+      (deductCredits as jest.Mock).mockResolvedValue(true);
+      (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-clothes-swap-full' });
+      dispatchMock.mockResolvedValue({ providerPredictionId: 'pred-clothes-swap-full' });
+      (attachPredictionId as jest.Mock).mockResolvedValue(undefined);
+
+      const res = await request(app).post('/api/generations').send({
+        preset_id: 'clothes-swap',
+        preset_input_upload_ids: ['upload-person', 'upload-outfit', 'upload-extra1', 'upload-extra2'],
+      });
+
+      expect(res.status).toBe(200);
+      expect(dispatchMock.mock.calls[0][0].referenceImages).toEqual([
+        'https://r2.example.com/signed/uploads/test-user-id/person.jpg',
+        'https://r2.example.com/signed/uploads/test-user-id/outfit.jpg',
+        'https://r2.example.com/signed/uploads/test-user-id/extra1.jpg',
+        'https://r2.example.com/signed/uploads/test-user-id/extra2.jpg',
+      ]);
+    });
+
+    it('returns 400 INVALID_PRESET_INPUT when the required Outfit slot (index 1) is missing, without dispatch or billing', async () => {
+      mockUploadRows([{ id: 'upload-person', r2_key: 'uploads/test-user-id/person.jpg' }]);
+      (computeImageCostCredits as jest.Mock).mockReturnValue(5);
+
+      const res = await request(app).post('/api/generations').send({
+        preset_id: 'clothes-swap',
+        preset_input_upload_ids: ['upload-person', null, null, null],
+      });
+
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('INVALID_PRESET_INPUT');
+      expect(dispatchMock).not.toHaveBeenCalled();
+      expect(createGeneration).not.toHaveBeenCalled();
+      expect(deductCredits).not.toHaveBeenCalled();
+    });
+
+    it('returns 400 INVALID_PRESET_INPUT when the required person slot (index 0) is missing', async () => {
+      mockUploadRows([{ id: 'upload-outfit', r2_key: 'uploads/test-user-id/outfit.jpg' }]);
+
+      const res = await request(app).post('/api/generations').send({
+        preset_id: 'clothes-swap',
+        preset_input_upload_ids: [null, 'upload-outfit', null, null],
+      });
+
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('INVALID_PRESET_INPUT');
+      expect(dispatchMock).not.toHaveBeenCalled();
+    });
+
+    it('regression: hairstyle (no optional slots declared) is unaffected by the sparse-slot validation', async () => {
+      mockUploadRows([{ id: 'upload-photo', r2_key: 'uploads/test-user-id/photo.jpg' }]);
+      (computeImageCostCredits as jest.Mock).mockReturnValue(5);
+      (deductCredits as jest.Mock).mockResolvedValue(true);
+      (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-hairstyle-regression' });
+      dispatchMock.mockResolvedValue({ providerPredictionId: 'pred-hairstyle-regression' });
+      (attachPredictionId as jest.Mock).mockResolvedValue(undefined);
+
+      const res = await request(app).post('/api/generations').send({
+        preset_id: 'hairstyle',
+        style_id: 'bob',
+        preset_input_upload_ids: ['upload-photo'],
+      });
+
+      expect(res.status).toBe(200);
+      expect(dispatchMock.mock.calls[0][0].referenceImages).toEqual([
+        'https://r2.example.com/signed/uploads/test-user-id/photo.jpg',
+      ]);
+    });
+  });
+
+  // Preset Sheet Redesign: the new aspect-ratio chips (Hairstyle/Anime Yourself/Polaroid,
+  // sheet.aspect_ratios) submit the selected value as the same top-level `image_aspect_ratio`
+  // field the freeform composer already uses. presetResolver's 'image' branch only sets
+  // `reference_images` — it never touches/strips `image_aspect_ratio` — so prepareCost's image
+  // branch (unchanged) reads the client-sent value straight through to dispatch. This test
+  // verifies that existing wiring actually holds end-to-end for a preset-originated request.
+  it('forwards the client-selected image_aspect_ratio to dispatch for a GPT-Image-2 preset (hairstyle)', async () => {
+    mockUploadRows([{ id: 'upload-photo', r2_key: 'uploads/test-user-id/photo.jpg' }]);
+    (computeImageCostCredits as jest.Mock).mockReturnValue(5);
+    (deductCredits as jest.Mock).mockResolvedValue(true);
+    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-hairstyle-ar' });
+    dispatchMock.mockResolvedValue({ providerPredictionId: 'pred-hairstyle-ar' });
+    (attachPredictionId as jest.Mock).mockResolvedValue(undefined);
+
+    const res = await request(app).post('/api/generations').send({
+      preset_id: 'hairstyle',
+      style_id: 'bob',
+      preset_input_upload_ids: ['upload-photo'],
+      image_aspect_ratio: '2:3',
+    });
+
+    expect(res.status).toBe(200);
+    expect(dispatchMock.mock.calls[0][0]).toEqual(
+      expect.objectContaining({ mediaType: 'image', model: 'openai/gpt-image-2-medium', imageAspectRatio: '2:3' }),
+    );
+  });
+
+  it('defaults to 1:1 when the client omits image_aspect_ratio for a preset dispatch', async () => {
+    mockUploadRows([{ id: 'upload-anime', r2_key: 'uploads/test-user-id/selfie.jpg' }]);
+    (computeImageCostCredits as jest.Mock).mockReturnValue(5);
+    (deductCredits as jest.Mock).mockResolvedValue(true);
+    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-anime-ar-default' });
+    dispatchMock.mockResolvedValue({ providerPredictionId: 'pred-anime-ar-default' });
+    (attachPredictionId as jest.Mock).mockResolvedValue(undefined);
+
+    const res = await request(app).post('/api/generations').send({
+      preset_id: 'anime-yourself',
+      preset_input_upload_ids: ['upload-anime'],
+    });
+
+    expect(res.status).toBe(200);
+    expect(dispatchMock.mock.calls[0][0]).toEqual(
+      expect.objectContaining({ imageAspectRatio: '1:1' }),
+    );
   });
 
   it('returns 400 INVALID_STYLE when style_id does not match the preset style_grid', async () => {
