@@ -66,6 +66,13 @@ function verifyAuthorization(req: Request): boolean {
 revenueCatWebhookRouter.post('/', async (req: Request, res: Response) => {
   // Step 1: Verify shared secret (RESEARCH.md Pattern 6)
   if (!verifyAuthorization(req)) {
+    // Never logged before this point — a secret/header mismatch produced ZERO log output,
+    // indistinguishable from RC never calling this endpoint at all. Log presence/shape only,
+    // never the header value itself.
+    console.warn('[webhook/revenuecat] Unauthorized: Authorization header did not match REVENUECAT_WEBHOOK_SECRET', {
+      hasAuthHeader: Boolean(req.headers['authorization']),
+      path: req.originalUrl,
+    });
     res.status(401).json({ error: 'Unauthorized' });
     return;
   }
