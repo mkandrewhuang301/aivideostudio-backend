@@ -8,9 +8,10 @@
 // src/config/presets.ts.
 //
 // ffmpeg is optional (RESEARCH.md Environment table: "Missing with fallback"). When available,
-// loop.mp4 is transcoded to the card-art contract (~480x640, H.264 baseline, no audio) and a
-// poster.jpg is extracted from the first frame if one wasn't supplied. When ffmpeg is not
-// installed, files are uploaded as-is — the operator is expected to deliver pre-encoded assets.
+// loop.mp4 is transcoded to the card-art contract (~1080x1920 ceiling — see transcodeLoop below
+// for why this isn't 480x640 anymore, H.264 baseline, no audio) and a poster.jpg is extracted
+// from the first frame if one wasn't supplied. When ffmpeg is not installed, files are uploaded
+// as-is — the operator is expected to deliver pre-encoded assets.
 //
 // Also scans backend/assets/preset-art/<preset_id>/styles/<style_id>.{jpg,jpeg,png} — one still
 // photo per style_grid option (2026-07-07 notes/hairstyle-preset-style-images-gender-filter.md).
@@ -57,13 +58,19 @@ function ffmpegAvailable(): boolean {
   }
 }
 
-// Loop contract per RESEARCH.md Pattern 6: low-res, no audio, ~480x640, H.264, short duration.
+// Loop contract per RESEARCH.md Pattern 6: no audio, H.264, short duration. Bounding box raised
+// from the original ~480x640 to 1080x1920 (2026-07-08) — grid tiles crop+zoom into these loops
+// (PresetTileView's head-focused framing crop, ~1.65x on top of the base cover-fill), and 480x640
+// source pixels stretched under that combined zoom produced visible upscale blur (user-reported).
+// 1080x1920 is a "vertical HD" ceiling: portrait sources at or below it pass through at native
+// resolution (ffmpeg's min(w,iw)/min(h,ih) only ever scales DOWN, never up), so this only affects
+// sources actually larger than 1080x1920, avoiding pointless upscale/file-bloat on tiny sources.
 function transcodeLoop(inputPath: string, outputPath: string): void {
   execFileSync('ffmpeg', [
     '-y',
     '-i', inputPath,
     '-an', // strip audio track
-    '-vf', "scale='min(480,iw)':'min(640,ih)':force_original_aspect_ratio=decrease",
+    '-vf', "scale='min(1080,iw)':'min(1920,ih)':force_original_aspect_ratio=decrease",
     '-c:v', 'libx264',
     '-profile:v', 'baseline',
     '-pix_fmt', 'yuv420p',

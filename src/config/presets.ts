@@ -349,8 +349,11 @@ export const SERVER_PRESETS: PresetDef[] = [
       resolution_label: 'High resolution',
     },
     tile: {
-      poster_url: 'https://pub-cec5aa79de50452fa7eac827a03d7e04.r2.dev/presets/hairstyle/poster-v1.jpg',
-      loop_url: 'https://pub-cec5aa79de50452fa7eac827a03d7e04.r2.dev/presets/hairstyle/loop-v1.mp4',
+      // v2 (2026-07-08): re-ingested at native 720x1280 (was downscaled to 360x640) — the grid
+      // tile's head-focused crop zooms into this asset, and the old low-res version visibly
+      // blurred under that zoom (user-reported).
+      poster_url: 'https://pub-cec5aa79de50452fa7eac827a03d7e04.r2.dev/presets/hairstyle/poster-v2.jpg',
+      loop_url: 'https://pub-cec5aa79de50452fa7eac827a03d7e04.r2.dev/presets/hairstyle/loop-v2.mp4',
       aspect: '3:4',
     },
   },
