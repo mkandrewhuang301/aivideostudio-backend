@@ -7,6 +7,7 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { creditCheckMiddleware } from '../middleware/creditCheck';
 import { promptModerationMiddleware } from '../middleware/promptModeration';
+import { celebrityCheckMiddleware } from '../middleware/celebrityCheck';
 import { presetResolver } from '../middleware/presetResolver';
 import {
   resolveDurationSeconds,
@@ -16,6 +17,7 @@ import {
   computeUpscalerCost,
   computeImageUpscaleCost,
   computeGrokImagineCost,
+  computeCharacterReplaceCost,
   createGeneration,
   attachPredictionId,
   listGenerations,
@@ -29,6 +31,7 @@ import {
   SUPPORTED_UPSCALER_MODELS,
   SUPPORTED_IMAGE_UPSCALE_MODELS,
   SUPPORTED_GROK_MODELS,
+  SUPPORTED_CHARACTER_REPLACE_MODELS,
   type SupportedModel,
 } from '../services/generationService';
 import { ReplicateProvider } from '../services/providers/ReplicateProvider';
@@ -51,7 +54,7 @@ const VALID_VIDEO_ASPECT_RATIOS = ['16:9', '9:16', '1:1', '4:3', '3:4'];
 interface ResolvedGenerationRequest {
   prompt: string;
   model: string;
-  mediaType: 'video' | 'image' | 'avatar' | 'upscale';
+  mediaType: 'video' | 'image' | 'avatar' | 'upscale' | 'character_replace';
   // Video-only
   durationSeconds?: number;
   resolution?: '480p' | '720p' | '1080p' | '4k';
@@ -75,6 +78,9 @@ interface ResolvedGenerationRequest {
   upscalerTargetFps?: number;
   // Upscale-only (Recraft Crisp Upscale — image path; distinct from the video upscaler above)
   upscalerInputImage?: string;
+  // Character-replace-only (Wan 2.2 Animate Replace — AI Influencer, D-23)
+  characterReplaceVideo?: string;
+  characterReplaceImage?: string;
   cost: number;
 }
 
@@ -172,13 +178,17 @@ function prepareCost(req: Request, res: Response, next: NextFunction): void {
     target_fps,
     // upscale-specific (Recraft Crisp Upscale — image path)
     upscale_image_url,
-    // shared for avatar + upscale billing (duration not known upfront)
+    // character-replace-specific (Wan 2.2 Animate Replace — AI Influencer, D-23)
+    character_replace_video,
+    character_replace_image,
+    // shared for avatar + upscale + character-replace billing (duration not known upfront)
     estimated_duration_seconds,
   } = req.body ?? {};
 
-  // avatar/upscale branches take no text prompt (D-16/D-22 presets: motion-transfer, enhancer-video,
-  // enhancer-image all have an empty prompt_template) — only image/video/grok branches require one.
-  if (media_type !== 'avatar' && media_type !== 'upscale' && (!prompt || typeof prompt !== 'string')) {
+  // avatar/upscale/character-replace branches take no text prompt (D-16/D-22/D-23 presets:
+  // motion-transfer, enhancer-video, enhancer-image, ai-influencer all have an empty
+  // prompt_template) — only image/video/grok branches require one.
+  if (media_type !== 'avatar' && media_type !== 'upscale' && media_type !== 'character_replace' && (!prompt || typeof prompt !== 'string')) {
     res.status(400).json({ error: 'prompt is required', code: 'INVALID_PROMPT' });
     return;
   }
@@ -209,6 +219,37 @@ function prepareCost(req: Request, res: Response, next: NextFunction): void {
       avatarImage: avatar_image as string,
       avatarDrivingVideo: avatar_driving_video as string,
       cutFirstSecond: cut_first_second !== false,
+      cost,
+    };
+    next();
+    return;
+  }
+
+  if (media_type === 'character_replace') {
+    const replaceModel = model ?? 'wan-video/wan-2.2-animate-replace';
+    if (!(SUPPORTED_CHARACTER_REPLACE_MODELS as readonly string[]).includes(replaceModel)) {
+      res.status(400).json({ error: `model must be one of: ${SUPPORTED_CHARACTER_REPLACE_MODELS.join(', ')}`, code: 'INVALID_MODEL' });
+      return;
+    }
+    if (!character_replace_video || typeof character_replace_video !== 'string') {
+      res.status(400).json({ error: 'character_replace_video (presigned URL) is required', code: 'INVALID_INPUT' });
+      return;
+    }
+    if (!character_replace_image || typeof character_replace_image !== 'string') {
+      res.status(400).json({ error: 'character_replace_image (presigned URL) is required', code: 'INVALID_INPUT' });
+      return;
+    }
+    const estimatedDuration = typeof estimated_duration_seconds === 'number' && estimated_duration_seconds > 0
+      ? estimated_duration_seconds : 5;
+    const cost = computeCharacterReplaceCost(estimatedDuration);
+    req.body.cost_credits = cost;
+    req._resolved = {
+      prompt: '',
+      model: replaceModel,
+      mediaType: 'character_replace',
+      durationSeconds: estimatedDuration,
+      characterReplaceVideo: character_replace_video as string,
+      characterReplaceImage: character_replace_image as string,
       cost,
     };
     next();
@@ -434,7 +475,7 @@ function prepareCost(req: Request, res: Response, next: NextFunction): void {
   next();
 }
 
-generationsRouter.post('/', promptModerationMiddleware, presetResolver, prepareCost, creditCheckMiddleware, async (req: Request, res: Response) => {
+generationsRouter.post('/', promptModerationMiddleware, presetResolver, prepareCost, celebrityCheckMiddleware, creditCheckMiddleware, async (req: Request, res: Response) => {
   if (!req.user?.dbUserId) {
     res.status(401).json({ error: 'Not authenticated' });
     return;
@@ -471,6 +512,8 @@ generationsRouter.post('/', promptModerationMiddleware, presetResolver, prepareC
         ? { aspect_ratio: resolved.imageAspectRatio ?? '1:1' }
         : resolved.mediaType === 'avatar'
         ? { avatar_image: resolved.avatarImage, avatar_driving_video: resolved.avatarDrivingVideo, estimated_duration: resolved.durationSeconds }
+        : resolved.mediaType === 'character_replace'
+        ? { character_replace_video: resolved.characterReplaceVideo, character_replace_image: resolved.characterReplaceImage, estimated_duration: resolved.durationSeconds }
         : resolved.mediaType === 'upscale'
         ? (resolved.upscalerInputImage
             ? { upscale_image_url: resolved.upscalerInputImage }
@@ -528,6 +571,9 @@ generationsRouter.post('/', promptModerationMiddleware, presetResolver, prepareC
       upscalerTargetResolution: resolved.upscalerTargetResolution,
       upscalerTargetFps: resolved.upscalerTargetFps as GenerationInput['upscalerTargetFps'],
       upscalerInputImage: resolved.upscalerInputImage,
+      // Character-replace-only
+      characterReplaceVideo: resolved.characterReplaceVideo,
+      characterReplaceImage: resolved.characterReplaceImage,
     };
 
     logReferenceUrlDiagnostics('image', input.referenceImages);

@@ -156,6 +156,25 @@ export function computeImageUpscaleCost(): number {
   return Math.ceil(RECRAFT_UPSCALE_RATE_DOLLARS * CENTS_PER_DOLLAR);
 }
 
+// ─── Wan 2.2 Animate Replace (character_replace) ──────────────────────────────
+// "Replace" mode: swaps the person in a real video with an uploaded character image, keeping
+// the ORIGINAL video's background/motion/lighting (inverse of the `avatar` path above, which
+// keeps the PHOTO's background) — AI Influencer preset (D-23, added 2026-07-06).
+// Apache 2.0 licensed (Tongyi Lab / Wan-AI) — commercial use OK, no royalty.
+// Pricing CONFIRMED (user-verified 2026-07-06 from Replicate's own pricing criteria for this
+// model): 480p = $0.02/sec (50s per $1), 720p = $0.05/sec (20s per $1) — flat per-second-of-
+// output-video billing. v1 always dispatches at 720p (no resolution picker, D-22 precedent).
+// Source: https://replicate.com/wan-video/wan-2.2-animate-replace (schema + pricing verified 2026-07-06)
+
+export const CHARACTER_REPLACE_RATE = 0.05; // $/sec at 720p
+
+export const SUPPORTED_CHARACTER_REPLACE_MODELS = ['wan-video/wan-2.2-animate-replace'] as const;
+export type SupportedCharacterReplaceModel = typeof SUPPORTED_CHARACTER_REPLACE_MODELS[number];
+
+export function computeCharacterReplaceCost(estimatedDurationSeconds: number): number {
+  return Math.ceil(estimatedDurationSeconds * CHARACTER_REPLACE_RATE * CENTS_PER_DOLLAR);
+}
+
 export function computeCostCredits(input: {
   durationSeconds: number;
   resolution: '480p' | '720p' | '1080p' | '4k';

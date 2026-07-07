@@ -17,7 +17,9 @@ import {
   computeDreamActorCost,
   computeUpscalerCost,
   computeImageUpscaleCost,
+  computeCharacterReplaceCost,
   SUPPORTED_IMAGE_UPSCALE_MODELS,
+  SUPPORTED_CHARACTER_REPLACE_MODELS,
   markCompleted,
   markFailed,
   markRefunded,
@@ -136,6 +138,18 @@ describe('cents-rule cost functions (verified, not re-broken)', () => {
 
   it('SUPPORTED_IMAGE_UPSCALE_MODELS registers recraft-ai/recraft-crisp-upscale', () => {
     expect(SUPPORTED_IMAGE_UPSCALE_MODELS).toContain('recraft-ai/recraft-crisp-upscale');
+  });
+
+  it('computeCharacterReplaceCost(5s) == 25 credits (ceil(5 * 0.05 * 100)) — confirmed 720p rate, D-23', () => {
+    expect(computeCharacterReplaceCost(5)).toBe(25);
+  });
+
+  it('computeCharacterReplaceCost(1s) == 5 credits — same rate as DreamActor (5/sec)', () => {
+    expect(computeCharacterReplaceCost(1)).toBe(computeDreamActorCost(1));
+  });
+
+  it('SUPPORTED_CHARACTER_REPLACE_MODELS registers wan-video/wan-2.2-animate-replace', () => {
+    expect(SUPPORTED_CHARACTER_REPLACE_MODELS).toContain('wan-video/wan-2.2-animate-replace');
   });
 });
 

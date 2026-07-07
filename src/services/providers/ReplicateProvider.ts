@@ -38,6 +38,17 @@ export class ReplicateProvider implements ModelProvider {
         video: input.avatarDrivingVideo,
         ...(input.cutFirstSecond !== undefined ? { cut_first_second: input.cutFirstSecond } : {}),
       };
+    } else if (input.mediaType === 'character_replace') {
+      // Wan 2.2 Animate Replace ("replace" mode, D-23): swaps the person in `video` with
+      // `character_image`, keeping the video's own background/motion/lighting (a relighting
+      // LoRA blends the character into the scene). Verified schema: required video +
+      // character_image; resolution optional — pinned to '720' for consistent quality (D-22
+      // no-picker precedent; 480p is a cheaper future tier, unused in v1).
+      replicateInput = {
+        video: input.characterReplaceVideo,
+        character_image: input.characterReplaceImage,
+        resolution: '720',
+      };
     } else if (input.mediaType === 'upscale' && input.model === 'recraft-ai/recraft-crisp-upscale') {
       // Recraft Crisp Upscale (Enhancer — image path): single-field schema, the entire model
       // input is { image }. Distinct flat-cost image enhancer, not the per-second video upscaler.

@@ -215,6 +215,38 @@ describe('ReplicateProvider.dispatch — Recraft Crisp Upscale (Enhancer image p
   });
 });
 
+describe('ReplicateProvider.dispatch — Wan 2.2 Animate Replace (AI Influencer, D-23)', () => {
+  beforeEach(() => {
+    mockCreate.mockReset();
+    mockGet.mockReset();
+  });
+
+  it('sends { video, character_image, resolution: "720" } for character_replace', async () => {
+    mockCreate.mockResolvedValue({ id: 'pred-replace-1' });
+
+    const provider = new ReplicateProvider();
+    await provider.dispatch(
+      {
+        prompt: '',
+        model: 'wan-video/wan-2.2-animate-replace',
+        mediaType: 'character_replace',
+        characterReplaceVideo: 'https://example.com/source.mp4',
+        characterReplaceImage: 'https://example.com/character.jpg',
+      },
+      'https://example.com/webhooks/replicate',
+    );
+
+    const callArgs = mockCreate.mock.calls[0][0];
+    expect(callArgs.model).toBe('wan-video/wan-2.2-animate-replace');
+    expect(callArgs.input).toEqual({
+      video: 'https://example.com/source.mp4',
+      character_image: 'https://example.com/character.jpg',
+      resolution: '720',
+    });
+    expect(callArgs.webhook_events_filter).toEqual(['completed']);
+  });
+});
+
 describe('ReplicateProvider.getStatus', () => {
   beforeEach(() => {
     mockCreate.mockReset();

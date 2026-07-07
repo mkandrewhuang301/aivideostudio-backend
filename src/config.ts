@@ -34,6 +34,16 @@ export const config = {
   hiveScanEnabled: process.env.HIVE_SCAN_ENABLED !== 'false',
   hiveApiKey: process.env.HIVE_API_KEY ?? '',
   openaiApiKey: requireEnv('OPENAI_API_KEY'),
+  // Celebrity-likeness check (AWS Rekognition RecognizeCelebrities) for the upload-driven
+  // motion-transfer / ai-influencer presets — blocks animating a real celebrity's face.
+  // Defaults OFF (opt-in) since it needs real AWS IAM creds provisioned; unlike hiveScanEnabled
+  // (which defaults on), this stays dark until AWS keys exist + it's been tuned.
+  celebrityCheckEnabled: process.env.CELEBRITY_CHECK_ENABLED === 'true',
+  awsRegion: process.env.AWS_REGION ?? 'us-east-1',
+  awsAccessKeyId: process.env.AWS_ACCESS_KEY_ID ?? '',
+  awsSecretAccessKey: process.env.AWS_SECRET_ACCESS_KEY ?? '',
+  // MatchConfidence (0–100) at/above which an uploaded face is treated as a celebrity match.
+  celebrityMatchThreshold: parseFloat(process.env.CELEBRITY_MATCH_THRESHOLD ?? '90'),
 } as const;
 
 // Shared by the original dispatch (generations.ts) and retry dispatch (webhooks/replicate.ts)

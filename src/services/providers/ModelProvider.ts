@@ -5,7 +5,7 @@
 export interface GenerationInput {
   prompt: string;
   model: string;
-  mediaType?: 'video' | 'image' | 'avatar' | 'upscale';
+  mediaType?: 'video' | 'image' | 'avatar' | 'upscale' | 'character_replace';
   // Video-specific (undefined for image/avatar/upscale generations)
   durationSeconds?: number;              // NEVER -1 when present (CLAUDE.md Rule 7)
   resolution?: '480p' | '720p' | '1080p' | '4k';
@@ -30,6 +30,9 @@ export interface GenerationInput {
   // Image-upscale-specific — Recraft Crisp Upscale (recraft-ai/recraft-crisp-upscale)
   // Distinct field from upscalerInputVideo: this is an image enhancer, not the video upscaler.
   upscalerInputImage?: string;         // presigned URL — image to upscale; entire model input is { image }
+  // Character-replace-specific — Wan 2.2 Animate Replace (wan-video/wan-2.2-animate-replace)
+  characterReplaceVideo?: string; // presigned URL — source video whose background/motion/lighting is kept
+  characterReplaceImage?: string; // presigned URL — character image that replaces the person in the video
 }
 
 export interface DispatchResult {

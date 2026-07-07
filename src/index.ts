@@ -48,9 +48,18 @@ app.use(express.json());
 
 app.use('/health', healthRouter);
 
-// RevenueCat webhook — OUTSIDE /api, no Firebase JWT required (server-to-server).
-// RevenueCat authenticates with Authorization Bearer header set in RC dashboard.
+// RevenueCat webhook — OUTSIDE the /api auth gate below, no Firebase JWT required
+// (server-to-server). RevenueCat authenticates with the Authorization Bearer header
+// set in the RC dashboard, verified inside revenueCatWebhookRouter itself.
+//
+// Mounted at BOTH paths: the RC dashboard was historically configured with an
+// `/api/` prefix (see .planning/phases/03-credit-infrastructure/03-VERIFICATION.md)
+// which doesn't match this router's canonical path and caused all webhook events to
+// 404 in production — meaning purchases/renewals/refunds never credited accounts.
+// Mounting both paths here (before the /api auth gate) makes delivery correct
+// regardless of which URL is actually saved in the RC dashboard.
 app.use('/webhooks/revenuecat', revenueCatWebhookRouter);
+app.use('/api/webhooks/revenuecat', revenueCatWebhookRouter);
 
 // Public preset registry — mounted under /api/presets but BEFORE the /api auth gate below
 // (Express matches middleware by registration order, not path nesting depth) so it stays
