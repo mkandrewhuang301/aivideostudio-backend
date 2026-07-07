@@ -39,10 +39,12 @@ declare global {
   }
 }
 
-// Server-only template expansion — `def.prompt_template` never reaches the client (D-11).
-// `{style}` is substituted with the VALIDATED style_grid label (never raw client text).
-function expandTemplate(def: PresetDef, styleLabel: string | undefined): string {
-  const template = def.prompt_template ?? '';
+// Server-only template expansion — `def.prompt_template`/`prompt_template_with_reference` never
+// reach the client (D-11). `{style}` is substituted with the VALIDATED style_grid label (never
+// raw client text). `hasStyleReferenceImage` picks the two-image-aware template when the
+// resolved style option carries a `thumb_url` (sent as a second reference image below).
+function expandTemplate(def: PresetDef, styleLabel: string | undefined, hasStyleReferenceImage: boolean): string {
+  const template = (hasStyleReferenceImage && def.prompt_template_with_reference) || def.prompt_template || '';
   if (!template) return template;
   return styleLabel ? template.replace('{style}', styleLabel) : template;
 }
@@ -63,6 +65,9 @@ export async function presetResolver(req: Request, res: Response, next: NextFunc
   try {
     // Style grid validation (e.g. hairstyle) — 400 if the sent style id isn't in the def.
     let styleLabel: string | undefined;
+    // When the matched style option carries a thumb_url, it doubles as the reference image sent
+    // to the model alongside the user's own photo (appended in the 'image' case below).
+    let styleReferenceUrl: string | undefined;
     if (def.input_schema?.style_grid?.length) {
       const styleId = req.body.style_id;
       const match = def.input_schema.style_grid.find((s) => s.id === styleId);
@@ -71,6 +76,7 @@ export async function presetResolver(req: Request, res: Response, next: NextFunc
         return;
       }
       styleLabel = match.label;
+      styleReferenceUrl = match.thumb_url;
     }
 
     // Resolve slot inputs: client sends reference_uploads ids (index-aligned to input_schema.slots),
@@ -106,7 +112,7 @@ export async function presetResolver(req: Request, res: Response, next: NextFunc
     // OVERWRITE — never merge/trust client-sent model/prompt/media_type (T-09.1-02).
     req.body.media_type = def.media_type;
     req.body.model = def.model;
-    req.body.prompt = expandTemplate(def, styleLabel);
+    req.body.prompt = expandTemplate(def, styleLabel, !!styleReferenceUrl);
 
     const maxSeconds = def.cost?.type === 'per_second' ? def.cost.max_seconds : undefined;
 
@@ -164,7 +170,10 @@ export async function presetResolver(req: Request, res: Response, next: NextFunc
           res.status(400).json({ error: 'Missing required image', code: 'INVALID_PRESET_INPUT' });
           return;
         }
-        req.body.reference_images = slotUrls.filter(Boolean);
+        // styleReferenceUrl (hairstyle's per-style thumb_url, once populated) is appended AFTER
+        // the user's own slot photo(s) — order matches prompt_template_with_reference's
+        // "first image" / "second image" framing.
+        req.body.reference_images = [...slotUrls.filter(Boolean), ...(styleReferenceUrl ? [styleReferenceUrl] : [])];
         break;
       }
       case 'video': {

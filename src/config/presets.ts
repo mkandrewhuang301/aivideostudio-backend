@@ -40,7 +40,13 @@ export interface PresetTextField {
 export interface PresetStyleOption {
   id: string;
   label: string;
+  // UI grid preview AND (when present) the actual reference image sent to the model alongside
+  // the user's own photo — see presetResolver.ts's style-reference handling.
   thumb_url?: string;
+  // Client-side filter only (PresetInputSheet "Feminine / Masculine / All" chip) — never used
+  // server-side, no auto-detection from the user's photo (deliberate: see 2026-07-07 notes/
+  // hairstyle-preset-style-images-gender-filter.md for why).
+  gender_tag?: 'feminine' | 'masculine' | 'unisex';
 }
 
 export interface PresetInputSchema {
@@ -97,6 +103,13 @@ export interface PresetDef {
    * strips this field before res.json(). Do not add this field to any client-facing type.
    */
   prompt_template?: string;
+  /**
+   * SERVER-ONLY, same rules as `prompt_template`. Used instead of `prompt_template` when the
+   * resolved style_grid option carries a `thumb_url` — that image is sent to the model as a
+   * second reference alongside the user's own photo, so this template describes two images
+   * instead of one. Falls back to `prompt_template` when the style has no reference image.
+   */
+  prompt_template_with_reference?: string;
   input_schema?: PresetInputSchema;
   // SOON rows carry no cost — nothing is billed until the feature ships.
   cost?: PresetCost;
@@ -301,21 +314,27 @@ export const SERVER_PRESETS: PresetDef[] = [
     // quality picker in PresetInputSheet. IMAGE_MODEL_COSTS['openai/gpt-image-2-medium'] = 5.
     model: 'openai/gpt-image-2-medium',
     prompt_template: "Change this person's hairstyle to {style}, keep the face and background unchanged.",
+    // Used instead of prompt_template when the chosen style has a thumb_url (sent as a second
+    // reference image) — see presetResolver.ts. gender_tag values below are a first-pass
+    // proposal pending sign-off (2026-07-07 notes/hairstyle-preset-style-images-gender-filter.md).
+    prompt_template_with_reference:
+      'Give the person in the first image this exact hairstyle: {style} — matching the reference ' +
+      'photo in the second image. Keep their face and background unchanged.',
     input_schema: {
       slots: [{ kind: 'image', label: 'Your photo', source: 'any' }],
       style_grid: [
-        { id: 'bob', label: 'Bob' },
-        { id: 'pixie-cut', label: 'Pixie Cut' },
-        { id: 'crew-cut', label: 'Buzz' },
-        { id: 'side-swept-bangs', label: 'Curtain Bangs' },
-        { id: 'perm', label: 'Perm' },
-        { id: 'layered', label: 'Layered' },
-        { id: 'slicked-back', label: 'Slicked Back' },
-        { id: 'undercut', label: 'Undercut' },
-        { id: 'soft-waves', label: 'Soft Waves' },
-        { id: 'french-braid', label: 'French Braid' },
-        { id: 'box-braids', label: 'Box Braids' },
-        { id: 'curly', label: 'Curly' },
+        { id: 'bob', label: 'Bob', gender_tag: 'unisex' },
+        { id: 'pixie-cut', label: 'Pixie Cut', gender_tag: 'feminine' },
+        { id: 'crew-cut', label: 'Buzz', gender_tag: 'masculine' },
+        { id: 'side-swept-bangs', label: 'Curtain Bangs', gender_tag: 'feminine' },
+        { id: 'perm', label: 'Perm', gender_tag: 'unisex' },
+        { id: 'layered', label: 'Layered', gender_tag: 'unisex' },
+        { id: 'slicked-back', label: 'Slicked Back', gender_tag: 'masculine' },
+        { id: 'undercut', label: 'Undercut', gender_tag: 'masculine' },
+        { id: 'soft-waves', label: 'Soft Waves', gender_tag: 'unisex' },
+        { id: 'french-braid', label: 'French Braid', gender_tag: 'feminine' },
+        { id: 'box-braids', label: 'Box Braids', gender_tag: 'feminine' },
+        { id: 'curly', label: 'Curly', gender_tag: 'unisex' },
       ],
     },
     cost: { type: 'flat', credits: 5 },
@@ -329,7 +348,11 @@ export const SERVER_PRESETS: PresetDef[] = [
       default_aspect_ratio: '1:1',
       resolution_label: 'High resolution',
     },
-    tile: placeholderTile('hairstyle'),
+    tile: {
+      poster_url: 'https://pub-cec5aa79de50452fa7eac827a03d7e04.r2.dev/presets/hairstyle/poster-v1.jpg',
+      loop_url: 'https://pub-cec5aa79de50452fa7eac827a03d7e04.r2.dev/presets/hairstyle/loop-v1.mp4',
+      aspect: '3:4',
+    },
   },
   {
     preset_id: 'anime-yourself',
@@ -453,6 +476,6 @@ export const SERVER_PRESETS: PresetDef[] = [
  * is ever touched by a response serializer. GET /api/presets serves this, never SERVER_PRESETS.
  */
 export const CLIENT_PRESETS = SERVER_PRESETS.map((def) => {
-  const { prompt_template, ...rest } = def;
+  const { prompt_template, prompt_template_with_reference, ...rest } = def;
   return rest;
 });
