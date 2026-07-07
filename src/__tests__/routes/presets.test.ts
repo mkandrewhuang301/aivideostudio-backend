@@ -15,7 +15,7 @@ describe('presets registry config', () => {
     expect(typeof PRESETS_VERSION).toBe('number');
   });
 
-  it('includes all 7 wave-1 live presets', () => {
+  it('includes all 9 wave-1 live presets (7 original + AI Influencer D-23 + Clothes Swap 09.1-11)', () => {
     const liveIds = SERVER_PRESETS.filter((p) => p.status === 'live').map((p) => p.preset_id);
     expect(liveIds.sort()).toEqual(
       [
@@ -26,15 +26,21 @@ describe('presets registry config', () => {
         'anime-yourself',
         'polaroid',
         'animate-old-photo',
+        'ai-influencer',
+        'clothes-swap',
       ].sort(),
     );
   });
 
   it('includes the SOON rows (registry-driven, not hardcoded UI — D-04)', () => {
+    // 'try-on' was activated as the live 'clothes-swap' preset (09.1-11, supersedes the earlier
+    // avatar-based AI Try-On concept — see 09.1-CONTEXT.md D-24 SUPERSEDED banner) and is no
+    // longer SOON.
     const soonIds = SERVER_PRESETS.filter((p) => p.status === 'soon').map((p) => p.preset_id);
     expect(soonIds).toEqual(
-      expect.arrayContaining(['cinema-studio', 'try-on', 'faceswap', 'avatar-center', 'gorilla-vlogs', 'fruit-island']),
+      expect.arrayContaining(['cinema-studio', 'faceswap', 'avatar-center', 'gorilla-vlogs', 'fruit-island']),
     );
+    expect(soonIds).not.toContain('try-on');
   });
 
   it('CLIENT_PRESETS strips prompt_template from every row', () => {
@@ -52,6 +58,32 @@ describe('presets registry config', () => {
     for (const preset of SERVER_PRESETS.filter((p) => p.status === 'live')) {
       expect(preset.tile.poster_url).toBeTruthy();
       expect(preset.tile.loop_url).toBeTruthy();
+    }
+  });
+
+  // Preset Sheet Redesign: every live row needs a `sheet.description` for the new header, and
+  // each row declares EITHER selectable aspect_ratios (+ a default that is itself one of the
+  // options) OR a fixed aspect_label — never neither, never both.
+  it('every live row has sheet.description and exactly one aspect strategy (chips xor fixed label)', () => {
+    for (const preset of SERVER_PRESETS.filter((p) => p.status === 'live')) {
+      expect(preset.sheet?.description).toBeTruthy();
+      const hasChips = Boolean(preset.sheet?.aspect_ratios?.length);
+      const hasFixedLabel = Boolean(preset.sheet?.aspect_label);
+      expect(hasChips !== hasFixedLabel).toBe(true);
+      if (hasChips) {
+        expect(preset.sheet?.default_aspect_ratio).toBeTruthy();
+        expect(preset.sheet?.aspect_ratios).toContain(preset.sheet?.default_aspect_ratio);
+      }
+    }
+  });
+
+  it('GPT-Image-2 presets only offer aspect ratios Replicate actually accepts (1:1, 3:2, 2:3)', () => {
+    const gptPresets = SERVER_PRESETS.filter((p) => p.model === 'openai/gpt-image-2-medium');
+    expect(gptPresets.length).toBeGreaterThan(0);
+    for (const preset of gptPresets) {
+      for (const ratio of preset.sheet?.aspect_ratios ?? []) {
+        expect(['1:1', '3:2', '2:3']).toContain(ratio);
+      }
     }
   });
 });

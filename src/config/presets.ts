@@ -20,12 +20,16 @@ export const PRESETS_VERSION = 1;
 export type PresetSection = 'hero' | 'video_effects' | 'photo_effects' | 'avatar_center' | 'shows_vlogs';
 export type PresetStatus = 'live' | 'soon';
 export type PresetBadge = 'NEW' | 'HOT';
-export type PresetMediaType = 'video' | 'image' | 'avatar' | 'upscale';
+export type PresetMediaType = 'video' | 'image' | 'avatar' | 'upscale' | 'character_replace';
 
 export interface PresetSlot {
   kind: 'image' | 'video';
   label: string;
   source: 'any' | 'my_look_default';
+  // Absent/false = required (default, preserves every pre-existing preset's behavior).
+  // true = the client may submit this slot empty (null) — see presetResolver's sparse-slot
+  // handling for media_type 'image' (Clothes Swap, 09.1-11).
+  optional?: boolean;
 }
 
 export interface PresetTextField {
@@ -55,6 +59,26 @@ export interface PresetTile {
   aspect?: string;
 }
 
+/**
+ * Server-driven copy/options for the redesigned PresetInputSheet (Higgsfield-style layout).
+ * Optional so existing SOON rows (and any future preset) can omit it entirely. Editable without
+ * an app release — same "serve-config-from-backend" rationale as the rest of this registry.
+ */
+export interface PresetSheetMeta {
+  /** Long descriptive sentence rendered under the title on the sheet. */
+  description?: string;
+  /** Selectable aspect-ratio chips (e.g. GPT-Image-2 presets). Omit => no selector, fixed caption instead. */
+  aspect_ratios?: string[];
+  /** Must be a member of `aspect_ratios` — the chip pre-selected on open. */
+  default_aspect_ratio?: string;
+  /** Fixed-aspect display copy for input-driven presets, e.g. "Matches your video". */
+  aspect_label?: string;
+  /** Fixed, display-only duration caption, e.g. "5s" / "Up to 30s". */
+  duration_label?: string;
+  /** Fixed, display-only resolution caption, e.g. "720p". */
+  resolution_label?: string;
+}
+
 export interface PresetDef {
   preset_id: string;
   title: string;
@@ -76,6 +100,8 @@ export interface PresetDef {
   input_schema?: PresetInputSchema;
   // SOON rows carry no cost — nothing is billed until the feature ships.
   cost?: PresetCost;
+  // Sheet copy/options for the redesigned PresetInputSheet — optional, live rows only.
+  sheet?: PresetSheetMeta;
 }
 
 // Dev-generated placeholder art (D-09) — the user produces and delivers final poster/loop
@@ -118,6 +144,14 @@ export const SERVER_PRESETS: PresetDef[] = [
       slots: [{ kind: 'image', label: 'Old photo', source: 'any' }],
     },
     cost: { type: 'per_second', credits_per_sec: 9, max_seconds: 5 },
+    sheet: {
+      description:
+        'Bring an old photo to life with gentle, natural motion — soft breathing, subtle head ' +
+        'movement, and ambient motion in the background.',
+      aspect_label: 'Matches your photo',
+      duration_label: '5s',
+      resolution_label: '720p',
+    },
     tile: placeholderTile('animate-old-photo'),
   },
   {
@@ -136,6 +170,17 @@ export const SERVER_PRESETS: PresetDef[] = [
       ],
     },
     cost: { type: 'per_second', credits_per_sec: 5, max_seconds: 30 },
+    sheet: {
+      description:
+        'Upload a photo and a driving video — your photo comes to life, moving and expressing ' +
+        'just like the video.',
+      aspect_label: 'Matches your video',
+      duration_label: 'Up to 30s',
+      // No resolution_label: DreamActor's output resolution follows the input photo/video
+      // (480x480–1920x1080 per Replicate's schema) rather than a fixed value — a caption here
+      // would be misleading. Deviation from the plan's literal bucket list, called out in the
+      // final report.
+    },
     tile: placeholderTile('motion-transfer'),
   },
   {
@@ -152,20 +197,98 @@ export const SERVER_PRESETS: PresetDef[] = [
       slots: [{ kind: 'video', label: 'Video to enhance', source: 'any' }],
     },
     cost: { type: 'per_second', credits_per_sec: 1 },
+    sheet: {
+      description: 'Sharpen and upscale any video for a cleaner, higher-quality result.',
+      aspect_label: 'Matches your video',
+      // duration_label: "Matches your video" (not "Up to 30s") — this preset's cost has no
+      // `max_seconds` cap (it bills the video's real, full duration), unlike Motion Transfer /
+      // AI Influencer. Deviation from the plan's literal bucket list, called out in the final
+      // report — "Up to 30s" would have been factually wrong for this preset.
+      duration_label: 'Matches your video',
+      resolution_label: '720p',
+    },
     tile: placeholderTile('enhancer-video'),
+  },
+  {
+    // AI Influencer (D-23, added 2026-07-06): "replace" mode — the user's own video's
+    // background/motion/lighting is KEPT, the character image replaces the person in it.
+    // Inverse framing from Motion Transfer above (which keeps the PHOTO's background).
+    // v1 is upload-your-own-character-photo only; a curated/bundled avatar picker is deferred
+    // until avatar art exists (09.1-CONTEXT.md D-23).
+    preset_id: 'ai-influencer',
+    title: 'AI Influencer',
+    subtitle: 'Become someone else',
+    section: 'video_effects',
+    sort_order: 4,
+    status: 'live',
+    badge: 'NEW',
+    media_type: 'character_replace',
+    model: 'wan-video/wan-2.2-animate-replace',
+    prompt_template: '', // replace path uses no text prompt
+    input_schema: {
+      slots: [
+        { kind: 'video', label: 'Your video', source: 'any' },
+        { kind: 'image', label: 'Choose your character', source: 'any' },
+      ],
+    },
+    // $0.05/sec at 720p — user-confirmed 2026-07-06 from Replicate's own pricing criteria for
+    // this model ("target resolution is 720, $0.05 per second of output video, or 20s for $1").
+    // max_seconds: 30 matches Motion Transfer's DreamActor cap (same 5 credits/sec rate).
+    cost: { type: 'per_second', credits_per_sec: 5, max_seconds: 30 },
+    sheet: {
+      description:
+        'Replace yourself with any character in your own video — the motion, lighting, and ' +
+        'background stay exactly the same.',
+      aspect_label: 'Matches your video',
+      duration_label: 'Up to 30s',
+      resolution_label: '720p', // ReplicateProvider pins resolution: '720' for this model
+    },
+    tile: placeholderTile('ai-influencer'),
   },
 
   // ─── Photo Effects (output = still image — D-02 revised 2026-07-06, below Video Effects) ─
   {
-    preset_id: 'try-on',
-    title: 'AI Try-On',
+    // Clothes Swap (09.1-11, 2026-07-07 — replaces the earlier avatar-based "AI Try-On" concept,
+    // see 09.1-CONTEXT.md D-24-D-29 SUPERSEDED banner + parked/09.1-11-PLAN-avatar-tryon.md).
+    // Higgsfield "Outfit Swap"-style: the user brings a fresh photo of themself every time (no
+    // one-time avatar setup) plus 1 required + up to 2 optional outfit references. Reuses the
+    // existing media_type:'image' -> GPT-Image-2 input_images pipeline unchanged.
+    preset_id: 'clothes-swap',
+    title: 'Clothes Swap',
     section: 'photo_effects',
     sort_order: 1,
-    status: 'soon',
+    status: 'live',
     badge: 'NEW',
-    tile: placeholderTile('try-on'),
-    // UI direction not finalized — see .planning/STATE.md Deferred Items
-    // (multi-garment avatar+pins concept vs. extending the existing two-box sheet).
+    media_type: 'image',
+    model: 'openai/gpt-image-2-medium', // D-22: medium tier, 5 credits
+    prompt_template:
+      'The first image shows a person; the remaining image(s) show an outfit/clothing to dress ' +
+      'them in. Composite the person wearing that outfit — preserve their face, identity, body ' +
+      'shape, pose, and background exactly unchanged, only replace their clothing, and blend the ' +
+      'garment fabric, lighting, and shadows realistically onto their body.',
+    input_schema: {
+      slots: [
+        { kind: 'image', label: 'Your photo', source: 'any' },
+        { kind: 'image', label: 'Outfit', source: 'any' },
+        { kind: 'image', label: 'Add reference', source: 'any', optional: true },
+        { kind: 'image', label: 'Add reference', source: 'any', optional: true },
+      ],
+    },
+    cost: { type: 'flat', credits: 5 },
+    sheet: {
+      description:
+        'Upload your photo and an outfit you like — see yourself wearing it.',
+      // Verified against Replicate's openai/gpt-image-2 model page: aspect_ratio accepts
+      // exactly 1:1, 3:2, 2:3 (no other values) — https://replicate.com/openai/gpt-image-2.
+      aspect_ratios: ['3:2', '1:1', '2:3'],
+      default_aspect_ratio: '1:1',
+      resolution_label: 'High resolution',
+    },
+    // TODO(art): real poster/loop art not yet delivered for the renamed preset_id
+    // ('try-on' -> 'clothes-swap') — needs its own backend/assets/preset-art/clothes-swap/
+    // folder through the existing `npm run upload:preset-art` path (D-09). Placeholder tile is
+    // the acceptable in-development stand-in until then.
+    tile: placeholderTile('clothes-swap'),
   },
   {
     preset_id: 'hairstyle',
@@ -196,6 +319,16 @@ export const SERVER_PRESETS: PresetDef[] = [
       ],
     },
     cost: { type: 'flat', credits: 5 },
+    sheet: {
+      description:
+        'Try a new hairstyle on your own photo — pick a style below and see yourself with a ' +
+        'fresh new look.',
+      // Verified against Replicate's openai/gpt-image-2 model page: aspect_ratio accepts
+      // exactly 1:1, 3:2, 2:3 (no other values) — https://replicate.com/openai/gpt-image-2.
+      aspect_ratios: ['3:2', '1:1', '2:3'],
+      default_aspect_ratio: '1:1',
+      resolution_label: 'High resolution',
+    },
     tile: placeholderTile('hairstyle'),
   },
   {
@@ -206,13 +339,26 @@ export const SERVER_PRESETS: PresetDef[] = [
     status: 'live',
     media_type: 'image',
     model: 'openai/gpt-image-2-medium', // D-22: medium tier, 5 credits
+    // Server-only (D-11) — never reaches the client, so the "Studio Ghibli" reference here
+    // carries no trademark/App-Review exposure (that risk was about the user-facing feature
+    // NAME, which stays "Anime Yourself" — see presets-report.md item 12). GPT-Image-2 is the
+    // permissive model for this ("it powered the 2025 Ghibli wave" per research), so it accepts
+    // the style reference directly instead of the generic "vibrant Japanese anime" wording.
     prompt_template:
-      'Transform this photo into a high-quality anime illustration of the same person, ' +
-      'preserving their identity, pose, expression, and outfit, in a vibrant Japanese anime art style.',
+      'Transform this photo into a high-quality Studio Ghibli-style anime illustration of the ' +
+      'same person, preserving their identity, pose, expression, and outfit — soft painterly ' +
+      'backgrounds, warm natural lighting, hand-drawn watercolor texture.',
     input_schema: {
       slots: [{ kind: 'image', label: 'Your photo', source: 'any' }],
     },
     cost: { type: 'flat', credits: 5 },
+    sheet: {
+      description:
+        'Turn your photo into a hand-drawn, Studio-quality anime illustration of yourself.',
+      aspect_ratios: ['3:2', '1:1', '2:3'],
+      default_aspect_ratio: '1:1',
+      resolution_label: 'High resolution',
+    },
     tile: placeholderTile('anime-yourself'),
   },
   {
@@ -234,6 +380,13 @@ export const SERVER_PRESETS: PresetDef[] = [
       ],
     },
     cost: { type: 'flat', credits: 5 },
+    sheet: {
+      description:
+        'Composite two people into one warm, vintage polaroid-style photo — hugging like old friends.',
+      aspect_ratios: ['3:2', '1:1', '2:3'],
+      default_aspect_ratio: '1:1',
+      resolution_label: 'High resolution',
+    },
     tile: placeholderTile('polaroid'),
   },
   {
@@ -250,6 +403,10 @@ export const SERVER_PRESETS: PresetDef[] = [
       slots: [{ kind: 'image', label: 'Image to enhance', source: 'any' }],
     },
     cost: { type: 'flat', credits: 1 },
+    sheet: {
+      description: 'Sharpen and upscale any photo for a cleaner, higher-resolution result.',
+      aspect_label: 'Matches your photo',
+    },
     tile: placeholderTile('enhancer-image'),
   },
   {
