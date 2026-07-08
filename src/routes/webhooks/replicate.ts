@@ -27,13 +27,45 @@ import { sendGenerationComplete } from '../../services/apnsService';
 import { hiveScanQueue } from '../../queue/hiveScanWorker';
 import { db } from '../../db/client';
 import { referenceUploads } from '../../db/schema';
-import { sql, inArray } from 'drizzle-orm';
+import { sql, inArray, eq } from 'drizzle-orm';
 import { ReplicateProvider } from '../../services/providers/ReplicateProvider';
 import type { GenerationInput } from '../../services/providers/ModelProvider';
+import { FACE_INPUT_PRESET_IDS, FACE_INPUT_MEDIA_TYPES } from '../../config/faceInputPresets';
+import { DeleteObjectCommand } from '@aws-sdk/client-s3';
+import { r2, R2_BUCKET } from '../../storage/r2';
 
 export const replicateWebhookRouter = Router();
 
 const provider = new ReplicateProvider();
+
+// SC1: delete raw face uploads post-archive. Only for face-input presets. My Look is out of 9.2
+// scope (D-3) so all face-input uploads are ephemeral — no kind exemption. Best-effort — a
+// failure must not break the webhook.
+async function deleteRawFaceUploads(generation: GenerationByPredictionRow): Promise<void> {
+  const params = (generation.params ?? {}) as Record<string, unknown>;
+  const presetId = typeof params.preset_id === 'string' ? params.preset_id : undefined;
+  const isFaceInput =
+    (presetId && FACE_INPUT_PRESET_IDS.has(presetId)) ||
+    FACE_INPUT_MEDIA_TYPES.has(generation.media_type);
+  if (!isFaceInput) return;
+  const uploadIds: string[] = Array.isArray(params.preset_input_upload_ids)
+    ? (params.preset_input_upload_ids as unknown[]).filter((x): x is string => typeof x === 'string')
+    : [];
+  if (uploadIds.length === 0) return;
+  for (const uploadId of uploadIds) {
+    try {
+      const [row] = await db
+        .select()
+        .from(referenceUploads)
+        .where(eq(referenceUploads.id, uploadId));
+      if (!row) continue; // already gone → skip
+      await r2.send(new DeleteObjectCommand({ Bucket: R2_BUCKET, Key: row.r2_key }));
+      await db.delete(referenceUploads).where(eq(referenceUploads.id, uploadId));
+    } catch (err) {
+      console.error(`[webhook/replicate] raw-face deletion failed for upload ${uploadId}:`, err);
+    }
+  }
+}
 
 async function fetchDeviceToken(userId: string): Promise<string | null> {
   const userRows = await db.execute(sql`SELECT apns_device_token FROM users WHERE id = ${userId}::uuid`);
@@ -175,6 +207,7 @@ replicateWebhookRouter.post('/', async (req: Request, res: Response) => {
       }
 
       await markCompleted(generation.id, r2Key);
+      await deleteRawFaceUploads(generation); // SC1 — best-effort, never throws past here
 
       // Best-effort push — isolated, never blocks this response (CLAUDE.md/RESEARCH.md Pitfall 5).
       try {
