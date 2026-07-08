@@ -247,6 +247,58 @@ describe('ReplicateProvider.dispatch — Wan 2.2 Animate Replace (AI Influencer,
   });
 });
 
+describe('ReplicateProvider.dispatch — Easel Advanced Face Swap (faceswap)', () => {
+  beforeEach(() => {
+    mockCreate.mockReset();
+    mockGet.mockReset();
+  });
+
+  it('sends { swap_image, target_image, hair_source: "target" } by default for faceswap', async () => {
+    mockCreate.mockResolvedValue({ id: 'pred-faceswap-1' });
+
+    const provider = new ReplicateProvider();
+    await provider.dispatch(
+      {
+        prompt: '',
+        model: 'easel/advanced-face-swap',
+        mediaType: 'faceswap',
+        swapImage: 'https://example.com/source-face.jpg',
+        targetImage: 'https://example.com/target.jpg',
+      },
+      'https://example.com/webhooks/replicate',
+    );
+
+    const callArgs = mockCreate.mock.calls[0][0];
+    expect(callArgs.model).toBe('easel/advanced-face-swap');
+    expect(callArgs.input).toEqual({
+      swap_image: 'https://example.com/source-face.jpg',
+      target_image: 'https://example.com/target.jpg',
+      hair_source: 'target',
+    });
+    expect(callArgs.webhook_events_filter).toEqual(['completed']);
+  });
+
+  it('hairSource "user" overrides the default "target"', async () => {
+    mockCreate.mockResolvedValue({ id: 'pred-faceswap-2' });
+
+    const provider = new ReplicateProvider();
+    await provider.dispatch(
+      {
+        prompt: '',
+        model: 'easel/advanced-face-swap',
+        mediaType: 'faceswap',
+        swapImage: 'https://example.com/source-face.jpg',
+        targetImage: 'https://example.com/target.jpg',
+        hairSource: 'user',
+      },
+      'https://example.com/webhooks/replicate',
+    );
+
+    const callArgs = mockCreate.mock.calls[0][0];
+    expect(callArgs.input.hair_source).toBe('user');
+  });
+});
+
 describe('ReplicateProvider.getStatus', () => {
   beforeEach(() => {
     mockCreate.mockReset();

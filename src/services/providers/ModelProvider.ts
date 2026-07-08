@@ -5,7 +5,7 @@
 export interface GenerationInput {
   prompt: string;
   model: string;
-  mediaType?: 'video' | 'image' | 'avatar' | 'upscale' | 'character_replace';
+  mediaType?: 'video' | 'image' | 'avatar' | 'upscale' | 'character_replace' | 'faceswap';
   // Video-specific (undefined for image/avatar/upscale generations)
   durationSeconds?: number;              // NEVER -1 when present (CLAUDE.md Rule 7)
   resolution?: '480p' | '720p' | '1080p' | '4k';
@@ -33,6 +33,10 @@ export interface GenerationInput {
   // Character-replace-specific — Wan 2.2 Animate Replace (wan-video/wan-2.2-animate-replace)
   characterReplaceVideo?: string; // presigned URL — source video whose background/motion/lighting is kept
   characterReplaceImage?: string; // presigned URL — character image that replaces the person in the video
+  // Faceswap-specific — Easel Advanced Face Swap (easel/advanced-face-swap)
+  swapImage?: string;    // presigned URL — user's source face (the face to place)
+  targetImage?: string;  // presigned URL — image the face is placed onto
+  hairSource?: 'target' | 'user'; // default 'target'
 }
 
 export interface DispatchResult {

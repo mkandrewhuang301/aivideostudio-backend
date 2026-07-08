@@ -49,6 +49,13 @@ export class ReplicateProvider implements ModelProvider {
         character_image: input.characterReplaceImage,
         resolution: '720',
       };
+    } else if (input.mediaType === 'faceswap') {
+      // Easel Advanced Face Swap (image-only). Schema VERIFIED: replicate.com/blog/easel.
+      replicateInput = {
+        swap_image: input.swapImage,
+        target_image: input.targetImage,
+        hair_source: input.hairSource ?? 'target',
+      };
     } else if (input.mediaType === 'upscale' && input.model === 'recraft-ai/recraft-crisp-upscale') {
       // Recraft Crisp Upscale (Enhancer — image path): single-field schema, the entire model
       // input is { image }. Distinct flat-cost image enhancer, not the per-second video upscaler.
