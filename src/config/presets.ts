@@ -20,7 +20,7 @@ export const PRESETS_VERSION = 1;
 export type PresetSection = 'hero' | 'video_effects' | 'photo_effects' | 'avatar_center' | 'shows_vlogs';
 export type PresetStatus = 'live' | 'soon';
 export type PresetBadge = 'NEW' | 'HOT';
-export type PresetMediaType = 'video' | 'image' | 'avatar' | 'upscale' | 'character_replace';
+export type PresetMediaType = 'video' | 'image' | 'avatar' | 'upscale' | 'character_replace' | 'faceswap';
 
 export interface PresetSlot {
   kind: 'image' | 'video';
@@ -439,7 +439,24 @@ export const SERVER_PRESETS: PresetDef[] = [
     title: 'Faceswap',
     section: 'photo_effects',
     sort_order: 6,
-    status: 'soon',
+    status: 'live',
+    badge: 'NEW',
+    media_type: 'faceswap',
+    model: 'easel/advanced-face-swap',
+    prompt_template: '', // faceswap takes no text prompt
+    input_schema: {
+      slots: [
+        { kind: 'image', label: 'Your face', source: 'any' }, // swap_image (user's face)
+        { kind: 'image', label: 'Target photo', source: 'any' }, // target_image
+      ],
+    },
+    cost: { type: 'flat', credits: 5 }, // ~$0.05 → 5 credits (VERIFY at 09.2-11)
+    sheet: {
+      description:
+        'Swap your face onto any photo — upload your face and the photo to place it into.',
+      aspect_label: 'Matches your photo',
+      resolution_label: 'High resolution',
+    },
     tile: placeholderTile('faceswap'),
   },
 

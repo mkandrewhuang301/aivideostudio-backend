@@ -16,7 +16,8 @@ function faceSlotUrls(req: Request): string[] {
   const r = req._resolved;
   if (!r) return [];
   if (r.mediaType === 'avatar' && r.avatarImage) return [r.avatarImage]; // Motion Transfer face photo
-  // faceswap slot added in 09.2-07
+  // Faceswap: scan the user's OWN uploaded face (swap source), never the target photo (09.2-07).
+  if (r.mediaType === 'faceswap' && r.swapImage) return [r.swapImage];
   return [];
 }
 

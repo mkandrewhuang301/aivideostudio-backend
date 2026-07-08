@@ -7,8 +7,9 @@
 // face-image URL exist) and BEFORE creditCheckMiddleware (so a block deducts NO credits — "hard
 // block, no charge", the user-confirmed enforcement). Mirrors promptModeration.ts's 400+code reject.
 //
-// Scoped to media_type ∈ {avatar, character_replace} only; every other preset short-circuits with
-// next() and pays zero latency/cost. Gated by config.celebrityCheckEnabled (default OFF).
+// Scoped to media_type ∈ {avatar, character_replace, faceswap} only; every other preset
+// short-circuits with next() and pays zero latency/cost. Gated by config.celebrityCheckEnabled
+// (default OFF).
 
 import { Request, Response, NextFunction } from 'express';
 import { config } from '../config';
@@ -32,7 +33,9 @@ export async function celebrityCheckMiddleware(
       ? resolved.avatarImage // Motion Transfer: "Your photo"
       : resolved?.mediaType === 'character_replace'
         ? resolved.characterReplaceImage // AI Influencer: "Choose your character"
-        : undefined;
+        : resolved?.mediaType === 'faceswap'
+          ? resolved.swapImage // Faceswap: "Your face" (swap source)
+          : undefined;
 
   if (!faceImageUrl) {
     next();

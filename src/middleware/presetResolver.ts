@@ -176,6 +176,12 @@ export async function presetResolver(req: Request, res: Response, next: NextFunc
         req.body.reference_images = [...slotUrls.filter(Boolean), ...(styleReferenceUrl ? [styleReferenceUrl] : [])];
         break;
       }
+      case 'faceswap': {
+        // Easel Advanced Face Swap: slot 0 = user's face (swap), slot 1 = target photo. No duration.
+        req.body.swap_image = slotUrls[0];
+        req.body.target_image = slotUrls[1];
+        break;
+      }
       case 'video': {
         // Animate Old Photo — image-to-video, fixed short duration (no user-selectable duration
         // slot in the schema); use the preset's declared max_seconds as the actual duration.
