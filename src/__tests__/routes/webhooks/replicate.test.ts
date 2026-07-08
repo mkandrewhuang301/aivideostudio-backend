@@ -76,10 +76,16 @@ jest.mock('../../../services/providers/ReplicateProvider', () => ({
   })),
 }));
 
+jest.mock('../../../storage/r2', () => ({
+  r2: { send: jest.fn().mockResolvedValue({}) },
+  R2_BUCKET: 'test-bucket',
+}));
+
 jest.mock('../../../db/client', () => ({
   db: {
     execute: jest.fn(),
-    select: jest.fn(() => ({ from: jest.fn(() => ({ where: jest.fn().mockResolvedValue([]) })) })),
+    select: jest.fn(),
+    delete: jest.fn(),
   },
 }));
 
@@ -93,11 +99,20 @@ import { refundCredits } from '../../../services/creditService';
 import { sendGenerationComplete } from '../../../services/apnsService';
 import { ReplicateProvider } from '../../../services/providers/ReplicateProvider';
 import { db } from '../../../db/client';
+import { r2 } from '../../../storage/r2';
 import { replicateWebhookRouter } from '../../../routes/webhooks/replicate';
 
 const MockedReplicateProvider = ReplicateProvider as jest.MockedClass<typeof ReplicateProvider>;
 const providerInstance = MockedReplicateProvider.mock.results[0]?.value as { dispatch: jest.Mock };
 const dispatchMock = providerInstance.dispatch;
+
+const dbMock = db as unknown as { execute: jest.Mock; select: jest.Mock; delete: jest.Mock };
+const r2Mock = r2 as unknown as { send: jest.Mock };
+
+// select().from().where() chain resolving to the given rows — mirrors uploads.test.ts pattern.
+function makeSelectChain(rows: unknown[] = []) {
+  return { from: jest.fn().mockReturnValue({ where: jest.fn().mockResolvedValue(rows) }) };
+}
 
 const app = express();
 app.use(express.raw({ type: 'application/json' }));
@@ -129,6 +144,9 @@ beforeEach(() => {
   (sendGenerationComplete as jest.Mock).mockResolvedValue(undefined);
   (reattachForRetry as jest.Mock).mockResolvedValue(true);
   dispatchMock.mockResolvedValue({ providerPredictionId: 'pred_retry_1' });
+  dbMock.select.mockReturnValue(makeSelectChain([]));
+  dbMock.delete.mockReturnValue({ where: jest.fn().mockResolvedValue(undefined) });
+  r2Mock.send.mockResolvedValue({});
 });
 
 describe('replicateWebhookRouter', () => {
@@ -438,6 +456,78 @@ describe('replicateWebhookRouter', () => {
       expect(dispatchMock).not.toHaveBeenCalled();
       expect(markFailed).toHaveBeenCalledWith('gen-retry-1', 'copyright');
       expect(refundCredits).toHaveBeenCalledWith('u1', 27, 'pred_copyright_1');
+    });
+  });
+
+  describe('SC1 — post-archive raw face upload deletion', () => {
+    it('deletes the R2 object and reference_uploads row for a succeeded faceswap generation', async () => {
+      (validateWebhook as jest.Mock).mockResolvedValue(true);
+      (getGenerationByPredictionId as jest.Mock).mockResolvedValue({
+        id: 'gen-face-1',
+        user_id: 'u1',
+        status: 'processing',
+        cost_credits: 20,
+        media_type: 'faceswap',
+        params: { preset_id: 'faceswap', preset_input_upload_ids: ['upload-1'] },
+      });
+      dbMock.select.mockReturnValue(
+        makeSelectChain([{ id: 'upload-1', r2_key: 'uploads/u1/face.jpg' }]),
+      );
+
+      const res = await post({ id: 'pred_face_1', status: 'succeeded', output: ['https://replicate.delivery/face-out.mp4'] });
+
+      expect(res.status).toBe(200);
+      expect(markCompleted).toHaveBeenCalledWith('gen-face-1', 'generations/gen-1.mp4');
+      const deleteCall = (r2Mock.send as jest.Mock).mock.calls.find(
+        (c) => c[0] instanceof (require('@aws-sdk/client-s3').DeleteObjectCommand),
+      );
+      expect(deleteCall?.[0].input).toEqual({ Bucket: 'test-bucket', Key: 'uploads/u1/face.jpg' });
+      expect(dbMock.delete).toHaveBeenCalledTimes(1);
+    });
+
+    it('is a no-op for a succeeded non-face-input preset (no reference_uploads deleted)', async () => {
+      (validateWebhook as jest.Mock).mockResolvedValue(true);
+      (getGenerationByPredictionId as jest.Mock).mockResolvedValue({
+        id: 'gen-hairstyle-1',
+        user_id: 'u1',
+        status: 'processing',
+        cost_credits: 10,
+        media_type: 'image',
+        params: { preset_id: 'hairstyle', preset_input_upload_ids: ['upload-2'] },
+      });
+      (archiveToR2 as jest.Mock).mockResolvedValue('generations/gen-hairstyle-1.jpg');
+
+      const res = await post({ id: 'pred_hairstyle_1', status: 'succeeded', output: ['https://replicate.delivery/hairstyle-out.jpg'] });
+
+      expect(res.status).toBe(200);
+      expect(markCompleted).toHaveBeenCalledWith('gen-hairstyle-1', 'generations/gen-hairstyle-1.jpg');
+      expect(dbMock.select).not.toHaveBeenCalled();
+      expect(dbMock.delete).not.toHaveBeenCalled();
+      expect(r2Mock.send).not.toHaveBeenCalled();
+    });
+
+    it('still returns 200 when the deletion throws (best-effort, never breaks the webhook)', async () => {
+      (validateWebhook as jest.Mock).mockResolvedValue(true);
+      (getGenerationByPredictionId as jest.Mock).mockResolvedValue({
+        id: 'gen-face-2',
+        user_id: 'u1',
+        status: 'processing',
+        cost_credits: 20,
+        media_type: 'faceswap',
+        params: { preset_id: 'faceswap', preset_input_upload_ids: ['upload-3'] },
+      });
+      dbMock.select.mockReturnValue(
+        makeSelectChain([{ id: 'upload-3', r2_key: 'uploads/u1/face3.jpg' }]),
+      );
+      r2Mock.send.mockRejectedValue(new Error('R2 down'));
+
+      const res = await post({ id: 'pred_face_2', status: 'succeeded', output: ['https://replicate.delivery/face-out2.mp4'] });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ received: true });
+      expect(markCompleted).toHaveBeenCalledWith('gen-face-2', 'generations/gen-1.mp4');
+      // deletion failed before the DB delete — row must not be deleted on a failed R2 delete
+      expect(dbMock.delete).not.toHaveBeenCalled();
     });
   });
 });
