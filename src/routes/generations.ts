@@ -19,6 +19,7 @@ import {
   computeImageUpscaleCost,
   computeGrokImagineCost,
   computeCharacterReplaceCost,
+  computeFaceswapCost,
   createGeneration,
   attachPredictionId,
   listGenerations,
@@ -33,6 +34,7 @@ import {
   SUPPORTED_IMAGE_UPSCALE_MODELS,
   SUPPORTED_GROK_MODELS,
   SUPPORTED_CHARACTER_REPLACE_MODELS,
+  SUPPORTED_FACESWAP_MODELS,
   type SupportedModel,
 } from '../services/generationService';
 import { ReplicateProvider } from '../services/providers/ReplicateProvider';
@@ -55,7 +57,7 @@ const VALID_VIDEO_ASPECT_RATIOS = ['16:9', '9:16', '1:1', '4:3', '3:4'];
 interface ResolvedGenerationRequest {
   prompt: string;
   model: string;
-  mediaType: 'video' | 'image' | 'avatar' | 'upscale' | 'character_replace';
+  mediaType: 'video' | 'image' | 'avatar' | 'upscale' | 'character_replace' | 'faceswap';
   // Video-only
   durationSeconds?: number;
   resolution?: '480p' | '720p' | '1080p' | '4k';
@@ -82,6 +84,10 @@ interface ResolvedGenerationRequest {
   // Character-replace-only (Wan 2.2 Animate Replace — AI Influencer, D-23)
   characterReplaceVideo?: string;
   characterReplaceImage?: string;
+  // Faceswap-only (Easel Advanced Face Swap)
+  swapImage?: string;
+  targetImage?: string;
+  hairSource?: 'target' | 'user';
   cost: number;
 }
 
@@ -182,14 +188,18 @@ function prepareCost(req: Request, res: Response, next: NextFunction): void {
     // character-replace-specific (Wan 2.2 Animate Replace — AI Influencer, D-23)
     character_replace_video,
     character_replace_image,
+    // faceswap-specific (Easel Advanced Face Swap, 09.2-07)
+    swap_image,
+    target_image,
+    hair_source,
     // shared for avatar + upscale + character-replace billing (duration not known upfront)
     estimated_duration_seconds,
   } = req.body ?? {};
 
-  // avatar/upscale/character-replace branches take no text prompt (D-16/D-22/D-23 presets:
-  // motion-transfer, enhancer-video, enhancer-image, ai-influencer all have an empty
-  // prompt_template) — only image/video/grok branches require one.
-  if (media_type !== 'avatar' && media_type !== 'upscale' && media_type !== 'character_replace' && (!prompt || typeof prompt !== 'string')) {
+  // avatar/upscale/character-replace/faceswap branches take no text prompt (D-16/D-22/D-23
+  // presets: motion-transfer, enhancer-video, enhancer-image, ai-influencer, faceswap all have an
+  // empty prompt_template) — only image/video/grok branches require one.
+  if (media_type !== 'avatar' && media_type !== 'upscale' && media_type !== 'character_replace' && media_type !== 'faceswap' && (!prompt || typeof prompt !== 'string')) {
     res.status(400).json({ error: 'prompt is required', code: 'INVALID_PROMPT' });
     return;
   }
@@ -251,6 +261,35 @@ function prepareCost(req: Request, res: Response, next: NextFunction): void {
       durationSeconds: estimatedDuration,
       characterReplaceVideo: character_replace_video as string,
       characterReplaceImage: character_replace_image as string,
+      cost,
+    };
+    next();
+    return;
+  }
+
+  if (media_type === 'faceswap') {
+    const faceswapModel = model ?? 'easel/advanced-face-swap';
+    if (!(SUPPORTED_FACESWAP_MODELS as readonly string[]).includes(faceswapModel)) {
+      res.status(400).json({ error: `model must be one of: ${SUPPORTED_FACESWAP_MODELS.join(', ')}`, code: 'INVALID_MODEL' });
+      return;
+    }
+    if (!swap_image || typeof swap_image !== 'string') {
+      res.status(400).json({ error: 'swap_image (presigned URL) is required', code: 'INVALID_INPUT' });
+      return;
+    }
+    if (!target_image || typeof target_image !== 'string') {
+      res.status(400).json({ error: 'target_image (presigned URL) is required', code: 'INVALID_INPUT' });
+      return;
+    }
+    const cost = computeFaceswapCost();
+    req.body.cost_credits = cost;
+    req._resolved = {
+      prompt: '',
+      model: faceswapModel,
+      mediaType: 'faceswap',
+      swapImage: swap_image as string,
+      targetImage: target_image as string,
+      hairSource: hair_source === 'user' ? 'user' : 'target',
       cost,
     };
     next();
@@ -515,6 +554,8 @@ generationsRouter.post('/', promptModerationMiddleware, presetResolver, prepareC
         ? { avatar_image: resolved.avatarImage, avatar_driving_video: resolved.avatarDrivingVideo, estimated_duration: resolved.durationSeconds }
         : resolved.mediaType === 'character_replace'
         ? { character_replace_video: resolved.characterReplaceVideo, character_replace_image: resolved.characterReplaceImage, estimated_duration: resolved.durationSeconds }
+        : resolved.mediaType === 'faceswap'
+        ? { swap_image: resolved.swapImage, target_image: resolved.targetImage, hair_source: resolved.hairSource }
         : resolved.mediaType === 'upscale'
         ? (resolved.upscalerInputImage
             ? { upscale_image_url: resolved.upscalerInputImage }
@@ -575,6 +616,10 @@ generationsRouter.post('/', promptModerationMiddleware, presetResolver, prepareC
       // Character-replace-only
       characterReplaceVideo: resolved.characterReplaceVideo,
       characterReplaceImage: resolved.characterReplaceImage,
+      // Faceswap-only
+      swapImage: resolved.swapImage,
+      targetImage: resolved.targetImage,
+      hairSource: resolved.hairSource,
     };
 
     logReferenceUrlDiagnostics('image', input.referenceImages);

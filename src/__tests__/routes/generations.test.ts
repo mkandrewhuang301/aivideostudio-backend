@@ -56,6 +56,7 @@ jest.mock('../../services/generationService', () => ({
   computeUpscalerCost: jest.fn(),
   computeImageUpscaleCost: jest.fn(),
   computeGrokImagineCost: jest.fn(),
+  computeFaceswapCost: jest.fn(),
   createGeneration: jest.fn(),
   attachPredictionId: jest.fn(),
   markRefunded: jest.fn(),
@@ -77,6 +78,7 @@ jest.mock('../../services/generationService', () => ({
   SUPPORTED_UPSCALER_MODELS: ['bytedance/video-upscaler'],
   SUPPORTED_IMAGE_UPSCALE_MODELS: ['recraft-ai/recraft-crisp-upscale'],
   SUPPORTED_GROK_MODELS: ['xai/grok-imagine-video-1.5'],
+  SUPPORTED_FACESWAP_MODELS: ['easel/advanced-face-swap'],
   classifyFailureReason: jest.requireActual('../../services/generationService').classifyFailureReason,
 }));
 
@@ -117,6 +119,19 @@ jest.mock('../../middleware/promptModeration', () => ({
   promptModerationMiddleware: jest.fn((_req: unknown, _res: unknown, next: () => void) => next()),
 }));
 
+// Mock inputMediaGate as a pass-through — NSFW input-scan logic is tested separately (09.2-02/06);
+// without this, faceswap/avatar route tests would otherwise hit Hive via scanInputMedia.
+jest.mock('../../middleware/inputMediaGate', () => ({
+  inputMediaGate: jest.fn((_req: unknown, _res: unknown, next: () => void) => next()),
+}));
+
+// Mock celebrityCheckMiddleware as a pass-through — Rekognition celebrity-check logic is tested
+// separately (celebrityCheck.test.ts); disabled by default via config.celebrityCheckEnabled
+// anyway, but mocked explicitly here for the same reason as inputMediaGate above.
+jest.mock('../../middleware/celebrityCheck', () => ({
+  celebrityCheckMiddleware: jest.fn((_req: unknown, _res: unknown, next: () => void) => next()),
+}));
+
 import express, { NextFunction, Request, Response } from 'express';
 import request from 'supertest';
 import { generationsRouter } from '../../routes/generations';
@@ -129,6 +144,7 @@ import {
   computeUpscalerCost,
   computeImageUpscaleCost,
   computeGrokImagineCost,
+  computeFaceswapCost,
   createGeneration,
   attachPredictionId,
   listGenerations,
@@ -306,6 +322,79 @@ describe('POST /api/generations — Grok Imagine (image-to-video)', () => {
     expect(res.status).toBe(400);
     expect(res.body.code).toBe('INVALID_RESOLUTION');
     expect(dispatchMock).not.toHaveBeenCalled();
+  });
+});
+
+// ─── POST /api/generations — Faceswap (Easel Advanced Face Swap) ──────────────
+
+describe('POST /api/generations — faceswap', () => {
+  const FACESWAP_BODY = {
+    media_type: 'faceswap',
+    model: 'easel/advanced-face-swap',
+    swap_image: 'https://example.com/swap-face.jpg',
+    target_image: 'https://example.com/target-photo.jpg',
+  };
+
+  it('dispatches with computeFaceswapCost (flat rate) and returns 200', async () => {
+    (computeFaceswapCost as jest.Mock).mockReturnValue(5);
+    (deductCredits as jest.Mock).mockResolvedValue(true);
+    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-faceswap-1' });
+    dispatchMock.mockResolvedValue({ providerPredictionId: 'pred-faceswap-1' });
+    (attachPredictionId as jest.Mock).mockResolvedValue(undefined);
+
+    const res = await request(app).post('/api/generations').send(FACESWAP_BODY);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ generation_id: 'gen-faceswap-1', status: 'processing' });
+    expect(computeFaceswapCost).toHaveBeenCalled();
+    expect(createGeneration).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'pending', cost_credits: 5, media_type: 'faceswap' }),
+    );
+    expect(deductCredits).toHaveBeenCalledWith('test-user-id', 5);
+
+    const dispatchArg = dispatchMock.mock.calls[0][0];
+    expect(dispatchArg).toEqual(
+      expect.objectContaining({
+        mediaType: 'faceswap',
+        swapImage: 'https://example.com/swap-face.jpg',
+        targetImage: 'https://example.com/target-photo.jpg',
+      }),
+    );
+  });
+
+  it('returns 400 INVALID_INPUT when swap_image is missing, without dispatch or deduction', async () => {
+    const { swap_image: _omit, ...bodyWithoutSwapImage } = FACESWAP_BODY;
+
+    const res = await request(app).post('/api/generations').send(bodyWithoutSwapImage);
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_INPUT');
+    expect(dispatchMock).not.toHaveBeenCalled();
+    expect(createGeneration).not.toHaveBeenCalled();
+    expect(deductCredits).not.toHaveBeenCalled();
+  });
+
+  it('returns 400 INVALID_INPUT when target_image is missing, without dispatch or deduction', async () => {
+    const { target_image: _omit, ...bodyWithoutTargetImage } = FACESWAP_BODY;
+
+    const res = await request(app).post('/api/generations').send(bodyWithoutTargetImage);
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_INPUT');
+    expect(dispatchMock).not.toHaveBeenCalled();
+    expect(createGeneration).not.toHaveBeenCalled();
+    expect(deductCredits).not.toHaveBeenCalled();
+  });
+
+  it('returns 400 INVALID_MODEL for a model not in SUPPORTED_FACESWAP_MODELS', async () => {
+    const res = await request(app)
+      .post('/api/generations')
+      .send({ ...FACESWAP_BODY, model: 'some-other-faceswap-model' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_MODEL');
+    expect(dispatchMock).not.toHaveBeenCalled();
+    expect(deductCredits).not.toHaveBeenCalled();
   });
 });
 
@@ -942,9 +1031,9 @@ describe('POST /api/generations — presets', () => {
   });
 
   it('returns 400 INVALID_PRESET for a not-yet-live preset (status: soon — D-04)', async () => {
-    // 'try-on' was activated as the live 'clothes-swap' preset (09.1-11) — 'faceswap' remains
-    // SOON and exercises the same not-live rejection path.
-    const res = await request(app).post('/api/generations').send({ preset_id: 'faceswap' });
+    // 'faceswap' was activated as a live preset (09.2-07) — 'avatar-center' remains SOON and
+    // exercises the same not-live rejection path.
+    const res = await request(app).post('/api/generations').send({ preset_id: 'avatar-center' });
 
     expect(res.status).toBe(400);
     expect(res.body.code).toBe('INVALID_PRESET');

@@ -15,7 +15,7 @@ describe('presets registry config', () => {
     expect(typeof PRESETS_VERSION).toBe('number');
   });
 
-  it('includes all 9 wave-1 live presets (7 original + AI Influencer D-23 + Clothes Swap 09.1-11)', () => {
+  it('includes all 10 wave-1 live presets (7 original + AI Influencer D-23 + Clothes Swap 09.1-11 + Faceswap 09.2-07)', () => {
     const liveIds = SERVER_PRESETS.filter((p) => p.status === 'live').map((p) => p.preset_id);
     expect(liveIds.sort()).toEqual(
       [
@@ -28,6 +28,7 @@ describe('presets registry config', () => {
         'animate-old-photo',
         'ai-influencer',
         'clothes-swap',
+        'faceswap',
       ].sort(),
     );
   });
@@ -35,12 +36,13 @@ describe('presets registry config', () => {
   it('includes the SOON rows (registry-driven, not hardcoded UI — D-04)', () => {
     // 'try-on' was activated as the live 'clothes-swap' preset (09.1-11, supersedes the earlier
     // avatar-based AI Try-On concept — see 09.1-CONTEXT.md D-24 SUPERSEDED banner) and is no
-    // longer SOON.
+    // longer SOON. 'faceswap' was activated as a live preset (09.2-07) and is also no longer SOON.
     const soonIds = SERVER_PRESETS.filter((p) => p.status === 'soon').map((p) => p.preset_id);
     expect(soonIds).toEqual(
-      expect.arrayContaining(['cinema-studio', 'faceswap', 'avatar-center', 'gorilla-vlogs', 'fruit-island']),
+      expect.arrayContaining(['cinema-studio', 'avatar-center', 'gorilla-vlogs', 'fruit-island']),
     );
     expect(soonIds).not.toContain('try-on');
+    expect(soonIds).not.toContain('faceswap');
   });
 
   it('CLIENT_PRESETS strips prompt_template from every row', () => {
