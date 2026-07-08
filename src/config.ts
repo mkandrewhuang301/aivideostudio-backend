@@ -44,6 +44,12 @@ export const config = {
   awsSecretAccessKey: process.env.AWS_SECRET_ACCESS_KEY ?? '',
   // MatchConfidence (0–100) at/above which an uploaded face is treated as a celebrity match.
   celebrityMatchThreshold: parseFloat(process.env.CELEBRITY_MATCH_THRESHOLD ?? '90'),
+  // INPUT-media NSFW scan on user face uploads — SEPARATE from the OUTPUT CSAM scan above, and
+  // SEPARATE from the Rekognition celebrity gate (celebrityCheckEnabled). Reuses the v3
+  // visual-moderation key (hiveApiKey) but has its OWN enable flag, defaulting OFF (opt-in).
+  // Age/minor scanning intentionally NOT implemented (D-2). Never couple to hiveScanEnabled.
+  hiveInputScanEnabled: process.env.HIVE_INPUT_SCAN_ENABLED === 'true',
+  hiveInputNsfwThreshold: Number(process.env.HIVE_INPUT_NSFW_THRESHOLD ?? '0.85'),
 } as const;
 
 // Shared by the original dispatch (generations.ts) and retry dispatch (webhooks/replicate.ts)
