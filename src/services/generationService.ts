@@ -249,7 +249,15 @@ export function classifyFailureReason(error: unknown): 'copyright' | 'content_po
     lower.includes('prohibited') ||
     lower.includes('not allowed') ||
     lower.includes('restricted') ||
-    lower.includes('restriction')
+    lower.includes('restriction') ||
+    // BytePlus/Seedance catch-all content-moderation code: "The input or output was
+    // flagged as sensitive ... (E005)". Opaque — the SAME code fires for real faces,
+    // copyrighted IP, and NSFW, so it cannot be sub-classified beyond content_policy.
+    // (Real-face stills are the common trigger; the durable fix is routing those to the
+    // permissive i2v path so they never reach Seedance — see 09.3 D-02.)
+    lower.includes('flagged as sensitive') ||
+    lower.includes('sensitive') ||
+    lower.includes('e005')
   ) {
     return 'content_policy';
   }

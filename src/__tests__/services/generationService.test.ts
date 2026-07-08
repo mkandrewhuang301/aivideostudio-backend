@@ -200,6 +200,14 @@ describe('classifyFailureReason', () => {
     expect(classifyFailureReason('This prompt was flagged as NSFW')).toBe('content_policy');
   });
 
+  it('classifies the Seedance E005 "flagged as sensitive" catch-all as content_policy (real-face/IP/NSFW block, prod string 2026-07-08)', () => {
+    const msg =
+      'Prediction failed: Async prediction failed: ModelError: The input or output was flagged as sensitive. Please try again with different inputs. (E005) (uIJ6l3ruRD)';
+    expect(classifyFailureReason(msg)).toBe('content_policy');
+    // regression guard: the bare code alone must still classify
+    expect(classifyFailureReason('ModelError ... (E005)')).toBe('content_policy');
+  });
+
   it('classifies celebrity/likeness errors as copyright', () => {
     expect(classifyFailureReason('The request was blocked: prompt references a famous celebrity')).toBe('copyright');
     expect(classifyFailureReason('Cannot generate a real public figure likeness')).toBe('copyright');
