@@ -18,8 +18,10 @@ import {
   computeUpscalerCost,
   computeImageUpscaleCost,
   computeCharacterReplaceCost,
+  computeFaceswapCost,
   SUPPORTED_IMAGE_UPSCALE_MODELS,
   SUPPORTED_CHARACTER_REPLACE_MODELS,
+  SUPPORTED_FACESWAP_MODELS,
   markCompleted,
   markFailed,
   markRefunded,
@@ -150,6 +152,14 @@ describe('cents-rule cost functions (verified, not re-broken)', () => {
 
   it('SUPPORTED_CHARACTER_REPLACE_MODELS registers wan-video/wan-2.2-animate-replace', () => {
     expect(SUPPORTED_CHARACTER_REPLACE_MODELS).toContain('wan-video/wan-2.2-animate-replace');
+  });
+
+  it('computeFaceswapCost() == 5 credits (ceil(0.05 * 100)) — flat per-run cost, no duration', () => {
+    expect(computeFaceswapCost()).toBe(5);
+  });
+
+  it('SUPPORTED_FACESWAP_MODELS registers easel/advanced-face-swap', () => {
+    expect(SUPPORTED_FACESWAP_MODELS).toContain('easel/advanced-face-swap');
   });
 });
 

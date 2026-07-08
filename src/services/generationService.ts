@@ -175,6 +175,18 @@ export function computeCharacterReplaceCost(estimatedDurationSeconds: number): n
   return Math.ceil(estimatedDurationSeconds * CHARACTER_REPLACE_RATE * CENTS_PER_DOLLAR);
 }
 
+// ─── Easel Advanced Face Swap (faceswap) ─────────────────────────────────────
+// Image-only face swap: swap_image (source face) onto target_image. FLAT per-run cost
+// (no duration), like computeImageUpscaleCost. Commercial use allowed. Video faceswap deferred.
+// Pricing ~$0.05/run → 5 credits (cents rule) — VERIFY on the Replicate model page at build
+// (09.2-11 checkpoint). Source: replicate.com/blog/easel.
+export const FACESWAP_RATE_DOLLARS = 0.05; // $/run — VERIFY at build (09.2-11)
+export const SUPPORTED_FACESWAP_MODELS = ['easel/advanced-face-swap'] as const;
+export type SupportedFaceswapModel = typeof SUPPORTED_FACESWAP_MODELS[number];
+export function computeFaceswapCost(): number {
+  return Math.ceil(FACESWAP_RATE_DOLLARS * CENTS_PER_DOLLAR);
+}
+
 export function computeCostCredits(input: {
   durationSeconds: number;
   resolution: '480p' | '720p' | '1080p' | '4k';
