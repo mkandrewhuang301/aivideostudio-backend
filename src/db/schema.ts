@@ -57,6 +57,7 @@ export const users = pgTable(
     last_active_at: timestamp('last_active_at', { withTimezone: true }), // churn analytics and re-engagement push (Phase 7)
     banned: boolean('banned').notNull().default(false),
     onboarding_preferences: jsonb('onboarding_preferences'), // nullable jsonb; saved after auth from bubble-picker onboarding (Phase 6)
+    face_consent_at: timestamp('face_consent_at', { withTimezone: true }), // SC2: set once on first-use face-input consent attestation; NULL = not yet consented
     created_at: timestamp('created_at', { withTimezone: true })
       .notNull()
       .default(sql`now()`),
