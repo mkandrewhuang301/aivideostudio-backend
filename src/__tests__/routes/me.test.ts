@@ -50,6 +50,7 @@ describe('GET /api/me', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockGetUserWithBalance.mockResolvedValue(BALANCE_STUB);
+    mockExecute.mockResolvedValue({ rows: [{ face_consent_at: null }] });
   });
 
   it('returns 200 with user and balance fields for authenticated user', async () => {
@@ -82,6 +83,24 @@ describe('GET /api/me', () => {
 
     expect(res.status).toBe(500);
     expect(res.body.error).toBe('Failed to fetch user data');
+  });
+
+  it('returns has_face_consent: true when face_consent_at is non-null', async () => {
+    mockExecute.mockResolvedValue({ rows: [{ face_consent_at: '2026-07-08T00:00:00.000Z' }] });
+    const app = buildApp(AUTHED_USER);
+    const res = await request(app).get('/api/me');
+
+    expect(res.status).toBe(200);
+    expect(res.body.has_face_consent).toBe(true);
+  });
+
+  it('returns has_face_consent: false when face_consent_at is null', async () => {
+    mockExecute.mockResolvedValue({ rows: [{ face_consent_at: null }] });
+    const app = buildApp(AUTHED_USER);
+    const res = await request(app).get('/api/me');
+
+    expect(res.status).toBe(200);
+    expect(res.body.has_face_consent).toBe(false);
   });
 });
 
@@ -329,5 +348,50 @@ describe('PATCH /api/me/preferences', () => {
     // The stringified prefs should appear in the SQL template literal params
     expect(queryStr).toContain('Power user');
     expect(queryStr).toContain('Cinematic/filmmaking');
+  });
+});
+
+// ─── PATCH /api/me/consent ──────────────────────────────────────────────────
+
+describe('PATCH /api/me/consent', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockExecute.mockResolvedValue({ rows: [] });
+    mockGetUserWithBalance.mockResolvedValue(BALANCE_STUB);
+  });
+
+  it('returns 204 and issues an UPDATE touching face_consent_at for an authenticated user', async () => {
+    const app = buildApp(AUTHED_USER);
+    const res = await request(app).patch('/api/me/consent').send({});
+
+    expect(res.status).toBe(204);
+    expect(mockExecute).toHaveBeenCalledTimes(1);
+    const queryArg = mockExecute.mock.calls[0][0];
+    expect(JSON.stringify(queryArg)).toContain('face_consent_at');
+  });
+
+  it('scopes the UPDATE to the authenticated user id', async () => {
+    const app = buildApp(AUTHED_USER);
+    await request(app).patch('/api/me/consent').send({});
+
+    const queryArg = mockExecute.mock.calls[0][0];
+    expect(JSON.stringify(queryArg)).toContain('db-user-uuid-1');
+  });
+
+  it('returns 401 when there is no authenticated user', async () => {
+    const app = buildApp(null);
+    const res = await request(app).patch('/api/me/consent').send({});
+
+    expect(res.status).toBe(401);
+    expect(mockExecute).not.toHaveBeenCalled();
+  });
+
+  it('returns 500 when db.execute throws', async () => {
+    mockExecute.mockRejectedValueOnce(new Error('DB connection lost'));
+    const app = buildApp(AUTHED_USER);
+    const res = await request(app).patch('/api/me/consent').send({});
+
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe('Failed to record consent');
   });
 });
