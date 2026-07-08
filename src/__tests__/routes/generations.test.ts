@@ -27,6 +27,9 @@ jest.mock('../../config', () => ({
     openaiApiKey: 'mock-openai-key',
     port: 3000,
     nodeEnv: 'test',
+    // 09.2-08: real default is `process.env.HIVE_SCAN_ENABLED !== 'false'` (true) — set
+    // explicitly here so the Magic Editor inline CSAM-scan branch is exercised in this suite.
+    hiveScanEnabled: true,
   },
   getReplicateWebhookUrl: jest.fn(() => 'https://mock.example.com/webhooks/replicate'),
 }));
@@ -98,6 +101,7 @@ jest.mock('../../services/providers/ReplicateProvider', () => {
 
 jest.mock('../../services/openaiImageService', () => ({
   generateImageWithOpenAI: jest.fn(),
+  generateImageEditWithMask: jest.fn(),
 }));
 
 jest.mock('../../services/hiveService', () => ({
@@ -156,7 +160,7 @@ import {
   markQuarantined,
 } from '../../services/generationService';
 import { getGenerationPresignedUrl, getUploadPresignedUrl } from '../../services/archivalService';
-import { generateImageWithOpenAI } from '../../services/openaiImageService';
+import { generateImageWithOpenAI, generateImageEditWithMask } from '../../services/openaiImageService';
 import { scanForCsam } from '../../services/hiveService';
 import { hiveScanQueue } from '../../queue/hiveScanWorker';
 import { ReplicateProvider } from '../../services/providers/ReplicateProvider';
@@ -505,125 +509,136 @@ describe('POST /api/generations — gpt-image-2 image (Replicate)', () => {
   });
 });
 
-// ─── POST /api/generations — openai/gpt-image-2 (inline path) ────────────────
-
-// Skipped: generateImageWithOpenAI() (openaiImageService.ts) is not yet wired into the route.
-// See .planning/STATE.md — direct-to-OpenAI routing is future work, currently gpt-image-2 dispatches via Replicate.
-describe.skip('POST /api/generations — openai/gpt-image-2 (inline)', () => {
-  const GPT_BODY = {
-    prompt: 'a red rose in a glass vase',
+// ─── POST /api/generations — Magic Editor mask edit (inline, 09.2-08 / SC4) ──
+//
+// The FIRST live consumer of the inline (synchronous, no-webhook) OpenAI path — routed by
+// resolved.maskUrl (set from req.body.mask_url), not by model id, so these tests send mask_url
+// directly on the request body (mirroring how presetResolver would set it for preset_id
+// 'magic-editor' — see the dedicated preset-resolution coverage in the "presets" describe below).
+describe('POST /api/generations — magic editor mask edit (inline)', () => {
+  const MASK_BODY = {
+    prompt: 'remove the trash can',
     media_type: 'image',
-    model: 'openai/gpt-image-2',
+    model: 'openai/gpt-image-2-medium',
+    reference_images: ['https://r2.example.com/source.png'],
+    mask_url: 'https://r2.example.com/mask.png',
   };
 
-  it('calls generateImageWithOpenAI, marks completed, never calls Replicate dispatch', async () => {
-    (computeImageCostCredits as jest.Mock).mockReturnValue(13);
+  it('calls generateImageEditWithMask, marks completed, never calls Replicate dispatch or attachPredictionId', async () => {
+    (computeImageCostCredits as jest.Mock).mockReturnValue(5);
     (deductCredits as jest.Mock).mockResolvedValue(true);
-    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-openai-1' });
-    (generateImageWithOpenAI as jest.Mock).mockResolvedValue('generations/gen-openai-1.png');
+    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-mask-1' });
+    (generateImageEditWithMask as jest.Mock).mockResolvedValue('generations/gen-mask-1.png');
     (scanForCsam as jest.Mock).mockResolvedValue({ flagged: false });
     (markCompleted as jest.Mock).mockResolvedValue(true);
 
-    const res = await request(app).post('/api/generations').send(GPT_BODY);
+    const res = await request(app).post('/api/generations').send(MASK_BODY);
 
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ generation_id: 'gen-openai-1', status: 'processing' });
-    expect(generateImageWithOpenAI).toHaveBeenCalledWith('a red rose in a glass vase', '1:1', 'gen-openai-1');
+    expect(res.body).toEqual({ generation_id: 'gen-mask-1', status: 'completed' });
+    expect(generateImageEditWithMask).toHaveBeenCalledWith(
+      'https://r2.example.com/source.png',
+      'https://r2.example.com/mask.png',
+      'remove the trash can',
+      'gen-mask-1',
+    );
     expect(dispatchMock).not.toHaveBeenCalled();
     expect(attachPredictionId).not.toHaveBeenCalled();
-    expect(markCompleted).toHaveBeenCalledWith('gen-openai-1', 'generations/gen-openai-1.png');
+    expect(markCompleted).toHaveBeenCalledWith('gen-mask-1', 'generations/gen-mask-1.png');
   });
 
-  it('uses the image_aspect_ratio sent by the client', async () => {
-    (computeImageCostCredits as jest.Mock).mockReturnValue(13);
+  it('OpenAI mask-edit failure returns 502 with refund, never marks completed', async () => {
+    (computeImageCostCredits as jest.Mock).mockReturnValue(5);
     (deductCredits as jest.Mock).mockResolvedValue(true);
-    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-openai-ar' });
-    (generateImageWithOpenAI as jest.Mock).mockResolvedValue('generations/gen-openai-ar.png');
-    (scanForCsam as jest.Mock).mockResolvedValue({ flagged: false });
-    (markCompleted as jest.Mock).mockResolvedValue(true);
-
-    await request(app).post('/api/generations').send({ ...GPT_BODY, image_aspect_ratio: '16:9' });
-
-    expect(generateImageWithOpenAI).toHaveBeenCalledWith(
-      expect.any(String),
-      '16:9',
-      expect.any(String),
-    );
-  });
-
-  it('OpenAI API failure returns 502 with refund, never marks completed', async () => {
-    (computeImageCostCredits as jest.Mock).mockReturnValue(13);
-    (deductCredits as jest.Mock).mockResolvedValue(true);
-    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-openai-fail' });
-    (generateImageWithOpenAI as jest.Mock).mockRejectedValue(new Error('OpenAI 429 rate limit'));
+    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-mask-fail' });
+    (generateImageEditWithMask as jest.Mock).mockRejectedValue(new Error('OpenAI 429 rate limit'));
     (markFailed as jest.Mock).mockResolvedValue(true);
     (refundCredits as jest.Mock).mockResolvedValue(undefined);
 
-    const res = await request(app).post('/api/generations').send(GPT_BODY);
+    const res = await request(app).post('/api/generations').send(MASK_BODY);
 
     expect(res.status).toBe(502);
     expect(res.body.error).toContain('Credits have been refunded');
-    expect(markFailed).toHaveBeenCalledWith('gen-openai-fail');
+    expect(markFailed).toHaveBeenCalledWith('gen-mask-fail', 'generic_error');
     expect(refundCredits).toHaveBeenCalledWith(
       'test-user-id',
-      13,
-      'dispatch-failure-gen-openai-fail',
+      5,
+      'dispatch-failure-gen-mask-fail',
     );
     expect(markCompleted).not.toHaveBeenCalled();
     expect(dispatchMock).not.toHaveBeenCalled();
   });
 
   it('CSAM scan flagged: quarantines and refunds without exposing URL', async () => {
-    (computeImageCostCredits as jest.Mock).mockReturnValue(13);
+    (computeImageCostCredits as jest.Mock).mockReturnValue(5);
     (deductCredits as jest.Mock).mockResolvedValue(true);
-    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-openai-csam' });
-    (generateImageWithOpenAI as jest.Mock).mockResolvedValue('generations/gen-openai-csam.png');
+    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-mask-csam' });
+    (generateImageEditWithMask as jest.Mock).mockResolvedValue('generations/gen-mask-csam.png');
     (scanForCsam as jest.Mock).mockResolvedValue({ flagged: true });
     (markQuarantined as jest.Mock).mockResolvedValue(true);
     (refundCredits as jest.Mock).mockResolvedValue(undefined);
 
-    const res = await request(app).post('/api/generations').send(GPT_BODY);
+    const res = await request(app).post('/api/generations').send(MASK_BODY);
 
     expect(res.status).toBe(200);
-    expect(markQuarantined).toHaveBeenCalledWith('gen-openai-csam');
+    expect(res.body).toEqual({ generation_id: 'gen-mask-csam', status: 'quarantined' });
+    expect(markQuarantined).toHaveBeenCalledWith('gen-mask-csam');
     expect(refundCredits).toHaveBeenCalledWith(
       'test-user-id',
-      13,
-      'csam-quarantine-openai-gen-openai-csam',
+      5,
+      'csam-quarantine-openai-gen-mask-csam',
     );
     expect(markCompleted).not.toHaveBeenCalled();
   });
 
   it('CSAM scan error queues hiveScanWorker retry, does NOT mark completed or quarantined', async () => {
-    (computeImageCostCredits as jest.Mock).mockReturnValue(13);
+    (computeImageCostCredits as jest.Mock).mockReturnValue(5);
     (deductCredits as jest.Mock).mockResolvedValue(true);
-    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-openai-hive-err' });
-    (generateImageWithOpenAI as jest.Mock).mockResolvedValue('generations/gen-openai-hive-err.png');
+    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-mask-hive-err' });
+    (generateImageEditWithMask as jest.Mock).mockResolvedValue('generations/gen-mask-hive-err.png');
     (scanForCsam as jest.Mock).mockRejectedValue(new Error('Hive timeout'));
 
-    const res = await request(app).post('/api/generations').send(GPT_BODY);
+    const res = await request(app).post('/api/generations').send(MASK_BODY);
 
     expect(res.status).toBe(200);
+    expect(res.body).toEqual({ generation_id: 'gen-mask-hive-err', status: 'processing' });
     expect(hiveScanQueue.add).toHaveBeenCalledWith('scan', {
-      generationId: 'gen-openai-hive-err',
-      r2Key: 'generations/gen-openai-hive-err.png',
+      generationId: 'gen-mask-hive-err',
+      r2Key: 'generations/gen-mask-hive-err.png',
       userId: 'test-user-id',
-      costCredits: 13,
+      costCredits: 5,
+      mediaType: 'image',
     });
     expect(markCompleted).not.toHaveBeenCalled();
     expect(markQuarantined).not.toHaveBeenCalled();
   });
 
-  it('insufficient credits for gpt-image-2 returns 402 without calling OpenAI', async () => {
-    (computeImageCostCredits as jest.Mock).mockReturnValue(13);
+  it('insufficient credits for a mask edit returns 402 without calling OpenAI', async () => {
+    (computeImageCostCredits as jest.Mock).mockReturnValue(5);
     (deductCredits as jest.Mock).mockResolvedValue(false);
 
-    const res = await request(app).post('/api/generations').send(GPT_BODY);
+    const res = await request(app).post('/api/generations').send(MASK_BODY);
 
     expect(res.status).toBe(402);
     expect(res.body.code).toBe('INSUFFICIENT_CREDITS');
-    expect(generateImageWithOpenAI).not.toHaveBeenCalled();
+    expect(generateImageEditWithMask).not.toHaveBeenCalled();
     expect(dispatchMock).not.toHaveBeenCalled();
+  });
+
+  it('a plain gpt-image-2 request with no mask_url still dispatches via Replicate (blast-radius guard)', async () => {
+    (computeImageCostCredits as jest.Mock).mockReturnValue(5);
+    (deductCredits as jest.Mock).mockResolvedValue(true);
+    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-no-mask' });
+    dispatchMock.mockResolvedValue({ providerPredictionId: 'pred-no-mask' });
+    (attachPredictionId as jest.Mock).mockResolvedValue(undefined);
+
+    const { mask_url: _omit, ...NO_MASK_BODY } = MASK_BODY;
+    const res = await request(app).post('/api/generations').send(NO_MASK_BODY);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ generation_id: 'gen-no-mask', status: 'processing' });
+    expect(generateImageEditWithMask).not.toHaveBeenCalled();
+    expect(dispatchMock).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -793,6 +808,23 @@ function mockUploadRows(rows: Array<{ id: string; r2_key: string }>): void {
       ),
     })),
   });
+}
+
+// Magic Editor's presetResolver branch issues TWO sequential db.select() calls per request — the
+// slot-resolution query (source image), then a SEPARATE query resolving mask_upload_id. Unlike
+// mockUploadRows (one static result for every call), this queues a distinct result per call in
+// order so the mask query doesn't just echo back the slot query's row.
+function mockUploadRowsSequence(...batches: Array<Array<{ id: string; r2_key: string }>>): void {
+  const mockSelect = db.select as jest.Mock;
+  for (const batch of batches) {
+    mockSelect.mockReturnValueOnce({
+      from: jest.fn(() => ({
+        where: jest.fn().mockResolvedValue(
+          batch.map((r) => ({ ...r, user_id: 'test-user-id', mime_type: 'image/jpeg' })),
+        ),
+      })),
+    });
+  }
 }
 
 describe('POST /api/generations — presets', () => {
@@ -1204,6 +1236,74 @@ describe('POST /api/generations — presets', () => {
     expect(res.status).toBe(400);
     expect(res.body.code).toBe('INVALID_STYLE');
     expect(dispatchMock).not.toHaveBeenCalled();
+  });
+
+  // ─── Magic Editor (09.2-08) — mask_upload_id resolution (T-09.2-17: ownership-scoped) ───
+  describe('magic-editor: mask_upload_id resolution', () => {
+    it('resolves source image + mask to presigned URLs, passes client text as prompt, dispatches inline', async () => {
+      mockUploadRowsSequence(
+        [{ id: 'upload-source', r2_key: 'uploads/test-user-id/source.jpg' }],
+        [{ id: 'upload-mask', r2_key: 'uploads/test-user-id/mask.png' }],
+      );
+      (computeImageCostCredits as jest.Mock).mockReturnValue(5);
+      (deductCredits as jest.Mock).mockResolvedValue(true);
+      (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-magic-1' });
+      (generateImageEditWithMask as jest.Mock).mockResolvedValue('generations/gen-magic-1.png');
+      (scanForCsam as jest.Mock).mockResolvedValue({ flagged: false });
+      (markCompleted as jest.Mock).mockResolvedValue(true);
+
+      const res = await request(app).post('/api/generations').send({
+        preset_id: 'magic-editor',
+        preset_input_upload_ids: ['upload-source'],
+        mask_upload_id: 'upload-mask',
+        text: '  make the sky purple  ',
+      });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ generation_id: 'gen-magic-1', status: 'completed' });
+      expect(computeImageCostCredits).toHaveBeenCalledWith('openai/gpt-image-2-medium');
+      expect(generateImageEditWithMask).toHaveBeenCalledWith(
+        'https://r2.example.com/signed/uploads/test-user-id/source.jpg',
+        'https://r2.example.com/signed/uploads/test-user-id/mask.png',
+        'make the sky purple',
+        'gen-magic-1',
+      );
+      expect(dispatchMock).not.toHaveBeenCalled();
+      expect(attachPredictionId).not.toHaveBeenCalled();
+      expect(markCompleted).toHaveBeenCalledWith('gen-magic-1', 'generations/gen-magic-1.png');
+    });
+
+    it('returns 400 INVALID_PRESET_INPUT when mask_upload_id is missing', async () => {
+      mockUploadRowsSequence([{ id: 'upload-source', r2_key: 'uploads/test-user-id/source.jpg' }]);
+
+      const res = await request(app).post('/api/generations').send({
+        preset_id: 'magic-editor',
+        preset_input_upload_ids: ['upload-source'],
+      });
+
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('INVALID_PRESET_INPUT');
+      expect(generateImageEditWithMask).not.toHaveBeenCalled();
+      expect(dispatchMock).not.toHaveBeenCalled();
+    });
+
+    it('returns 400 INVALID_PRESET_INPUT when mask_upload_id does not resolve to an owned upload (IDOR guard)', async () => {
+      mockUploadRowsSequence(
+        [{ id: 'upload-source', r2_key: 'uploads/test-user-id/source.jpg' }],
+        [], // mask lookup finds no row owned by this user
+      );
+
+      const res = await request(app).post('/api/generations').send({
+        preset_id: 'magic-editor',
+        preset_input_upload_ids: ['upload-source'],
+        mask_upload_id: 'someone-elses-upload',
+      });
+
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('INVALID_PRESET_INPUT');
+      expect(generateImageEditWithMask).not.toHaveBeenCalled();
+      expect(dispatchMock).not.toHaveBeenCalled();
+    });
   });
 });
 

@@ -15,7 +15,7 @@ describe('presets registry config', () => {
     expect(typeof PRESETS_VERSION).toBe('number');
   });
 
-  it('includes all 10 wave-1 live presets (7 original + AI Influencer D-23 + Clothes Swap 09.1-11 + Faceswap 09.2-07)', () => {
+  it('includes all 11 wave-1 live presets (7 original + AI Influencer D-23 + Clothes Swap 09.1-11 + Faceswap 09.2-07 + Magic Editor 09.2-08)', () => {
     const liveIds = SERVER_PRESETS.filter((p) => p.status === 'live').map((p) => p.preset_id);
     expect(liveIds.sort()).toEqual(
       [
@@ -29,6 +29,7 @@ describe('presets registry config', () => {
         'ai-influencer',
         'clothes-swap',
         'faceswap',
+        'magic-editor',
       ].sort(),
     );
   });

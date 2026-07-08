@@ -459,6 +459,35 @@ export const SERVER_PRESETS: PresetDef[] = [
     },
     tile: placeholderTile('faceswap'),
   },
+  {
+    // Magic Editor (SC4, 09.2-08): OpenAI-DIRECT inline mask edit — the mask itself is NOT a
+    // registry slot (the client paints it and uploads it separately as mask_upload_id); only the
+    // source photo is a declared slot here. The only image preset with a user free-text field —
+    // presetResolver passes the client's sanitized text straight through as the prompt
+    // (prompt_template '{prompt}' is a passthrough marker, not server-templated like the others).
+    preset_id: 'magic-editor',
+    title: 'Magic Editor',
+    subtitle: 'Paint to edit',
+    section: 'photo_effects',
+    sort_order: 7,
+    status: 'live',
+    badge: 'NEW',
+    media_type: 'image',
+    model: 'openai/gpt-image-2-medium', // D-22: medium tier, 5 credits
+    prompt_template: '{prompt}',
+    input_schema: {
+      slots: [{ kind: 'image', label: 'Photo to edit', source: 'any' }],
+      text: { label: 'What to change (optional)', required: false },
+    },
+    cost: { type: 'flat', credits: 5 },
+    sheet: {
+      description:
+        'Paint over any part of your photo and describe what to change — or leave it blank to remove it.',
+      aspect_label: 'Matches your photo',
+      resolution_label: 'High resolution',
+    },
+    tile: placeholderTile('magic-editor'),
+  },
 
   // ─── Avatar Center ─────────────────────────────────────────────────────────
   {

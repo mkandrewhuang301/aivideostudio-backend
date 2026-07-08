@@ -158,12 +158,12 @@ export async function presetResolver(req: Request, res: Response, next: NextFunc
         break;
       }
       case 'image': {
-        // Clothes Swap/Hairstyle/Anime Yourself/Polaroid — 1-4 reference image slots, no user
-        // duration. 09.1-11: slots may declare `optional: true` (Clothes Swap's 2 extra outfit
-        // references) — every NON-optional slot must resolve to a real presigned URL, or reject
-        // before any billing/dispatch happens. This is a no-op for every preset whose slots
-        // declare no `optional` flag (hairstyle/anime-yourself/polaroid) since all of theirs are
-        // implicitly required, matching their pre-existing behavior exactly.
+        // Clothes Swap/Hairstyle/Anime Yourself/Polaroid/Magic Editor — 1-4 reference image
+        // slots, no user duration. 09.1-11: slots may declare `optional: true` (Clothes Swap's 2
+        // extra outfit references) — every NON-optional slot must resolve to a real presigned
+        // URL, or reject before any billing/dispatch happens. This is a no-op for every preset
+        // whose slots declare no `optional` flag (hairstyle/anime-yourself/polaroid/magic-editor)
+        // since all of theirs are implicitly required, matching their pre-existing behavior exactly.
         const slots = def.input_schema?.slots ?? [];
         const missingRequired = slots.some((slot, index) => !slot.optional && !slotUrls[index]);
         if (missingRequired) {
@@ -174,6 +174,33 @@ export async function presetResolver(req: Request, res: Response, next: NextFunc
         // the user's own slot photo(s) — order matches prompt_template_with_reference's
         // "first image" / "second image" framing.
         req.body.reference_images = [...slotUrls.filter(Boolean), ...(styleReferenceUrl ? [styleReferenceUrl] : [])];
+
+        // Magic Editor (09.2-08, T-09.2-17): resolve the client's mask_upload_id to a fresh
+        // presigned URL, ownership-scoped to req.user.dbUserId via the SAME referenceUploads
+        // lookup pattern used above for slot inputs — never trust a client-sent presigned URL
+        // (Issue 4 pattern) and never let another user's upload resolve as the mask.
+        // Also pass the user's free-text straight through as the prompt (the only image preset
+        // with a user-authored prompt; every other image preset's prompt is fully server-
+        // templated per D-11, so this is gated to preset_id === 'magic-editor' only).
+        if (preset_id === 'magic-editor') {
+          const maskUploadId = typeof req.body.mask_upload_id === 'string' ? req.body.mask_upload_id : undefined;
+          if (!maskUploadId || !userId) {
+            res.status(400).json({ error: 'mask_upload_id is required', code: 'INVALID_PRESET_INPUT' });
+            return;
+          }
+          const [maskRow] = await db
+            .select()
+            .from(referenceUploads)
+            .where(and(eq(referenceUploads.id, maskUploadId), eq(referenceUploads.user_id, userId)));
+          if (!maskRow) {
+            res.status(400).json({ error: 'Mask upload not found', code: 'INVALID_PRESET_INPUT' });
+            return;
+          }
+          req.body.mask_url = await getUploadPresignedUrl((maskRow as { r2_key: string }).r2_key);
+
+          const clientText = typeof req.body.text === 'string' ? req.body.text.trim() : '';
+          req.body.prompt = clientText;
+        }
         break;
       }
       case 'faceswap': {
