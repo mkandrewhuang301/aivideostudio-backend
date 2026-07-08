@@ -5,7 +5,7 @@
 
 // Mock config FIRST — config.ts calls requireEnv() at module eval time
 jest.mock('../../config', () => ({
-  config: { hiveApiKey: 'test-hive-key' },
+  config: { hiveApiKey: 'test-hive-key', hiveInputNsfwThreshold: 0.85 },
 }));
 
 // Mock DB for markQuarantined tests
@@ -32,7 +32,7 @@ jest.mock('@aws-sdk/client-s3', () => ({
 const mockFetch = jest.fn();
 global.fetch = mockFetch as unknown as typeof fetch;
 
-import { scanForCsam } from '../../services/hiveService';
+import { scanForCsam, scanInputMedia } from '../../services/hiveService';
 import { markQuarantined } from '../../services/generationService';
 import { db } from '../../db/client';
 
@@ -107,6 +107,37 @@ describe('scanForCsam', () => {
     ]));
     const result = await scanForCsam('https://r2.example.com/video.mp4');
     expect(result.flagged).toBe(true);
+  });
+});
+
+describe('scanInputMedia', () => {
+  beforeEach(() => mockFetch.mockReset());
+
+  it('returns { blocked: true, reason: "nsfw" } when a sexual/nudity class exceeds the input NSFW threshold', async () => {
+    mockFetch.mockResolvedValue(makeHiveResponse([[
+      { class_name: 'yes_female_nudity', value: 0.9 },
+    ]]));
+    const result = await scanInputMedia('https://r2.example.com/face.jpg');
+    expect(result).toEqual({ blocked: true, reason: 'nsfw' });
+  });
+
+  it('returns { blocked: false } for a clean face (no sexual/nudity classes over threshold)', async () => {
+    mockFetch.mockResolvedValue(makeHiveResponse([[
+      { class_name: 'yes_female_nudity', value: 0.1 },
+      { class_name: 'general_nsfw', value: 0.2 },
+    ]]));
+    const result = await scanInputMedia('https://r2.example.com/face.jpg');
+    expect(result).toEqual({ blocked: false });
+  });
+
+  it('throws (fail-safe) on Hive HTTP error rather than treating input as clean', async () => {
+    mockFetch.mockResolvedValue({ ok: false, status: 500 });
+    await expect(scanInputMedia('https://r2.example.com/face.jpg')).rejects.toThrow('Hive API error: 500');
+  });
+
+  it('throws (fail-safe) when Hive returns empty output rather than treating input as clean', async () => {
+    mockFetch.mockResolvedValue(makeHiveResponse([]));
+    await expect(scanInputMedia('https://r2.example.com/face.jpg')).rejects.toThrow('Hive returned empty output');
   });
 });
 
