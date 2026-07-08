@@ -53,10 +53,10 @@ function isFrameFlagged(classes: HiveClass[]): boolean {
   return [...SEXUAL_CLASS_NAMES].some((name) => (classMap.get(name) ?? 0) >= SEXUAL_CONTENT_THRESHOLD);
 }
 
-// Accepts the R2 object key (not a URL) — generates a presigned URL internally.
-export async function scanForCsam(r2Key: string): Promise<{ flagged: boolean }> {
-  const presignedUrl = await getPresignedUrl(r2Key);
-
+// Shared v3 visual-moderation request + response parsing, used by BOTH the output CSAM scan
+// (scanForCsam) and the input NSFW scan (scanInputMedia). Same endpoint/auth/JSON body — only
+// the media URL and the downstream class thresholds differ per caller.
+async function visualModerationClasses(mediaUrl: string): Promise<HiveFrameResult[]> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), HIVE_TIMEOUT_MS);
 
@@ -68,7 +68,7 @@ export async function scanForCsam(r2Key: string): Promise<{ flagged: boolean }> 
         Authorization: `Bearer ${config.hiveApiKey}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ input: [{ media_url: presignedUrl }] }),
+      body: JSON.stringify({ input: [{ media_url: mediaUrl }] }),
       signal: controller.signal,
     });
   } finally {
@@ -81,10 +81,36 @@ export async function scanForCsam(r2Key: string): Promise<{ flagged: boolean }> 
 
   const data = (await response.json()) as HiveVisualModerationResponse;
   const frames = data.output ?? [];
-  // Empty output means Hive couldn't process the video — treat as scan failure, not clean.
+  // Empty output means Hive couldn't process the media — treat as scan failure, not clean.
   if (frames.length === 0) {
-    throw new Error('Hive returned empty output — video could not be scanned');
+    throw new Error('Hive returned empty output — media could not be scanned');
   }
+  return frames;
+}
+
+// Accepts the R2 object key (not a URL) — generates a presigned URL internally.
+export async function scanForCsam(r2Key: string): Promise<{ flagged: boolean }> {
+  const presignedUrl = await getPresignedUrl(r2Key);
+  const frames = await visualModerationClasses(presignedUrl);
   const flagged = frames.some((frame) => isFrameFlagged(frame.classes ?? []));
   return { flagged };
+}
+
+// INPUT-media NSFW scan for user-supplied face uploads (faceswap / motion-transfer face slot).
+// SEPARATE from scanForCsam: no child_present gating (age is NOT scanned here — D-2), thresholded
+// via its own config.hiveInputNsfwThreshold rather than the output SEXUAL_CONTENT_THRESHOLD, and
+// gated by its own config.hiveInputScanEnabled flag (checked by callers, not here) rather than
+// hiveScanEnabled. Celebrity likeness is NOT this function's job — see the separate Rekognition
+// celebrityCheckMiddleware (D-1).
+//
+// Fail-safe: on Hive HTTP error or empty/unparseable output, visualModerationClasses() throws —
+// this function does not catch it, so callers must treat a thrown error as "block", never as clean.
+export async function scanInputMedia(presignedUrl: string): Promise<{ blocked: boolean; reason?: 'nsfw' }> {
+  const frames = await visualModerationClasses(presignedUrl);
+  const threshold = config.hiveInputNsfwThreshold;
+  const isNsfw = frames.some((frame) => {
+    const classMap = new Map((frame.classes ?? []).map((c) => [c.class_name, c.value]));
+    return [...SEXUAL_CLASS_NAMES].some((name) => (classMap.get(name) ?? 0) >= threshold);
+  });
+  return isNsfw ? { blocked: true, reason: 'nsfw' } : { blocked: false };
 }
