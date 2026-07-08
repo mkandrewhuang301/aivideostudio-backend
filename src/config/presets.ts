@@ -342,9 +342,8 @@ export const SERVER_PRESETS: PresetDef[] = [
       description:
         'Try a new hairstyle on your own photo — pick a style below and see yourself with a ' +
         'fresh new look.',
-      // Verified against Replicate's openai/gpt-image-2 model page: aspect_ratio accepts
-      // exactly 1:1, 3:2, 2:3 (no other values) — https://replicate.com/openai/gpt-image-2.
-      aspect_ratios: ['3:2', '1:1', '2:3'],
+      // gpt-image-2 supports 1:1, 3:2, 2:3, 16:9, 9:16, auto (Replicate playground, 2026-07-08).
+      aspect_ratios: ['16:9', '1:1', '9:16'],
       default_aspect_ratio: '1:1',
       resolution_label: 'High resolution',
     },
