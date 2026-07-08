@@ -47,6 +47,35 @@ export async function archiveToR2(
   return key;
 }
 
+// 09.2-08: Magic Editor's OpenAI mask-edit call can return a base64-encoded PNG instead of a
+// fetchable URL (data[0].b64_json) — archiveToR2 is URL-only, so this sibling helper decodes the
+// buffer directly and reuses the exact same R2 key convention (generations/{id}.{ext}).
+export async function archiveBase64ToR2(
+  base64Data: string,
+  generationId: string,
+  contentType: string = 'image/png',
+): Promise<string> {
+  const ext =
+    contentType === 'image/webp' ? 'webp' :
+    contentType === 'image/png'  ? 'png'  :
+    'jpg';
+  const key = `generations/${generationId}.${ext}`;
+  const buffer = Buffer.from(base64Data, 'base64');
+
+  const upload = new Upload({
+    client: r2,
+    params: {
+      Bucket: R2_BUCKET,
+      Key: key,
+      Body: buffer,
+      ContentType: contentType,
+    },
+  });
+  await upload.done();
+
+  return key;
+}
+
 // D-34: 24-hour TTL for completed generation output
 export async function getGenerationPresignedUrl(r2Key: string): Promise<string> {
   return getSignedUrl(r2, new GetObjectCommand({ Bucket: R2_BUCKET, Key: r2Key }), { expiresIn: 86400 });

@@ -26,6 +26,8 @@ import {
   getGenerationById,
   softDeleteGeneration,
   setGenerationFavorite,
+  markCompleted,
+  markQuarantined,
   SUPPORTED_MODELS,
   MODEL_RESOLUTIONS,
   SUPPORTED_IMAGE_MODELS,
@@ -41,7 +43,10 @@ import { ReplicateProvider } from '../services/providers/ReplicateProvider';
 import { refundCredits } from '../services/creditService';
 import { classifyFailureReason, markFailed } from '../services/generationService';
 import { getGenerationPresignedUrl, getUploadPresignedUrl } from '../services/archivalService';
-import { getReplicateWebhookUrl } from '../config';
+import { generateImageEditWithMask } from '../services/openaiImageService';
+import { scanForCsam } from '../services/hiveService';
+import { hiveScanQueue } from '../queue/hiveScanWorker';
+import { getReplicateWebhookUrl, config } from '../config';
 import type { GenerationInput } from '../services/providers/ModelProvider';
 import { db } from '../db/client';
 import { referenceUploads } from '../db/schema';
@@ -69,6 +74,9 @@ interface ResolvedGenerationRequest {
   // Image-only
   imageAspectRatio?: string;
   imageQuality?: 'high' | 'medium' | 'low';
+  // Magic Editor-only (09.2-08) — presence routes the image branch through the OpenAI-direct
+  // inline mask-edit path instead of Replicate dispatch. Source image lives in referenceImages[0].
+  maskUrl?: string;
   // Avatar-only (DreamActor M2.0)
   avatarImage?: string;
   avatarDrivingVideo?: string;
@@ -391,6 +399,9 @@ function prepareCost(req: Request, res: Response, next: NextFunction): void {
       imageQuality,
       cost,
       referenceImages: refImages.length > 0 ? refImages : undefined,
+      // Magic Editor (09.2-08): presetResolver sets req.body.mask_url when preset_id ===
+      // 'magic-editor' — its presence (not the model id) is what routes dispatch inline below.
+      ...(typeof req.body?.mask_url === 'string' ? { maskUrl: req.body.mask_url } : {}),
     };
     next();
     return;
@@ -585,6 +596,57 @@ generationsRouter.post('/', promptModerationMiddleware, presetResolver, prepareC
       cost_credits: resolved.cost,
       media_type: resolved.mediaType,
     });
+
+    // Magic Editor (SC4, 09.2-08): OpenAI-direct inline mask edit — the FIRST live consumer of
+    // the inline (synchronous, no-webhook) OpenAI path. Bypasses ReplicateProvider.dispatch AND
+    // attachPredictionId entirely; the row was created 'pending' above and is completed
+    // in-request (RESEARCH Pitfall 6: never leave it 'pending' — the reaper reaps pending >5min).
+    // Only mask edits take this branch — plain gpt-image-2 presets (hairstyle/anime/polaroid/
+    // clothes-swap) have no resolved.maskUrl and fall through to the normal Replicate dispatch
+    // below, unchanged.
+    if (resolved.maskUrl && resolved.mediaType === 'image') {
+      let r2Key: string;
+      try {
+        r2Key = await generateImageEditWithMask(
+          resolved.referenceImages![0], resolved.maskUrl, resolved.prompt, generationId,
+        );
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        console.error(`[generations] Magic Editor inline dispatch failed: ${errMsg}`);
+        await markFailed(generationId, classifyFailureReason(errMsg));
+        await refundCredits(req.user.dbUserId, resolved.cost, `dispatch-failure-${generationId}`);
+        res.status(502).json({ error: 'Edit service unavailable. Credits have been refunded.' });
+        return;
+      }
+
+      // CSAM scan (only when enabled) — mirrors the webhook success path exactly (routes/webhooks/replicate.ts).
+      if (config.hiveScanEnabled) {
+        try {
+          const { flagged } = await scanForCsam(r2Key);
+          if (flagged) {
+            await markQuarantined(generationId);
+            await refundCredits(req.user.dbUserId, resolved.cost, `csam-quarantine-openai-${generationId}`);
+            res.status(200).json({ generation_id: generationId, status: 'quarantined' });
+            return;
+          }
+        } catch (hiveErr) {
+          console.error('[generations] Hive scan error — queuing retry:', hiveErr);
+          await hiveScanQueue.add('scan', {
+            generationId,
+            r2Key,
+            userId: req.user.dbUserId,
+            costCredits: resolved.cost,
+            mediaType: 'image',
+          });
+          res.status(200).json({ generation_id: generationId, status: 'processing' });
+          return;
+        }
+      }
+
+      await markCompleted(generationId, r2Key);
+      res.status(200).json({ generation_id: generationId, status: 'completed' });
+      return;
+    }
 
     const webhookUrl = getReplicateWebhookUrl();
     console.log(`[generations] webhookUrl="${webhookUrl}"`);
