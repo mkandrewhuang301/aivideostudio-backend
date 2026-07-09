@@ -43,7 +43,9 @@ import { ReplicateProvider } from '../services/providers/ReplicateProvider';
 import { refundCredits } from '../services/creditService';
 import { classifyFailureReason, markFailed } from '../services/generationService';
 import { getGenerationPresignedUrl, getUploadPresignedUrl } from '../services/archivalService';
-import { generateImageEditWithMask } from '../services/openaiImageService';
+import { generateImageEditWithMask, generateFaceswap } from '../services/openaiImageService';
+import { deleteRawFaceUploads } from '../services/uploadCleanup';
+import type { GenerationByPredictionRow } from '../services/generationService';
 import { scanForCsam } from '../services/hiveService';
 import { hiveScanQueue } from '../queue/hiveScanWorker';
 import { getReplicateWebhookUrl, config } from '../config';
@@ -92,7 +94,7 @@ interface ResolvedGenerationRequest {
   // Character-replace-only (Wan 2.2 Animate Replace — AI Influencer, D-23)
   characterReplaceVideo?: string;
   characterReplaceImage?: string;
-  // Faceswap-only (Easel Advanced Face Swap)
+  // Faceswap-only (inline OpenAI gpt-image-2, 09.2-12)
   swapImage?: string;
   targetImage?: string;
   hairSource?: 'target' | 'user';
@@ -196,7 +198,7 @@ function prepareCost(req: Request, res: Response, next: NextFunction): void {
     // character-replace-specific (Wan 2.2 Animate Replace — AI Influencer, D-23)
     character_replace_video,
     character_replace_image,
-    // faceswap-specific (Easel Advanced Face Swap, 09.2-07)
+    // faceswap-specific (inline OpenAI gpt-image-2, 09.2-12; formerly Easel via Replicate, 09.2-07)
     swap_image,
     target_image,
     hair_source,
@@ -276,7 +278,7 @@ function prepareCost(req: Request, res: Response, next: NextFunction): void {
   }
 
   if (media_type === 'faceswap') {
-    const faceswapModel = model ?? 'easel/advanced-face-swap';
+    const faceswapModel = model ?? 'openai/gpt-image-2-medium';
     if (!(SUPPORTED_FACESWAP_MODELS as readonly string[]).includes(faceswapModel)) {
       res.status(400).json({ error: `model must be one of: ${SUPPORTED_FACESWAP_MODELS.join(', ')}`, code: 'INVALID_MODEL' });
       return;
@@ -586,13 +588,14 @@ generationsRouter.post('/', promptModerationMiddleware, presetResolver, prepareC
     const presetParams = req._preset
       ? { preset_id: req._preset.preset_id, preset_input_upload_ids: req._preset.input_upload_ids }
       : {};
+    const rowParams = { ...params, ...presetParams };
 
     const { id: generationId } = await createGeneration({
       user_id: req.user.dbUserId,
       model: resolved.model,
       status: 'pending',
       prompt: resolved.prompt || null,
-      params: { ...params, ...presetParams },
+      params: rowParams,
       cost_credits: resolved.cost,
       media_type: resolved.mediaType,
     });
@@ -644,6 +647,60 @@ generationsRouter.post('/', promptModerationMiddleware, presetResolver, prepareC
       }
 
       await markCompleted(generationId, r2Key);
+      res.status(200).json({ generation_id: generationId, status: 'completed' });
+      return;
+    }
+
+    // Faceswap (09.2-12): re-pointed from the now-dead easel/advanced-face-swap (404 on
+    // Replicate) to the SECOND inline (synchronous, no-webhook) OpenAI consumer — gpt-image-2's
+    // two-image edit. Bypasses ReplicateProvider.dispatch AND attachPredictionId entirely, same
+    // shape as the Magic Editor branch above.
+    if (resolved.mediaType === 'faceswap') {
+      let r2Key: string;
+      try {
+        r2Key = await generateFaceswap(resolved.targetImage!, resolved.swapImage!, generationId);
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        console.error(`[generations] Faceswap inline dispatch failed: ${errMsg}`);
+        await markFailed(generationId, classifyFailureReason(errMsg));
+        await refundCredits(req.user.dbUserId, resolved.cost, `dispatch-failure-${generationId}`);
+        res.status(502).json({ error: 'Faceswap service unavailable. Credits have been refunded.' });
+        return;
+      }
+
+      // CSAM scan (only when enabled) — mirrors the Magic Editor inline branch + webhook success path.
+      if (config.hiveScanEnabled) {
+        try {
+          const { flagged } = await scanForCsam(r2Key);
+          if (flagged) {
+            await markQuarantined(generationId);
+            await refundCredits(req.user.dbUserId, resolved.cost, `csam-quarantine-openai-${generationId}`);
+            res.status(200).json({ generation_id: generationId, status: 'quarantined' });
+            return;
+          }
+        } catch (hiveErr) {
+          console.error('[generations] Hive scan error — queuing retry:', hiveErr);
+          await hiveScanQueue.add('scan', {
+            generationId,
+            r2Key,
+            userId: req.user.dbUserId,
+            costCredits: resolved.cost,
+            mediaType: 'image',
+          });
+          res.status(200).json({ generation_id: generationId, status: 'processing' });
+          return;
+        }
+      }
+
+      await markCompleted(generationId, r2Key);
+      // SC1: raw uploaded face must still be reaped even though this completed inline (no
+      // webhook) — deleteRawFaceUploads is a shared helper (also called from the webhook success
+      // path) that only reaps face-input presets; best-effort, must never fail the response.
+      try {
+        await deleteRawFaceUploads({ media_type: resolved.mediaType, params: rowParams } as GenerationByPredictionRow);
+      } catch (e) {
+        console.error('[generations] inline faceswap raw-face cleanup failed:', e);
+      }
       res.status(200).json({ generation_id: generationId, status: 'completed' });
       return;
     }

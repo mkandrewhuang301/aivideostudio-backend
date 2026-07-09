@@ -442,7 +442,10 @@ export const SERVER_PRESETS: PresetDef[] = [
     status: 'live',
     badge: 'NEW',
     media_type: 'faceswap',
-    model: 'easel/advanced-face-swap',
+    // 09.2-12: re-pointed to inline OpenAI gpt-image-2 — easel/advanced-face-swap was REMOVED
+    // from Replicate (404 confirmed 2026-07-09). The swap prompt is server-side (FACESWAP_PROMPT
+    // in openaiImageService.ts), not this registry's prompt_template.
+    model: 'openai/gpt-image-2-medium',
     prompt_template: '', // faceswap takes no text prompt
     input_schema: {
       slots: [
@@ -450,7 +453,7 @@ export const SERVER_PRESETS: PresetDef[] = [
         { kind: 'image', label: 'Target photo', source: 'any' }, // target_image
       ],
     },
-    cost: { type: 'flat', credits: 5 }, // ~$0.05 → 5 credits (VERIFY at 09.2-11)
+    cost: { type: 'flat', credits: 5 }, // gpt-image-2-medium tier
     sheet: {
       description:
         'Swap your face onto any photo — upload your face and the photo to place it into.',

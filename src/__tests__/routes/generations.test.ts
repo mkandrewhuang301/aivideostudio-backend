@@ -81,7 +81,7 @@ jest.mock('../../services/generationService', () => ({
   SUPPORTED_UPSCALER_MODELS: ['bytedance/video-upscaler'],
   SUPPORTED_IMAGE_UPSCALE_MODELS: ['recraft-ai/recraft-crisp-upscale'],
   SUPPORTED_GROK_MODELS: ['xai/grok-imagine-video-1.5'],
-  SUPPORTED_FACESWAP_MODELS: ['easel/advanced-face-swap'],
+  SUPPORTED_FACESWAP_MODELS: ['openai/gpt-image-2-medium'],
   classifyFailureReason: jest.requireActual('../../services/generationService').classifyFailureReason,
 }));
 
@@ -102,6 +102,11 @@ jest.mock('../../services/providers/ReplicateProvider', () => {
 jest.mock('../../services/openaiImageService', () => ({
   generateImageWithOpenAI: jest.fn(),
   generateImageEditWithMask: jest.fn(),
+  generateFaceswap: jest.fn(),
+}));
+
+jest.mock('../../services/uploadCleanup', () => ({
+  deleteRawFaceUploads: jest.fn(),
 }));
 
 jest.mock('../../services/hiveService', () => ({
@@ -160,7 +165,8 @@ import {
   markQuarantined,
 } from '../../services/generationService';
 import { getGenerationPresignedUrl, getUploadPresignedUrl } from '../../services/archivalService';
-import { generateImageWithOpenAI, generateImageEditWithMask } from '../../services/openaiImageService';
+import { generateImageWithOpenAI, generateImageEditWithMask, generateFaceswap } from '../../services/openaiImageService';
+import { deleteRawFaceUploads } from '../../services/uploadCleanup';
 import { scanForCsam } from '../../services/hiveService';
 import { hiveScanQueue } from '../../queue/hiveScanWorker';
 import { ReplicateProvider } from '../../services/providers/ReplicateProvider';
@@ -329,42 +335,18 @@ describe('POST /api/generations — Grok Imagine (image-to-video)', () => {
   });
 });
 
-// ─── POST /api/generations — Faceswap (Easel Advanced Face Swap) ──────────────
+// ─── POST /api/generations — Faceswap (inline OpenAI gpt-image-2, 09.2-12) ────
+// Easel Advanced Face Swap was REMOVED from Replicate (404) — faceswap now dispatches inline to
+// gpt-image-2 (the SECOND consumer of the inline no-webhook OpenAI path, after Magic Editor
+// 09.2-08). Mirrors the "magic editor mask edit (inline)" suite below, plus SC1 raw-face cleanup.
 
-describe('POST /api/generations — faceswap', () => {
+describe('POST /api/generations — faceswap (inline OpenAI gpt-image-2)', () => {
   const FACESWAP_BODY = {
     media_type: 'faceswap',
-    model: 'easel/advanced-face-swap',
+    model: 'openai/gpt-image-2-medium',
     swap_image: 'https://example.com/swap-face.jpg',
     target_image: 'https://example.com/target-photo.jpg',
   };
-
-  it('dispatches with computeFaceswapCost (flat rate) and returns 200', async () => {
-    (computeFaceswapCost as jest.Mock).mockReturnValue(5);
-    (deductCredits as jest.Mock).mockResolvedValue(true);
-    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-faceswap-1' });
-    dispatchMock.mockResolvedValue({ providerPredictionId: 'pred-faceswap-1' });
-    (attachPredictionId as jest.Mock).mockResolvedValue(undefined);
-
-    const res = await request(app).post('/api/generations').send(FACESWAP_BODY);
-
-    expect(res.status).toBe(200);
-    expect(res.body).toEqual({ generation_id: 'gen-faceswap-1', status: 'processing' });
-    expect(computeFaceswapCost).toHaveBeenCalled();
-    expect(createGeneration).toHaveBeenCalledWith(
-      expect.objectContaining({ status: 'pending', cost_credits: 5, media_type: 'faceswap' }),
-    );
-    expect(deductCredits).toHaveBeenCalledWith('test-user-id', 5);
-
-    const dispatchArg = dispatchMock.mock.calls[0][0];
-    expect(dispatchArg).toEqual(
-      expect.objectContaining({
-        mediaType: 'faceswap',
-        swapImage: 'https://example.com/swap-face.jpg',
-        targetImage: 'https://example.com/target-photo.jpg',
-      }),
-    );
-  });
 
   it('returns 400 INVALID_INPUT when swap_image is missing, without dispatch or deduction', async () => {
     const { swap_image: _omit, ...bodyWithoutSwapImage } = FACESWAP_BODY;
@@ -390,15 +372,113 @@ describe('POST /api/generations — faceswap', () => {
     expect(deductCredits).not.toHaveBeenCalled();
   });
 
-  it('returns 400 INVALID_MODEL for a model not in SUPPORTED_FACESWAP_MODELS', async () => {
+  it('returns 400 INVALID_MODEL for a model not in SUPPORTED_FACESWAP_MODELS (e.g. the dead easel model)', async () => {
     const res = await request(app)
       .post('/api/generations')
-      .send({ ...FACESWAP_BODY, model: 'some-other-faceswap-model' });
+      .send({ ...FACESWAP_BODY, model: 'easel/advanced-face-swap' });
 
     expect(res.status).toBe(400);
     expect(res.body.code).toBe('INVALID_MODEL');
     expect(dispatchMock).not.toHaveBeenCalled();
     expect(deductCredits).not.toHaveBeenCalled();
+  });
+
+  it('calls generateFaceswap(target, swap), marks completed, deletes raw face upload, never calls Replicate dispatch', async () => {
+    (computeFaceswapCost as jest.Mock).mockReturnValue(5);
+    (deductCredits as jest.Mock).mockResolvedValue(true);
+    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-faceswap-1' });
+    (generateFaceswap as jest.Mock).mockResolvedValue('generations/gen-faceswap-1.png');
+    (scanForCsam as jest.Mock).mockResolvedValue({ flagged: false });
+    (markCompleted as jest.Mock).mockResolvedValue(true);
+    (deleteRawFaceUploads as jest.Mock).mockResolvedValue(undefined);
+
+    const res = await request(app).post('/api/generations').send(FACESWAP_BODY);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ generation_id: 'gen-faceswap-1', status: 'completed' });
+    expect(computeFaceswapCost).toHaveBeenCalled();
+    expect(createGeneration).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'pending', cost_credits: 5, media_type: 'faceswap' }),
+    );
+    expect(deductCredits).toHaveBeenCalledWith('test-user-id', 5);
+    // Image order is load-bearing: generateFaceswap(target, face, generationId)
+    expect(generateFaceswap).toHaveBeenCalledWith(
+      'https://example.com/target-photo.jpg',
+      'https://example.com/swap-face.jpg',
+      'gen-faceswap-1',
+    );
+    expect(markCompleted).toHaveBeenCalledWith('gen-faceswap-1', 'generations/gen-faceswap-1.png');
+    // SC1: raw uploaded face must still be reaped even though this completed inline (no webhook)
+    expect(deleteRawFaceUploads).toHaveBeenCalledTimes(1);
+    expect(dispatchMock).not.toHaveBeenCalled();
+    expect(attachPredictionId).not.toHaveBeenCalled();
+  });
+
+  it('OpenAI faceswap failure returns 502 with refund, never marks completed, never deletes raw face', async () => {
+    (computeFaceswapCost as jest.Mock).mockReturnValue(5);
+    (deductCredits as jest.Mock).mockResolvedValue(true);
+    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-faceswap-fail' });
+    (generateFaceswap as jest.Mock).mockRejectedValue(new Error('OpenAI 429 rate limit'));
+    (markFailed as jest.Mock).mockResolvedValue(true);
+    (refundCredits as jest.Mock).mockResolvedValue(undefined);
+
+    const res = await request(app).post('/api/generations').send(FACESWAP_BODY);
+
+    expect(res.status).toBe(502);
+    expect(res.body.error).toContain('Credits have been refunded');
+    expect(markFailed).toHaveBeenCalledWith('gen-faceswap-fail', 'generic_error');
+    expect(refundCredits).toHaveBeenCalledWith(
+      'test-user-id',
+      5,
+      'dispatch-failure-gen-faceswap-fail',
+    );
+    expect(markCompleted).not.toHaveBeenCalled();
+    expect(deleteRawFaceUploads).not.toHaveBeenCalled();
+    expect(dispatchMock).not.toHaveBeenCalled();
+  });
+
+  it('CSAM scan flagged: quarantines and refunds without exposing URL', async () => {
+    (computeFaceswapCost as jest.Mock).mockReturnValue(5);
+    (deductCredits as jest.Mock).mockResolvedValue(true);
+    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-faceswap-csam' });
+    (generateFaceswap as jest.Mock).mockResolvedValue('generations/gen-faceswap-csam.png');
+    (scanForCsam as jest.Mock).mockResolvedValue({ flagged: true });
+    (markQuarantined as jest.Mock).mockResolvedValue(true);
+    (refundCredits as jest.Mock).mockResolvedValue(undefined);
+
+    const res = await request(app).post('/api/generations').send(FACESWAP_BODY);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ generation_id: 'gen-faceswap-csam', status: 'quarantined' });
+    expect(markQuarantined).toHaveBeenCalledWith('gen-faceswap-csam');
+    expect(refundCredits).toHaveBeenCalledWith(
+      'test-user-id',
+      5,
+      'csam-quarantine-openai-gen-faceswap-csam',
+    );
+    expect(markCompleted).not.toHaveBeenCalled();
+    expect(deleteRawFaceUploads).not.toHaveBeenCalled();
+  });
+
+  it('CSAM scan error queues hiveScanWorker retry, does NOT mark completed or quarantined', async () => {
+    (computeFaceswapCost as jest.Mock).mockReturnValue(5);
+    (deductCredits as jest.Mock).mockResolvedValue(true);
+    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-faceswap-hive-err' });
+    (generateFaceswap as jest.Mock).mockResolvedValue('generations/gen-faceswap-hive-err.png');
+    (scanForCsam as jest.Mock).mockRejectedValue(new Error('Hive timeout'));
+
+    const res = await request(app).post('/api/generations').send(FACESWAP_BODY);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ generation_id: 'gen-faceswap-hive-err', status: 'processing' });
+    expect(hiveScanQueue.add).toHaveBeenCalledWith('scan', expect.objectContaining({
+      generationId: 'gen-faceswap-hive-err',
+      r2Key: 'generations/gen-faceswap-hive-err.png',
+      mediaType: 'image',
+    }));
+    expect(markCompleted).not.toHaveBeenCalled();
+    expect(markQuarantined).not.toHaveBeenCalled();
+    expect(deleteRawFaceUploads).not.toHaveBeenCalled();
   });
 });
 

@@ -154,12 +154,13 @@ describe('cents-rule cost functions (verified, not re-broken)', () => {
     expect(SUPPORTED_CHARACTER_REPLACE_MODELS).toContain('wan-video/wan-2.2-animate-replace');
   });
 
-  it('computeFaceswapCost() == 5 credits (ceil(0.05 * 100)) — flat per-run cost, no duration', () => {
+  it('computeFaceswapCost() == 5 credits (gpt-image-2-medium tier) — flat per-run cost, no duration', () => {
     expect(computeFaceswapCost()).toBe(5);
   });
 
-  it('SUPPORTED_FACESWAP_MODELS registers easel/advanced-face-swap', () => {
-    expect(SUPPORTED_FACESWAP_MODELS).toContain('easel/advanced-face-swap');
+  it('SUPPORTED_FACESWAP_MODELS registers openai/gpt-image-2-medium (easel/advanced-face-swap removed — 404 on Replicate, 09.2-12)', () => {
+    expect(SUPPORTED_FACESWAP_MODELS).toContain('openai/gpt-image-2-medium');
+    expect(SUPPORTED_FACESWAP_MODELS).not.toContain('easel/advanced-face-swap');
   });
 });
 
