@@ -13,6 +13,7 @@ import { scheduleReaper } from './queue/reaperWorker';
 import { scheduleUploadReaper } from './queue/uploadReaperWorker';
 import { scheduleYearlyGrant } from './queue/yearlyGrantWorker';
 import './queue/hiveScanWorker';
+import './queue/openaiGenerationWorker';
 import { banCheckMiddleware } from './middleware/banCheck';
 import { reportsRouter } from './routes/reports';
 import { uploadsRouter } from './routes/uploads';
