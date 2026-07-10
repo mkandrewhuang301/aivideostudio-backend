@@ -1434,6 +1434,41 @@ describe('GET /api/generations', () => {
     expect(res.body.items[0].params.preset_id).toBe('hairstyle');
     expect(res.body.items[0].params.preset_input_upload_ids).toEqual(['upload-1']);
   });
+
+  // D-F + D-G (09.2-13): a faceswap row is reported as media_type 'image' with model nulled and
+  // params stripped to preset_id + preset_input_upload_ids — no model/infra/R2 URLs leak (list).
+  it('serializes a faceswap preset row as media_type image, model null, minimal params (list)', async () => {
+    const faceswapItem = {
+      ...completedItem,
+      id: 'gen-faceswap-ser',
+      media_type: 'faceswap',
+      model: 'openai/gpt-image-2-medium',
+      prompt: null,
+      r2_key: 'generations/gen-faceswap-ser.png',
+      params: {
+        preset_id: 'faceswap',
+        preset_input_upload_ids: ['upload-face', 'upload-target'],
+        swap_image: 'https://r2.example.com/leak-swap.png',
+        target_image: 'https://r2.example.com/leak-target.png',
+        hair_source: 'target',
+      },
+    };
+    (listGenerations as jest.Mock).mockResolvedValue([faceswapItem]);
+
+    const res = await request(app).get('/api/generations');
+
+    expect(res.status).toBe(200);
+    const row = res.body.items[0];
+    expect(row.media_type).toBe('image');
+    expect(row.model).toBeNull();
+    expect(row.params).toEqual({
+      preset_id: 'faceswap',
+      preset_input_upload_ids: ['upload-face', 'upload-target'],
+    });
+    // Infra must not leak.
+    expect(row.params.swap_image).toBeUndefined();
+    expect(row.params.target_image).toBeUndefined();
+  });
 });
 
 // ─── GET /api/generations/:id ─────────────────────────────────────────────────
@@ -1500,6 +1535,36 @@ describe('GET /api/generations/:id', () => {
     expect(res.body.prompt).toBeNull();
     expect(res.body.params.preset_id).toBe('hairstyle');
     expect(res.body.params.preset_input_upload_ids).toEqual(['upload-1']);
+  });
+
+  // D-F + D-G (09.2-13): faceswap detail row → media_type image, model null, minimal params.
+  it('serializes a faceswap preset row as media_type image, model null, minimal params (detail)', async () => {
+    (getGenerationById as jest.Mock).mockResolvedValue({
+      ...completedGen,
+      media_type: 'faceswap',
+      model: 'openai/gpt-image-2-medium',
+      prompt: null,
+      r2_key: 'generations/gen-faceswap-ser.png',
+      params: {
+        preset_id: 'faceswap',
+        preset_input_upload_ids: ['upload-face', 'upload-target'],
+        swap_image: 'https://r2.example.com/leak-swap.png',
+        target_image: 'https://r2.example.com/leak-target.png',
+        hair_source: 'target',
+      },
+    });
+
+    const res = await request(app).get('/api/generations/gen-001');
+
+    expect(res.status).toBe(200);
+    expect(res.body.media_type).toBe('image');
+    expect(res.body.model).toBeNull();
+    expect(res.body.params).toEqual({
+      preset_id: 'faceswap',
+      preset_input_upload_ids: ['upload-face', 'upload-target'],
+    });
+    expect(res.body.params.swap_image).toBeUndefined();
+    expect(res.body.params.target_image).toBeUndefined();
   });
 });
 

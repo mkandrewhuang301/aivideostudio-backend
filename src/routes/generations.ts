@@ -730,6 +730,29 @@ generationsRouter.post('/', promptModerationMiddleware, presetResolver, prepareC
   }
 });
 
+// Client-safe serialization overrides shared by the list + detail endpoints (09.2-13):
+// - D-F: faceswap OUTPUT is an image — the DB row keeps media_type 'faceswap' for dispatch/gate
+//   logic, but the API reports 'image' so the client renders it as a still (fixes the "renders as
+//   video / never loads" bug without an app update for existing installs).
+// - D-G: preset rows must never leak model/infra to the client — null the model (mirrors the
+//   existing prompt:null treatment) and strip params down to just preset_id +
+//   preset_input_upload_ids (drops swap_image/target_image/mask_url/hair_source + any R2 URLs).
+function presetSafeSerialization(item: {
+  media_type: string;
+  model: string | null;
+  params: unknown;
+}): { media_type: string; model: string | null; params: unknown } {
+  const p = (item.params ?? null) as Record<string, unknown> | null;
+  const isPreset = Boolean(p?.preset_id);
+  return {
+    media_type: item.media_type === 'faceswap' ? 'image' : item.media_type,
+    model: isPreset ? null : item.model,
+    params: isPreset
+      ? { preset_id: p!.preset_id, preset_input_upload_ids: p!.preset_input_upload_ids ?? [] }
+      : item.params,
+  };
+}
+
 // GET /api/generations — cursor-paginated list (GAL-01, D-31)
 // Returns newest-first; completed items include video_url (24-hr presigned). Never returns quarantined/deleted.
 // SECURITY: user_id scoped inside listGenerations (T-07-02-01 mitigated)
@@ -775,6 +798,9 @@ generationsRouter.get('/', async (req: Request, res: Response) => {
           // rows — never let it reach the client. params.preset_id/preset_input_upload_ids are
           // retained (needed for the badge + Remix reopen).
           prompt: p?.preset_id ? null : item.prompt,
+          // D-F (faceswap→image) + D-G (null model + strip params for preset rows). Spread AFTER
+          // ...item so these override the raw DB values.
+          ...presetSafeSerialization(item),
           video_url: item.status === 'completed' && item.r2_key
             ? await getGenerationPresignedUrl(item.r2_key)
             : null,
@@ -816,7 +842,8 @@ generationsRouter.get('/:id', async (req: Request, res: Response) => {
       : null;
     // D-11/SC3/T-09.1-03: null the expanded template for preset rows; params.preset_id retained.
     const prompt = p?.preset_id ? null : item.prompt;
-    res.status(200).json({ ...item, prompt, video_url, reference_urls });
+    // D-F (faceswap→image) + D-G (null model + strip params for preset rows). Spread AFTER ...item.
+    res.status(200).json({ ...item, prompt, ...presetSafeSerialization(item), video_url, reference_urls });
   } catch (err) {
     console.error('[generations] Error fetching generation:', err);
     res.status(500).json({ error: 'Failed to fetch generation' });
