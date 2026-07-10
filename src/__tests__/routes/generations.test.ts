@@ -99,22 +99,19 @@ jest.mock('../../services/providers/ReplicateProvider', () => {
   };
 });
 
+// generateImageEditWithMask/generateFaceswap moved to openaiGenerationWorker.ts (09.2-13, D-C) —
+// mocked here only so tests can assert the route NEVER calls them directly anymore (moved to the
+// background worker's own test suite, openaiGenerationWorker.test.ts).
 jest.mock('../../services/openaiImageService', () => ({
   generateImageWithOpenAI: jest.fn(),
   generateImageEditWithMask: jest.fn(),
   generateFaceswap: jest.fn(),
 }));
 
-jest.mock('../../services/uploadCleanup', () => ({
-  deleteRawFaceUploads: jest.fn(),
-}));
-
-jest.mock('../../services/hiveService', () => ({
-  scanForCsam: jest.fn(),
-}));
-
-jest.mock('../../queue/hiveScanWorker', () => ({
-  hiveScanQueue: {
+// 09.2-13 (D-C): the async OpenAI generation queue — faceswap + Magic Editor now enqueue onto
+// this instead of running the OpenAI call inline in the request.
+jest.mock('../../queue/openaiGenerationQueue', () => ({
+  openaiGenerationQueue: {
     add: jest.fn().mockResolvedValue(undefined),
   },
 }));
@@ -161,14 +158,10 @@ import {
   softDeleteGeneration,
   markRefunded,
   markFailed,
-  markCompleted,
-  markQuarantined,
 } from '../../services/generationService';
 import { getGenerationPresignedUrl, getUploadPresignedUrl } from '../../services/archivalService';
 import { generateImageWithOpenAI, generateImageEditWithMask, generateFaceswap } from '../../services/openaiImageService';
-import { deleteRawFaceUploads } from '../../services/uploadCleanup';
-import { scanForCsam } from '../../services/hiveService';
-import { hiveScanQueue } from '../../queue/hiveScanWorker';
+import { openaiGenerationQueue } from '../../queue/openaiGenerationQueue';
 import { ReplicateProvider } from '../../services/providers/ReplicateProvider';
 import { db } from '../../db/client';
 
@@ -335,12 +328,15 @@ describe('POST /api/generations — Grok Imagine (image-to-video)', () => {
   });
 });
 
-// ─── POST /api/generations — Faceswap (inline OpenAI gpt-image-2, 09.2-12) ────
-// Easel Advanced Face Swap was REMOVED from Replicate (404) — faceswap now dispatches inline to
-// gpt-image-2 (the SECOND consumer of the inline no-webhook OpenAI path, after Magic Editor
-// 09.2-08). Mirrors the "magic editor mask edit (inline)" suite below, plus SC1 raw-face cleanup.
+// ─── POST /api/generations — Faceswap (async OpenAI gpt-image-2, 09.2-13) ─────
+// Easel Advanced Face Swap was REMOVED from Replicate (404) — faceswap dispatches to gpt-image-2.
+// D-C (09.2-13 gap closure): the OpenAI call USED to run synchronously in-request (~47s — past
+// the client's HTTP timeout). Now the route only ENQUEUES the job onto openaiGenerationWorker.ts
+// and returns 'processing' immediately; the worker's own behavior (generateFaceswap call, CSAM
+// scan, markCompleted/markFailed/refund, no raw-face deletion per D-E) is covered separately in
+// openaiGenerationWorker.test.ts.
 
-describe('POST /api/generations — faceswap (inline OpenAI gpt-image-2)', () => {
+describe('POST /api/generations — faceswap (async, enqueues to openaiGenerationWorker)', () => {
   const FACESWAP_BODY = {
     media_type: 'faceswap',
     model: 'openai/gpt-image-2-medium',
@@ -383,42 +379,39 @@ describe('POST /api/generations — faceswap (inline OpenAI gpt-image-2)', () =>
     expect(deductCredits).not.toHaveBeenCalled();
   });
 
-  it('calls generateFaceswap(target, swap), marks completed, deletes raw face upload, never calls Replicate dispatch', async () => {
+  it('enqueues a faceswap job and returns processing immediately — never calls generateFaceswap or Replicate dispatch in-request', async () => {
     (computeFaceswapCost as jest.Mock).mockReturnValue(5);
     (deductCredits as jest.Mock).mockResolvedValue(true);
     (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-faceswap-1' });
-    (generateFaceswap as jest.Mock).mockResolvedValue('generations/gen-faceswap-1.png');
-    (scanForCsam as jest.Mock).mockResolvedValue({ flagged: false });
-    (markCompleted as jest.Mock).mockResolvedValue(true);
-    (deleteRawFaceUploads as jest.Mock).mockResolvedValue(undefined);
 
     const res = await request(app).post('/api/generations').send(FACESWAP_BODY);
 
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ generation_id: 'gen-faceswap-1', status: 'completed' });
+    expect(res.body).toEqual({ generation_id: 'gen-faceswap-1', status: 'processing' });
     expect(computeFaceswapCost).toHaveBeenCalled();
     expect(createGeneration).toHaveBeenCalledWith(
       expect.objectContaining({ status: 'pending', cost_credits: 5, media_type: 'faceswap' }),
     );
     expect(deductCredits).toHaveBeenCalledWith('test-user-id', 5);
-    // Image order is load-bearing: generateFaceswap(target, face, generationId)
-    expect(generateFaceswap).toHaveBeenCalledWith(
-      'https://example.com/target-photo.jpg',
-      'https://example.com/swap-face.jpg',
-      'gen-faceswap-1',
-    );
-    expect(markCompleted).toHaveBeenCalledWith('gen-faceswap-1', 'generations/gen-faceswap-1.png');
-    // SC1: raw uploaded face must still be reaped even though this completed inline (no webhook)
-    expect(deleteRawFaceUploads).toHaveBeenCalledTimes(1);
+    // Image order is load-bearing: targetImage=target_image, faceImage=swap_image
+    expect(openaiGenerationQueue.add).toHaveBeenCalledWith('generate', {
+      kind: 'faceswap',
+      generationId: 'gen-faceswap-1',
+      userId: 'test-user-id',
+      cost: 5,
+      targetImage: 'https://example.com/target-photo.jpg',
+      faceImage: 'https://example.com/swap-face.jpg',
+    });
+    expect(generateFaceswap).not.toHaveBeenCalled();
     expect(dispatchMock).not.toHaveBeenCalled();
     expect(attachPredictionId).not.toHaveBeenCalled();
   });
 
-  it('OpenAI faceswap failure returns 502 with refund, never marks completed, never deletes raw face', async () => {
+  it('enqueue failure returns 502 with refund, never leaves the row pending unrefunded', async () => {
     (computeFaceswapCost as jest.Mock).mockReturnValue(5);
     (deductCredits as jest.Mock).mockResolvedValue(true);
-    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-faceswap-fail' });
-    (generateFaceswap as jest.Mock).mockRejectedValue(new Error('OpenAI 429 rate limit'));
+    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-faceswap-enqueue-fail' });
+    (openaiGenerationQueue.add as jest.Mock).mockRejectedValueOnce(new Error('Redis unreachable'));
     (markFailed as jest.Mock).mockResolvedValue(true);
     (refundCredits as jest.Mock).mockResolvedValue(undefined);
 
@@ -426,59 +419,14 @@ describe('POST /api/generations — faceswap (inline OpenAI gpt-image-2)', () =>
 
     expect(res.status).toBe(502);
     expect(res.body.error).toContain('Credits have been refunded');
-    expect(markFailed).toHaveBeenCalledWith('gen-faceswap-fail', 'generic_error');
+    expect(markFailed).toHaveBeenCalledWith('gen-faceswap-enqueue-fail', 'generic_error');
     expect(refundCredits).toHaveBeenCalledWith(
       'test-user-id',
       5,
-      'dispatch-failure-gen-faceswap-fail',
+      'dispatch-failure-gen-faceswap-enqueue-fail',
     );
-    expect(markCompleted).not.toHaveBeenCalled();
-    expect(deleteRawFaceUploads).not.toHaveBeenCalled();
+    expect(generateFaceswap).not.toHaveBeenCalled();
     expect(dispatchMock).not.toHaveBeenCalled();
-  });
-
-  it('CSAM scan flagged: quarantines and refunds without exposing URL', async () => {
-    (computeFaceswapCost as jest.Mock).mockReturnValue(5);
-    (deductCredits as jest.Mock).mockResolvedValue(true);
-    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-faceswap-csam' });
-    (generateFaceswap as jest.Mock).mockResolvedValue('generations/gen-faceswap-csam.png');
-    (scanForCsam as jest.Mock).mockResolvedValue({ flagged: true });
-    (markQuarantined as jest.Mock).mockResolvedValue(true);
-    (refundCredits as jest.Mock).mockResolvedValue(undefined);
-
-    const res = await request(app).post('/api/generations').send(FACESWAP_BODY);
-
-    expect(res.status).toBe(200);
-    expect(res.body).toEqual({ generation_id: 'gen-faceswap-csam', status: 'quarantined' });
-    expect(markQuarantined).toHaveBeenCalledWith('gen-faceswap-csam');
-    expect(refundCredits).toHaveBeenCalledWith(
-      'test-user-id',
-      5,
-      'csam-quarantine-openai-gen-faceswap-csam',
-    );
-    expect(markCompleted).not.toHaveBeenCalled();
-    expect(deleteRawFaceUploads).not.toHaveBeenCalled();
-  });
-
-  it('CSAM scan error queues hiveScanWorker retry, does NOT mark completed or quarantined', async () => {
-    (computeFaceswapCost as jest.Mock).mockReturnValue(5);
-    (deductCredits as jest.Mock).mockResolvedValue(true);
-    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-faceswap-hive-err' });
-    (generateFaceswap as jest.Mock).mockResolvedValue('generations/gen-faceswap-hive-err.png');
-    (scanForCsam as jest.Mock).mockRejectedValue(new Error('Hive timeout'));
-
-    const res = await request(app).post('/api/generations').send(FACESWAP_BODY);
-
-    expect(res.status).toBe(200);
-    expect(res.body).toEqual({ generation_id: 'gen-faceswap-hive-err', status: 'processing' });
-    expect(hiveScanQueue.add).toHaveBeenCalledWith('scan', expect.objectContaining({
-      generationId: 'gen-faceswap-hive-err',
-      r2Key: 'generations/gen-faceswap-hive-err.png',
-      mediaType: 'image',
-    }));
-    expect(markCompleted).not.toHaveBeenCalled();
-    expect(markQuarantined).not.toHaveBeenCalled();
-    expect(deleteRawFaceUploads).not.toHaveBeenCalled();
   });
 });
 
@@ -589,13 +537,16 @@ describe('POST /api/generations — gpt-image-2 image (Replicate)', () => {
   });
 });
 
-// ─── POST /api/generations — Magic Editor mask edit (inline, 09.2-08 / SC4) ──
+// ─── POST /api/generations — Magic Editor mask edit (async, 09.2-13 / SC4) ────
 //
-// The FIRST live consumer of the inline (synchronous, no-webhook) OpenAI path — routed by
-// resolved.maskUrl (set from req.body.mask_url), not by model id, so these tests send mask_url
-// directly on the request body (mirroring how presetResolver would set it for preset_id
+// Routed by resolved.maskUrl (set from req.body.mask_url), not by model id, so these tests send
+// mask_url directly on the request body (mirroring how presetResolver would set it for preset_id
 // 'magic-editor' — see the dedicated preset-resolution coverage in the "presets" describe below).
-describe('POST /api/generations — magic editor mask edit (inline)', () => {
+// D-C (09.2-13 gap closure): mask edits USED to run the OpenAI call synchronously in-request —
+// now the route only ENQUEUES the job onto openaiGenerationWorker.ts and returns 'processing'
+// immediately; the worker's behavior (generateImageEditWithMask call, CSAM scan, markCompleted/
+// markFailed/refund) is covered separately in openaiGenerationWorker.test.ts.
+describe('POST /api/generations — magic editor mask edit (async)', () => {
   const MASK_BODY = {
     prompt: 'remove the trash can',
     media_type: 'image',
@@ -604,34 +555,34 @@ describe('POST /api/generations — magic editor mask edit (inline)', () => {
     mask_url: 'https://r2.example.com/mask.png',
   };
 
-  it('calls generateImageEditWithMask, marks completed, never calls Replicate dispatch or attachPredictionId', async () => {
+  it('enqueues a magic-editor job and returns processing — never calls generateImageEditWithMask or Replicate dispatch in-request', async () => {
     (computeImageCostCredits as jest.Mock).mockReturnValue(5);
     (deductCredits as jest.Mock).mockResolvedValue(true);
     (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-mask-1' });
-    (generateImageEditWithMask as jest.Mock).mockResolvedValue('generations/gen-mask-1.png');
-    (scanForCsam as jest.Mock).mockResolvedValue({ flagged: false });
-    (markCompleted as jest.Mock).mockResolvedValue(true);
 
     const res = await request(app).post('/api/generations').send(MASK_BODY);
 
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ generation_id: 'gen-mask-1', status: 'completed' });
-    expect(generateImageEditWithMask).toHaveBeenCalledWith(
-      'https://r2.example.com/source.png',
-      'https://r2.example.com/mask.png',
-      'remove the trash can',
-      'gen-mask-1',
-    );
+    expect(res.body).toEqual({ generation_id: 'gen-mask-1', status: 'processing' });
+    expect(openaiGenerationQueue.add).toHaveBeenCalledWith('generate', {
+      kind: 'magic-editor',
+      generationId: 'gen-mask-1',
+      userId: 'test-user-id',
+      cost: 5,
+      sourceImage: 'https://r2.example.com/source.png',
+      maskUrl: 'https://r2.example.com/mask.png',
+      prompt: 'remove the trash can',
+    });
+    expect(generateImageEditWithMask).not.toHaveBeenCalled();
     expect(dispatchMock).not.toHaveBeenCalled();
     expect(attachPredictionId).not.toHaveBeenCalled();
-    expect(markCompleted).toHaveBeenCalledWith('gen-mask-1', 'generations/gen-mask-1.png');
   });
 
-  it('OpenAI mask-edit failure returns 502 with refund, never marks completed', async () => {
+  it('enqueue failure returns 502 with refund, never leaves the row pending unrefunded', async () => {
     (computeImageCostCredits as jest.Mock).mockReturnValue(5);
     (deductCredits as jest.Mock).mockResolvedValue(true);
-    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-mask-fail' });
-    (generateImageEditWithMask as jest.Mock).mockRejectedValue(new Error('OpenAI 429 rate limit'));
+    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-mask-enqueue-fail' });
+    (openaiGenerationQueue.add as jest.Mock).mockRejectedValueOnce(new Error('Redis unreachable'));
     (markFailed as jest.Mock).mockResolvedValue(true);
     (refundCredits as jest.Mock).mockResolvedValue(undefined);
 
@@ -639,61 +590,17 @@ describe('POST /api/generations — magic editor mask edit (inline)', () => {
 
     expect(res.status).toBe(502);
     expect(res.body.error).toContain('Credits have been refunded');
-    expect(markFailed).toHaveBeenCalledWith('gen-mask-fail', 'generic_error');
+    expect(markFailed).toHaveBeenCalledWith('gen-mask-enqueue-fail', 'generic_error');
     expect(refundCredits).toHaveBeenCalledWith(
       'test-user-id',
       5,
-      'dispatch-failure-gen-mask-fail',
+      'dispatch-failure-gen-mask-enqueue-fail',
     );
-    expect(markCompleted).not.toHaveBeenCalled();
+    expect(generateImageEditWithMask).not.toHaveBeenCalled();
     expect(dispatchMock).not.toHaveBeenCalled();
   });
 
-  it('CSAM scan flagged: quarantines and refunds without exposing URL', async () => {
-    (computeImageCostCredits as jest.Mock).mockReturnValue(5);
-    (deductCredits as jest.Mock).mockResolvedValue(true);
-    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-mask-csam' });
-    (generateImageEditWithMask as jest.Mock).mockResolvedValue('generations/gen-mask-csam.png');
-    (scanForCsam as jest.Mock).mockResolvedValue({ flagged: true });
-    (markQuarantined as jest.Mock).mockResolvedValue(true);
-    (refundCredits as jest.Mock).mockResolvedValue(undefined);
-
-    const res = await request(app).post('/api/generations').send(MASK_BODY);
-
-    expect(res.status).toBe(200);
-    expect(res.body).toEqual({ generation_id: 'gen-mask-csam', status: 'quarantined' });
-    expect(markQuarantined).toHaveBeenCalledWith('gen-mask-csam');
-    expect(refundCredits).toHaveBeenCalledWith(
-      'test-user-id',
-      5,
-      'csam-quarantine-openai-gen-mask-csam',
-    );
-    expect(markCompleted).not.toHaveBeenCalled();
-  });
-
-  it('CSAM scan error queues hiveScanWorker retry, does NOT mark completed or quarantined', async () => {
-    (computeImageCostCredits as jest.Mock).mockReturnValue(5);
-    (deductCredits as jest.Mock).mockResolvedValue(true);
-    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-mask-hive-err' });
-    (generateImageEditWithMask as jest.Mock).mockResolvedValue('generations/gen-mask-hive-err.png');
-    (scanForCsam as jest.Mock).mockRejectedValue(new Error('Hive timeout'));
-
-    const res = await request(app).post('/api/generations').send(MASK_BODY);
-
-    expect(res.status).toBe(200);
-    expect(res.body).toEqual({ generation_id: 'gen-mask-hive-err', status: 'processing' });
-    expect(hiveScanQueue.add).toHaveBeenCalledWith('scan', {
-      generationId: 'gen-mask-hive-err',
-      r2Key: 'generations/gen-mask-hive-err.png',
-      userId: 'test-user-id',
-      costCredits: 5,
-      mediaType: 'image',
-    });
-    expect(markCompleted).not.toHaveBeenCalled();
-    expect(markQuarantined).not.toHaveBeenCalled();
-  });
-
-  it('insufficient credits for a mask edit returns 402 without calling OpenAI', async () => {
+  it('insufficient credits for a mask edit returns 402 without enqueueing', async () => {
     (computeImageCostCredits as jest.Mock).mockReturnValue(5);
     (deductCredits as jest.Mock).mockResolvedValue(false);
 
@@ -701,6 +608,7 @@ describe('POST /api/generations — magic editor mask edit (inline)', () => {
 
     expect(res.status).toBe(402);
     expect(res.body.code).toBe('INSUFFICIENT_CREDITS');
+    expect(openaiGenerationQueue.add).not.toHaveBeenCalled();
     expect(generateImageEditWithMask).not.toHaveBeenCalled();
     expect(dispatchMock).not.toHaveBeenCalled();
   });
@@ -717,6 +625,7 @@ describe('POST /api/generations — magic editor mask edit (inline)', () => {
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ generation_id: 'gen-no-mask', status: 'processing' });
+    expect(openaiGenerationQueue.add).not.toHaveBeenCalled();
     expect(generateImageEditWithMask).not.toHaveBeenCalled();
     expect(dispatchMock).toHaveBeenCalledTimes(1);
   });
@@ -1320,7 +1229,7 @@ describe('POST /api/generations — presets', () => {
 
   // ─── Magic Editor (09.2-08) — mask_upload_id resolution (T-09.2-17: ownership-scoped) ───
   describe('magic-editor: mask_upload_id resolution', () => {
-    it('resolves source image + mask to presigned URLs, passes client text as prompt, dispatches inline', async () => {
+    it('resolves source image + mask to presigned URLs, passes client text as prompt, enqueues async magic-editor job', async () => {
       mockUploadRowsSequence(
         [{ id: 'upload-source', r2_key: 'uploads/test-user-id/source.jpg' }],
         [{ id: 'upload-mask', r2_key: 'uploads/test-user-id/mask.png' }],
@@ -1328,9 +1237,6 @@ describe('POST /api/generations — presets', () => {
       (computeImageCostCredits as jest.Mock).mockReturnValue(5);
       (deductCredits as jest.Mock).mockResolvedValue(true);
       (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-magic-1' });
-      (generateImageEditWithMask as jest.Mock).mockResolvedValue('generations/gen-magic-1.png');
-      (scanForCsam as jest.Mock).mockResolvedValue({ flagged: false });
-      (markCompleted as jest.Mock).mockResolvedValue(true);
 
       const res = await request(app).post('/api/generations').send({
         preset_id: 'magic-editor',
@@ -1340,17 +1246,21 @@ describe('POST /api/generations — presets', () => {
       });
 
       expect(res.status).toBe(200);
-      expect(res.body).toEqual({ generation_id: 'gen-magic-1', status: 'completed' });
+      expect(res.body).toEqual({ generation_id: 'gen-magic-1', status: 'processing' });
       expect(computeImageCostCredits).toHaveBeenCalledWith('openai/gpt-image-2-medium');
-      expect(generateImageEditWithMask).toHaveBeenCalledWith(
-        'https://r2.example.com/signed/uploads/test-user-id/source.jpg',
-        'https://r2.example.com/signed/uploads/test-user-id/mask.png',
-        'make the sky purple',
-        'gen-magic-1',
-      );
+      // The resolved (presigned) source + mask URLs and trimmed client text flow into the job payload.
+      expect(openaiGenerationQueue.add).toHaveBeenCalledWith('generate', {
+        kind: 'magic-editor',
+        generationId: 'gen-magic-1',
+        userId: 'test-user-id',
+        cost: 5,
+        sourceImage: 'https://r2.example.com/signed/uploads/test-user-id/source.jpg',
+        maskUrl: 'https://r2.example.com/signed/uploads/test-user-id/mask.png',
+        prompt: 'make the sky purple',
+      });
+      expect(generateImageEditWithMask).not.toHaveBeenCalled();
       expect(dispatchMock).not.toHaveBeenCalled();
       expect(attachPredictionId).not.toHaveBeenCalled();
-      expect(markCompleted).toHaveBeenCalledWith('gen-magic-1', 'generations/gen-magic-1.png');
     });
 
     it('returns 400 INVALID_PRESET_INPUT when mask_upload_id is missing', async () => {

@@ -26,8 +26,6 @@ import {
   getGenerationById,
   softDeleteGeneration,
   setGenerationFavorite,
-  markCompleted,
-  markQuarantined,
   SUPPORTED_MODELS,
   MODEL_RESOLUTIONS,
   SUPPORTED_IMAGE_MODELS,
@@ -43,12 +41,8 @@ import { ReplicateProvider } from '../services/providers/ReplicateProvider';
 import { refundCredits } from '../services/creditService';
 import { classifyFailureReason, markFailed } from '../services/generationService';
 import { getGenerationPresignedUrl, getUploadPresignedUrl } from '../services/archivalService';
-import { generateImageEditWithMask, generateFaceswap } from '../services/openaiImageService';
-import { deleteRawFaceUploads } from '../services/uploadCleanup';
-import type { GenerationByPredictionRow } from '../services/generationService';
-import { scanForCsam } from '../services/hiveService';
-import { hiveScanQueue } from '../queue/hiveScanWorker';
-import { getReplicateWebhookUrl, config } from '../config';
+import { openaiGenerationQueue } from '../queue/openaiGenerationQueue';
+import { getReplicateWebhookUrl } from '../config';
 import type { GenerationInput } from '../services/providers/ModelProvider';
 import { db } from '../db/client';
 import { referenceUploads } from '../db/schema';
@@ -600,108 +594,64 @@ generationsRouter.post('/', promptModerationMiddleware, presetResolver, prepareC
       media_type: resolved.mediaType,
     });
 
-    // Magic Editor (SC4, 09.2-08): OpenAI-direct inline mask edit — the FIRST live consumer of
-    // the inline (synchronous, no-webhook) OpenAI path. Bypasses ReplicateProvider.dispatch AND
-    // attachPredictionId entirely; the row was created 'pending' above and is completed
-    // in-request (RESEARCH Pitfall 6: never leave it 'pending' — the reaper reaps pending >5min).
-    // Only mask edits take this branch — plain gpt-image-2 presets (hairstyle/anime/polaroid/
-    // clothes-swap) have no resolved.maskUrl and fall through to the normal Replicate dispatch
-    // below, unchanged.
+    // Magic Editor (SC4, 09.2-08): OpenAI-direct mask edit. D-C (gap closure, 09.2-13): this used
+    // to run the OpenAI call SYNCHRONOUSLY in-request — gpt-image-2 edits take ~47s, well past
+    // the client's HTTP timeout, so the app showed "couldn't complete" even though the backend
+    // succeeded. Now the row is created 'pending' above and this ENQUEUES the OpenAI work onto
+    // openaiGenerationWorker.ts (background) and returns 'processing' immediately, exactly like
+    // the video dispatch path below — the client polls via the existing GET /api/generations
+    // machinery. Only mask edits take this branch — plain gpt-image-2 presets (hairstyle/anime/
+    // polaroid/clothes-swap) have no resolved.maskUrl and fall through to the normal Replicate
+    // dispatch below, unchanged.
     if (resolved.maskUrl && resolved.mediaType === 'image') {
-      let r2Key: string;
       try {
-        r2Key = await generateImageEditWithMask(
-          resolved.referenceImages![0], resolved.maskUrl, resolved.prompt, generationId,
-        );
+        await openaiGenerationQueue.add('generate', {
+          kind: 'magic-editor',
+          generationId,
+          userId: req.user.dbUserId,
+          cost: resolved.cost,
+          sourceImage: resolved.referenceImages![0]!,
+          maskUrl: resolved.maskUrl,
+          prompt: resolved.prompt,
+        });
       } catch (err) {
-        const errMsg = err instanceof Error ? err.message : String(err);
-        console.error(`[generations] Magic Editor inline dispatch failed: ${errMsg}`);
-        await markFailed(generationId, classifyFailureReason(errMsg));
+        console.error(`[generations] Failed to enqueue Magic Editor job for ${generationId}:`, err);
+        await markFailed(generationId, 'generic_error');
         await refundCredits(req.user.dbUserId, resolved.cost, `dispatch-failure-${generationId}`);
         res.status(502).json({ error: 'Edit service unavailable. Credits have been refunded.' });
         return;
       }
 
-      // CSAM scan (only when enabled) — mirrors the webhook success path exactly (routes/webhooks/replicate.ts).
-      if (config.hiveScanEnabled) {
-        try {
-          const { flagged } = await scanForCsam(r2Key);
-          if (flagged) {
-            await markQuarantined(generationId);
-            await refundCredits(req.user.dbUserId, resolved.cost, `csam-quarantine-openai-${generationId}`);
-            res.status(200).json({ generation_id: generationId, status: 'quarantined' });
-            return;
-          }
-        } catch (hiveErr) {
-          console.error('[generations] Hive scan error — queuing retry:', hiveErr);
-          await hiveScanQueue.add('scan', {
-            generationId,
-            r2Key,
-            userId: req.user.dbUserId,
-            costCredits: resolved.cost,
-            mediaType: 'image',
-          });
-          res.status(200).json({ generation_id: generationId, status: 'processing' });
-          return;
-        }
-      }
-
-      await markCompleted(generationId, r2Key);
-      res.status(200).json({ generation_id: generationId, status: 'completed' });
+      res.status(200).json({ generation_id: generationId, status: 'processing' });
       return;
     }
 
-    // Faceswap (09.2-12): re-pointed from the now-dead easel/advanced-face-swap (404 on
-    // Replicate) to the SECOND inline (synchronous, no-webhook) OpenAI consumer — gpt-image-2's
-    // two-image edit. Bypasses ReplicateProvider.dispatch AND attachPredictionId entirely, same
-    // shape as the Magic Editor branch above.
+    // Faceswap (09.2-12/09.2-13): OpenAI-direct two-image edit (gpt-image-2), re-pointed from the
+    // now-dead easel/advanced-face-swap (404 on Replicate). D-C (gap closure, 09.2-13): same async
+    // conversion as Magic Editor above — the row is created 'pending' above and this ENQUEUES the
+    // OpenAI work onto openaiGenerationWorker.ts (background) and returns 'processing'
+    // immediately. D-E: the raw uploaded face is NO LONGER deleted here — it's retained under the
+    // standard 24h uploadReaperWorker so Remix can prefill it (the worker never calls
+    // deleteRawFaceUploads either; see openaiGenerationWorker.ts).
     if (resolved.mediaType === 'faceswap') {
-      let r2Key: string;
       try {
-        r2Key = await generateFaceswap(resolved.targetImage!, resolved.swapImage!, generationId);
+        await openaiGenerationQueue.add('generate', {
+          kind: 'faceswap',
+          generationId,
+          userId: req.user.dbUserId,
+          cost: resolved.cost,
+          targetImage: resolved.targetImage!,
+          faceImage: resolved.swapImage!,
+        });
       } catch (err) {
-        const errMsg = err instanceof Error ? err.message : String(err);
-        console.error(`[generations] Faceswap inline dispatch failed: ${errMsg}`);
-        await markFailed(generationId, classifyFailureReason(errMsg));
+        console.error(`[generations] Failed to enqueue faceswap job for ${generationId}:`, err);
+        await markFailed(generationId, 'generic_error');
         await refundCredits(req.user.dbUserId, resolved.cost, `dispatch-failure-${generationId}`);
         res.status(502).json({ error: 'Faceswap service unavailable. Credits have been refunded.' });
         return;
       }
 
-      // CSAM scan (only when enabled) — mirrors the Magic Editor inline branch + webhook success path.
-      if (config.hiveScanEnabled) {
-        try {
-          const { flagged } = await scanForCsam(r2Key);
-          if (flagged) {
-            await markQuarantined(generationId);
-            await refundCredits(req.user.dbUserId, resolved.cost, `csam-quarantine-openai-${generationId}`);
-            res.status(200).json({ generation_id: generationId, status: 'quarantined' });
-            return;
-          }
-        } catch (hiveErr) {
-          console.error('[generations] Hive scan error — queuing retry:', hiveErr);
-          await hiveScanQueue.add('scan', {
-            generationId,
-            r2Key,
-            userId: req.user.dbUserId,
-            costCredits: resolved.cost,
-            mediaType: 'image',
-          });
-          res.status(200).json({ generation_id: generationId, status: 'processing' });
-          return;
-        }
-      }
-
-      await markCompleted(generationId, r2Key);
-      // SC1: raw uploaded face must still be reaped even though this completed inline (no
-      // webhook) — deleteRawFaceUploads is a shared helper (also called from the webhook success
-      // path) that only reaps face-input presets; best-effort, must never fail the response.
-      try {
-        await deleteRawFaceUploads({ media_type: resolved.mediaType, params: rowParams } as GenerationByPredictionRow);
-      } catch (e) {
-        console.error('[generations] inline faceswap raw-face cleanup failed:', e);
-      }
-      res.status(200).json({ generation_id: generationId, status: 'completed' });
+      res.status(200).json({ generation_id: generationId, status: 'processing' });
       return;
     }
 
