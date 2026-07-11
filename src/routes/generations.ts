@@ -18,6 +18,8 @@ import {
   computeUpscalerCost,
   computeImageUpscaleCost,
   computeGrokImagineCost,
+  computeHappyHorseCost,
+  resolveHappyHorseDuration,
   computeCharacterReplaceCost,
   computeFaceswapCost,
   createGeneration,
@@ -33,6 +35,7 @@ import {
   SUPPORTED_UPSCALER_MODELS,
   SUPPORTED_IMAGE_UPSCALE_MODELS,
   SUPPORTED_GROK_MODELS,
+  SUPPORTED_HAPPYHORSE_MODELS,
   SUPPORTED_CHARACTER_REPLACE_MODELS,
   SUPPORTED_FACESWAP_MODELS,
   type SupportedModel,
@@ -441,6 +444,50 @@ function prepareCost(req: Request, res: Response, next: NextFunction): void {
       audioEnabled: true, // always on — Grok has no audio toggle
       cost,
       referenceImages: [refImages[0]],
+    };
+    next();
+    return;
+  }
+
+  // Alibaba HappyHorse 1.1 — text-to-video (0 images) OR single-image image-to-video (1 image).
+  // Per-resolution pricing, native always-on audio (no toggle), duration 3–15. Uses an `images`
+  // array (no [ImageN] token injection). v1: reject 2+ images (2–9 reference-to-video deferred).
+  if (model && (SUPPORTED_HAPPYHORSE_MODELS as readonly string[]).includes(model)) {
+    const refImages: string[] = Array.isArray(reference_images)
+      ? reference_images.filter((u: unknown) => typeof u === 'string')
+      : [];
+    if (refImages.length > 1) {
+      res.status(400).json({ error: 'This model accepts at most one reference image in v1.', code: 'INVALID_INPUT' });
+      return;
+    }
+    const validResolutions = MODEL_RESOLUTIONS[model];
+    if (!validResolutions?.includes(resolution)) {
+      res.status(400).json({ error: `resolution must be one of: ${validResolutions?.join(', ')}`, code: 'INVALID_RESOLUTION' });
+      return;
+    }
+    if (aspect_ratio !== undefined && !VALID_VIDEO_ASPECT_RATIOS.includes(aspect_ratio)) {
+      res.status(400).json({ error: `aspect_ratio must be one of: ${VALID_VIDEO_ASPECT_RATIOS.join(', ')}`, code: 'INVALID_ASPECT_RATIO' });
+      return;
+    }
+    let durationSeconds: number;
+    try {
+      durationSeconds = resolveHappyHorseDuration(duration);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message, code: 'INVALID_DURATION' });
+      return;
+    }
+    const cost = computeHappyHorseCost(durationSeconds, resolution);
+    req.body.cost_credits = cost;
+    req._resolved = {
+      prompt: prompt as string,
+      model,
+      mediaType: 'video',
+      durationSeconds,
+      resolution,
+      aspectRatio: aspect_ratio ?? '16:9',
+      audioEnabled: true, // native audio baked in — no toggle
+      cost,
+      referenceImages: refImages.length > 0 ? [refImages[0]] : undefined,
     };
     next();
     return;

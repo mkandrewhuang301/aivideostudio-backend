@@ -75,6 +75,17 @@ export class ReplicateProvider implements ModelProvider {
         resolution: input.resolution,
         aspect_ratio: input.aspectRatio,
       };
+    } else if (input.model === 'alibaba/happyhorse-1.1') {
+      // HappyHorse 1.1: text-to-video (empty images array) OR image-to-video (single first-frame
+      // image). Uses an `images` array field (NOT Seedance's reference_images + [ImageN] tokens).
+      // Native audio + lip-sync is baked in — no audio field exists, so none is sent.
+      replicateInput = {
+        prompt: input.prompt,
+        images: input.referenceImages ?? [],
+        duration: input.durationSeconds,
+        resolution: input.resolution,
+        aspect_ratio: input.aspectRatio,
+      };
     } else {
       // Video model input (CLAUDE.md Rule 7: durationSeconds never -1)
       replicateInput = {

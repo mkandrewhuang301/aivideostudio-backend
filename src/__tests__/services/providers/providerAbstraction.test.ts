@@ -179,6 +179,61 @@ describe('ReplicateProvider.dispatch — xAI Grok Imagine Video 1.5', () => {
   });
 });
 
+describe('ReplicateProvider.dispatch — Alibaba HappyHorse 1.1', () => {
+  beforeEach(() => {
+    mockCreate.mockReset();
+    mockGet.mockReset();
+  });
+
+  it('text-to-video sends an empty images array and no audio/token keys', async () => {
+    mockCreate.mockResolvedValue({ id: 'pred-hh-1' });
+
+    const provider = new ReplicateProvider();
+    await provider.dispatch(
+      {
+        prompt: 'a chef plating a dish, warm kitchen light',
+        model: 'alibaba/happyhorse-1.1',
+        mediaType: 'video',
+        durationSeconds: 5,
+        resolution: '1080p',
+        aspectRatio: '16:9',
+        audioEnabled: true,
+      },
+      'https://example.com/webhooks/replicate',
+    );
+
+    const callArgs = mockCreate.mock.calls[0][0];
+    expect(callArgs.model).toBe('alibaba/happyhorse-1.1');
+    expect(callArgs.input.images).toEqual([]);
+    expect(callArgs.input.duration).toBe(5);
+    expect(callArgs.input.resolution).toBe('1080p');
+    expect(callArgs.input.generate_audio).toBeUndefined();
+    expect(callArgs.input.reference_images).toBeUndefined();
+  });
+
+  it('image-to-video puts the single reference image into the images array', async () => {
+    mockCreate.mockResolvedValue({ id: 'pred-hh-2' });
+
+    const provider = new ReplicateProvider();
+    await provider.dispatch(
+      {
+        prompt: 'gentle push-in, subtle motion',
+        model: 'alibaba/happyhorse-1.1',
+        mediaType: 'video',
+        durationSeconds: 6,
+        resolution: '720p',
+        aspectRatio: '9:16',
+        audioEnabled: true,
+        referenceImages: ['https://example.com/first-frame.png'],
+      },
+      'https://example.com/webhooks/replicate',
+    );
+
+    const callArgs = mockCreate.mock.calls[0][0];
+    expect(callArgs.input.images).toEqual(['https://example.com/first-frame.png']);
+  });
+});
+
 describe('ReplicateProvider.dispatch — Recraft Crisp Upscale (Enhancer image path)', () => {
   beforeEach(() => {
     mockCreate.mockReset();

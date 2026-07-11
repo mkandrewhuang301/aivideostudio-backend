@@ -28,6 +28,12 @@ export const MODEL_RATES: Record<string, { nonVideoIn: Record<string, number>; v
     nonVideoIn: { '480p': 0.08, '720p': 0.18, '1080p': 0.45, '4k': 1.00 },
     videoIn:    { '480p': 0.10, '720p': 0.22, '1080p': 0.55, '4k': 1.25 },
   },
+  // Alibaba HappyHorse 1.1 — per-resolution, same rate for t2v and i2v (input type doesn't
+  // change price). User-verified from the live Replicate page 2026-07-11: $0.14/s @720p, $0.18/s @1080p.
+  'alibaba/happyhorse-1.1': {
+    nonVideoIn: { '720p': 0.14, '1080p': 0.18 },
+    videoIn:    { '720p': 0.14, '1080p': 0.18 },
+  },
 };
 
 // Per-model supported resolutions — used for request validation in generations.ts
@@ -36,6 +42,7 @@ export const MODEL_RESOLUTIONS: Record<string, readonly string[]> = {
   'bytedance/seedance-2.0-mini':   ['480p', '720p'],
   'bytedance/seedance-2.0':        ['480p', '720p', '1080p', '4k'],
   'xai/grok-imagine-video-1.5':    ['480p', '720p'],
+  'alibaba/happyhorse-1.1':        ['720p', '1080p'],
 };
 
 // ─── xAI Grok Imagine Video 1.5 (image-to-video, synced audio) ────────────────
@@ -50,6 +57,33 @@ export type SupportedGrokModel = typeof SUPPORTED_GROK_MODELS[number];
 
 export function computeGrokImagineCost(durationSeconds: number): number {
   return Math.ceil(durationSeconds * GROK_IMAGINE_CREDITS_PER_SEC);
+}
+
+// ─── Alibaba HappyHorse 1.1 (text-to-video + image-to-video, native audio + lip-sync) ─────────
+// Premium general video model. Per-resolution per-second pricing (MODEL_RATES above): $0.14/s @720p,
+// $0.18/s @1080p — identical for t2v and i2v. Native audio + multilingual lip-sync is baked into the
+// same forward pass (no audio field in the Replicate schema) → treat as ALWAYS ON; never send an
+// audio toggle. Duration 3–15s (wider low bound than Seedance/Grok's 4s). v1 ships text-to-video
+// (0 images) + single-image image-to-video (1 first-frame image); 2–9 reference-to-video is DEFERRED
+// (it needs the "[Image N]" space-token injection, distinct from Seedance's "[ImageN]" logic).
+// Source: https://replicate.com/alibaba/happyhorse-1.1 (schema + pricing user-verified 2026-07-11).
+export const SUPPORTED_HAPPYHORSE_MODELS = ['alibaba/happyhorse-1.1'] as const;
+export type SupportedHappyHorseModel = typeof SUPPORTED_HAPPYHORSE_MODELS[number];
+
+export function computeHappyHorseCost(durationSeconds: number, resolution: string): number {
+  const rates = MODEL_RATES['alibaba/happyhorse-1.1'].nonVideoIn; // t2v == i2v rate
+  const ratePerSec = rates[resolution] ?? rates['720p'];
+  return Math.ceil(durationSeconds * ratePerSec * CENTS_PER_DOLLAR);
+}
+
+// HappyHorse accepts 3–15s (vs the shared 4–15s guard) — its own validator so the Seedance/Grok
+// path stays unchanged. CLAUDE.md Rule 7: resolves to explicit seconds, never -1.
+export function resolveHappyHorseDuration(requested: number | 'auto'): number {
+  if (requested === 'auto') return 5;
+  if (!Number.isInteger(requested) || requested < 3 || requested > 15) {
+    throw new Error('duration must be an integer between 3 and 15 seconds');
+  }
+  return requested;
 }
 
 export function resolveDurationSeconds(requested: number | 'auto'): number {

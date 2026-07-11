@@ -19,6 +19,8 @@ import {
   computeImageUpscaleCost,
   computeCharacterReplaceCost,
   computeFaceswapCost,
+  computeHappyHorseCost,
+  resolveHappyHorseDuration,
   SUPPORTED_IMAGE_UPSCALE_MODELS,
   SUPPORTED_CHARACTER_REPLACE_MODELS,
   SUPPORTED_FACESWAP_MODELS,
@@ -103,6 +105,36 @@ describe('resolveDurationSeconds', () => {
 
   it('throws for non-integer durations', () => {
     expect(() => resolveDurationSeconds(7.5)).toThrow(/between 4 and 15/);
+  });
+});
+
+// ─── HappyHorse 1.1 cost + duration (cents rule, 3–15s bound) ─────────────────
+
+describe('computeHappyHorseCost + resolveHappyHorseDuration', () => {
+  it('computes exact cost at 720p: ceil(5 * 0.14 * 100) = 70', () => {
+    expect(computeHappyHorseCost(5, '720p')).toBe(70);
+  });
+
+  it('computes exact cost at 1080p: ceil(5 * 0.18 * 100) = 90', () => {
+    expect(computeHappyHorseCost(5, '1080p')).toBe(90);
+  });
+
+  it('falls back to the 720p rate for an unknown resolution', () => {
+    expect(computeHappyHorseCost(5, '4k')).toBe(computeHappyHorseCost(5, '720p'));
+  });
+
+  it('accepts 3s (wider low bound than the shared 4s guard)', () => {
+    expect(resolveHappyHorseDuration(3)).toBe(3);
+  });
+
+  it('returns 5 for "auto"', () => {
+    expect(resolveHappyHorseDuration('auto')).toBe(5);
+  });
+
+  it('throws below 3 or above 15, and for non-integers', () => {
+    expect(() => resolveHappyHorseDuration(2)).toThrow(/between 3 and 15/);
+    expect(() => resolveHappyHorseDuration(16)).toThrow(/between 3 and 15/);
+    expect(() => resolveHappyHorseDuration(4.5)).toThrow(/between 3 and 15/);
   });
 });
 

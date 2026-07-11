@@ -59,6 +59,8 @@ jest.mock('../../services/generationService', () => ({
   computeUpscalerCost: jest.fn(),
   computeImageUpscaleCost: jest.fn(),
   computeGrokImagineCost: jest.fn(),
+  computeHappyHorseCost: jest.fn(),
+  resolveHappyHorseDuration: jest.fn(),
   computeFaceswapCost: jest.fn(),
   createGeneration: jest.fn(),
   attachPredictionId: jest.fn(),
@@ -75,12 +77,14 @@ jest.mock('../../services/generationService', () => ({
     'bytedance/seedance-2.0-mini': ['480p', '720p'],
     'bytedance/seedance-2.0':      ['480p', '720p', '1080p', '4k'],
     'xai/grok-imagine-video-1.5':  ['480p', '720p'],
+    'alibaba/happyhorse-1.1':      ['720p', '1080p'],
   },
   SUPPORTED_IMAGE_MODELS: ['openai/gpt-image-2-high', 'openai/gpt-image-2-medium', 'openai/gpt-image-2-low', 'openai/gpt-image-2'],
   SUPPORTED_AVATAR_MODELS: ['bytedance/dreamactor-m2.0'],
   SUPPORTED_UPSCALER_MODELS: ['bytedance/video-upscaler'],
   SUPPORTED_IMAGE_UPSCALE_MODELS: ['recraft-ai/recraft-crisp-upscale'],
   SUPPORTED_GROK_MODELS: ['xai/grok-imagine-video-1.5'],
+  SUPPORTED_HAPPYHORSE_MODELS: ['alibaba/happyhorse-1.1'],
   SUPPORTED_FACESWAP_MODELS: ['openai/gpt-image-2-medium'],
   classifyFailureReason: jest.requireActual('../../services/generationService').classifyFailureReason,
 }));
@@ -150,6 +154,8 @@ import {
   computeUpscalerCost,
   computeImageUpscaleCost,
   computeGrokImagineCost,
+  computeHappyHorseCost,
+  resolveHappyHorseDuration,
   computeFaceswapCost,
   createGeneration,
   attachPredictionId,
@@ -321,6 +327,79 @@ describe('POST /api/generations — Grok Imagine (image-to-video)', () => {
     const res = await request(app)
       .post('/api/generations')
       .send({ ...GROK_BODY, resolution: '1080p' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_RESOLUTION');
+    expect(dispatchMock).not.toHaveBeenCalled();
+  });
+});
+
+// ─── POST /api/generations — Alibaba HappyHorse 1.1 ──────────────────────────
+
+describe('POST /api/generations — HappyHorse 1.1 (t2v + i2v)', () => {
+  const HH_BODY = {
+    prompt: 'a chef plating a dish, warm kitchen light, gentle push-in',
+    model: 'alibaba/happyhorse-1.1',
+    duration: 5,
+    resolution: '720p' as const,
+    aspect_ratio: '16:9',
+  };
+
+  it('dispatches text-to-video (no images) via computeHappyHorseCost and returns 200', async () => {
+    (resolveHappyHorseDuration as jest.Mock).mockReturnValue(5);
+    (computeHappyHorseCost as jest.Mock).mockReturnValue(70);
+    (deductCredits as jest.Mock).mockResolvedValue(true);
+    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-hh-1' });
+    dispatchMock.mockResolvedValue({ providerPredictionId: 'pred-hh-1' });
+    (attachPredictionId as jest.Mock).mockResolvedValue(undefined);
+
+    const res = await request(app).post('/api/generations').send(HH_BODY);
+
+    expect(res.status).toBe(200);
+    expect(computeHappyHorseCost).toHaveBeenCalledWith(5, '720p');
+    expect(computeCostCredits).not.toHaveBeenCalled();
+    expect(createGeneration).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'pending', cost_credits: 70, media_type: 'video' }),
+    );
+    expect(deductCredits).toHaveBeenCalledWith('test-user-id', 70);
+
+    const dispatchArg = dispatchMock.mock.calls[0][0];
+    expect(dispatchArg.referenceImages).toBeUndefined(); // t2v — no image slot
+    expect(dispatchArg.audioEnabled).toBe(true); // native audio always on
+  });
+
+  it('dispatches single-image image-to-video (1 reference image) and returns 200', async () => {
+    (resolveHappyHorseDuration as jest.Mock).mockReturnValue(5);
+    (computeHappyHorseCost as jest.Mock).mockReturnValue(70);
+    (deductCredits as jest.Mock).mockResolvedValue(true);
+    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-hh-2' });
+    dispatchMock.mockResolvedValue({ providerPredictionId: 'pred-hh-2' });
+    (attachPredictionId as jest.Mock).mockResolvedValue(undefined);
+
+    const res = await request(app)
+      .post('/api/generations')
+      .send({ ...HH_BODY, reference_images: ['https://example.com/first-frame.png'] });
+
+    expect(res.status).toBe(200);
+    const dispatchArg = dispatchMock.mock.calls[0][0];
+    expect(dispatchArg.referenceImages).toEqual(['https://example.com/first-frame.png']);
+  });
+
+  it('returns 400 INVALID_INPUT when 2+ reference images are sent (r2v deferred), without dispatch', async () => {
+    const res = await request(app)
+      .post('/api/generations')
+      .send({ ...HH_BODY, reference_images: ['https://example.com/a.png', 'https://example.com/b.png'] });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_INPUT');
+    expect(dispatchMock).not.toHaveBeenCalled();
+    expect(createGeneration).not.toHaveBeenCalled();
+  });
+
+  it('returns 400 INVALID_RESOLUTION for an unsupported resolution (e.g. 480p)', async () => {
+    const res = await request(app)
+      .post('/api/generations')
+      .send({ ...HH_BODY, resolution: '480p' });
 
     expect(res.status).toBe(400);
     expect(res.body.code).toBe('INVALID_RESOLUTION');
