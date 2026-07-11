@@ -33,14 +33,20 @@ jest.mock('../../services/generationService', () => ({
 jest.mock('../../services/creditService', () => ({ refundCredits: jest.fn() }));
 jest.mock('../../services/apnsService', () => ({ sendGenerationComplete: jest.fn() }));
 jest.mock('../../db/client', () => ({ db: { execute: jest.fn() } }));
+// 09.3-02: real download/ffmpeg-spawn/R2-upload I/O lives in ffmpegProcessor.ts (the single seam
+// ffmpegWorker.ts calls through) — mocked here so this suite never touches a live ffmpeg binary,
+// network fetch, or R2 credentials. Per 09.3-01's SUMMARY, the Wave 0 scaffold deliberately did
+// NOT invent this mock path, leaving the internal shape to this plan.
+jest.mock('../../queue/ffmpegProcessor', () => ({ runFfmpegOp: jest.fn() }));
 
 import { markCompleted, markFailed } from '../../services/generationService';
 import { refundCredits } from '../../services/creditService';
 import { sendGenerationComplete } from '../../services/apnsService';
 import { db } from '../../db/client';
-// NOT YET BUILT — RED until 09.3-02. FFMPEG_ATTEMPTS mirrors HIVE_SCAN_ATTEMPTS's role: the
-// queue's defaultJobOptions.attempts, exported so this file's expectation and the queue config
-// can never silently drift apart (same regression guard as hiveScanWorker.test.ts).
+import { runFfmpegOp } from '../../queue/ffmpegProcessor';
+// FFMPEG_ATTEMPTS mirrors HIVE_SCAN_ATTEMPTS's role: the queue's defaultJobOptions.attempts,
+// exported so this file's expectation and the queue config can never silently drift apart (same
+// regression guard as hiveScanWorker.test.ts).
 import { processFfmpegJob, handleFfmpegFinalFailure, FFMPEG_ATTEMPTS } from '../../queue/ffmpegWorker';
 
 // Job payload shape per RESEARCH.md #1: { generationId, inputR2Keys[], audioR2Key?, op, userId,
@@ -62,6 +68,7 @@ beforeEach(() => {
   (markFailed as jest.Mock).mockResolvedValue(true);
   (refundCredits as jest.Mock).mockResolvedValue(undefined);
   (sendGenerationComplete as jest.Mock).mockResolvedValue(undefined);
+  (runFfmpegOp as jest.Mock).mockResolvedValue(`generations/${JOB_DATA.generationId}.mp4`);
 });
 
 describe('processFfmpegJob', () => {
