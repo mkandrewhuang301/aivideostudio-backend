@@ -46,6 +46,17 @@ const SEXUAL_CLASS_NAMES = new Set([
   'yes_sexual_intent',
 ]);
 
+// INPUT-scan NSFW classes — deliberately EXCLUDES yes_male_nudity. Hive's yes_male_nudity fires on
+// a bare male chest (shirtless), which the product allows (user policy 2026-07-11: "shirtless guy
+// is fine, naked men is no; bikini is fine, breasts out is no"). Bikinis already pass (not
+// yes_female_nudity), and actual naked/sexual imagery is still caught by sexual_activity/intent +
+// female_nudity. Kept separate from SEXUAL_CLASS_NAMES so the output CSAM scan is unaffected.
+const INPUT_NSFW_CLASS_NAMES = new Set([
+  'yes_female_nudity',
+  'yes_sexual_activity',
+  'yes_sexual_intent',
+]);
+
 function isFrameFlagged(classes: HiveClass[]): boolean {
   const classMap = new Map(classes.map((c) => [c.class_name, c.value]));
   const childPresent = (classMap.get('yes_child_present') ?? 0) >= CHILD_PRESENT_THRESHOLD;
@@ -110,7 +121,7 @@ export async function scanInputMedia(presignedUrl: string): Promise<{ blocked: b
   const threshold = config.hiveInputNsfwThreshold;
   const isNsfw = frames.some((frame) => {
     const classMap = new Map((frame.classes ?? []).map((c) => [c.class_name, c.value]));
-    return [...SEXUAL_CLASS_NAMES].some((name) => (classMap.get(name) ?? 0) >= threshold);
+    return [...INPUT_NSFW_CLASS_NAMES].some((name) => (classMap.get(name) ?? 0) >= threshold);
   });
   return isNsfw ? { blocked: true, reason: 'nsfw' } : { blocked: false };
 }
