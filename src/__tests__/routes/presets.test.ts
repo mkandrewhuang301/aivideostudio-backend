@@ -38,12 +38,15 @@ describe('presets registry config', () => {
     // 'try-on' was activated as the live 'clothes-swap' preset (09.1-11, supersedes the earlier
     // avatar-based AI Try-On concept — see 09.1-CONTEXT.md D-24 SUPERSEDED banner) and is no
     // longer SOON. 'faceswap' was activated as a live preset (09.2-07) and is also no longer SOON.
+    // 09.3 SC3/SC5: 'gorilla-vlogs' flips soon→live as the character-system proof (D-05) — RED
+    // until 09.3-05/06 ships the row; this is the regression guard for that flip.
     const soonIds = SERVER_PRESETS.filter((p) => p.status === 'soon').map((p) => p.preset_id);
     expect(soonIds).toEqual(
-      expect.arrayContaining(['cinema-studio', 'avatar-center', 'gorilla-vlogs', 'fruit-island']),
+      expect.arrayContaining(['cinema-studio', 'avatar-center', 'fruit-island']),
     );
     expect(soonIds).not.toContain('try-on');
     expect(soonIds).not.toContain('faceswap');
+    expect(soonIds).not.toContain('gorilla-vlogs');
   });
 
   it('CLIENT_PRESETS strips prompt_template from every row', () => {
@@ -51,6 +54,43 @@ describe('presets registry config', () => {
       expect(preset).not.toHaveProperty('prompt_template');
     }
     expect(JSON.stringify(CLIENT_PRESETS)).not.toContain('prompt_template');
+  });
+
+  // 09.3 Wave 0 (SC3): the character-system registry fields (D-03/D-05) are server-only, same
+  // strip rule as prompt_template — RED until 09.3-05/06 actually adds these fields to PresetDef
+  // (today they don't exist at all, so this trivially passes; it becomes a real regression guard
+  // the moment those fields land).
+  it('CLIENT_PRESETS strips the new 09.3 character-system server-only fields from every row (SC3)', () => {
+    for (const preset of CLIENT_PRESETS) {
+      expect(preset).not.toHaveProperty('character_asset');
+      expect(preset).not.toHaveProperty('dialogue_prompt_template');
+      expect(preset).not.toHaveProperty('script_expansion');
+    }
+    const serialized = JSON.stringify(CLIENT_PRESETS);
+    expect(serialized).not.toContain('character_asset');
+    expect(serialized).not.toContain('dialogue_prompt_template');
+    expect(serialized).not.toContain('script_expansion');
+    expect(serialized).not.toContain('driving_video_url');
+  });
+
+  // 09.3 Wave 0 (SC3/SC4/SC5): the first registry drop — gorilla vlogger (character system proof),
+  // viral motion pack (DreamActor bundled driving video), camera-move + VFX packs, and 4 image
+  // templates (Action Figure / 90s Yearbook / Pro Headshot / Restore Old Photo per CONTEXT D-06
+  // Claude's-discretion suggestion). RED until 09.3-05/06/07 land these rows as status:'live'.
+  it('includes the 09.3 first registry drop as live rows (SC3/SC4/SC5)', () => {
+    const liveIds = SERVER_PRESETS.filter((p) => p.status === 'live').map((p) => p.preset_id);
+    expect(liveIds).toEqual(
+      expect.arrayContaining([
+        'gorilla-vlogs',
+        'viral-motions',
+        'camera-moves',
+        'vfx-pack',
+        'action-figure',
+        'yearbook-90s',
+        'pro-headshot',
+        'restore-old-photo',
+      ]),
+    );
   });
 
   it('CLIENT_PRESETS has the same length as SERVER_PRESETS (config-driven — SC1)', () => {

@@ -459,6 +459,89 @@ describe('replicateWebhookRouter', () => {
     });
   });
 
+  describe('content-policy Grok fallback (09.3 SC2)', () => {
+    // D-02: Seedance content_policy block (E005 "flagged as sensitive") on an auto-picked model
+    // (no explicit user model choice) falls back to Grok 1.5 (the permissive real-face/IP i2v
+    // catch-all) instead of immediately failing+refunding. RED until 09.3-03 adds this sibling
+    // branch to the transient-retry block in webhooks/replicate.ts — today ANY non-transient
+    // failure (content_policy included) always hits markFailed+refundCredits with no fallback
+    // attempt, and there is no `model_explicitly_picked` signal read anywhere in this file yet.
+    const autoModelGeneration = {
+      id: 'gen-fallback-1',
+      user_id: 'u1',
+      status: 'processing',
+      cost_credits: 27,
+      media_type: 'video',
+      model: 'bytedance/seedance-2.0-mini',
+      prompt: 'a fictional gorilla vlogs about its day',
+      params: {
+        duration: 6,
+        resolution: '720p',
+        aspect_ratio: '9:16',
+        audio_enabled: true,
+        ref_upload_ids: [],
+        // Gap flagged in PATTERNS.md — no existing analog for this flag; grep clean today.
+        model_explicitly_picked: false,
+      },
+      retry_count: 0,
+    };
+
+    it('redispatches to Grok 1.5 on a content_policy failure when the model was auto-picked, and does NOT refund (RED until 09.3-03)', async () => {
+      (validateWebhook as jest.Mock).mockResolvedValue(true);
+      (getGenerationByPredictionId as jest.Mock).mockResolvedValue(autoModelGeneration);
+      dispatchMock.mockResolvedValue({ providerPredictionId: 'pred_grok_fallback_1' });
+
+      const res = await post({
+        id: 'pred_content_policy_1',
+        status: 'failed',
+        error: 'ModelError: The input or output was flagged as sensitive ... (E005)',
+      });
+
+      expect(res.status).toBe(200);
+      expect(dispatchMock).toHaveBeenCalledTimes(1);
+      expect(dispatchMock.mock.calls[0][0]).toMatchObject({ model: 'xai/grok-imagine-video-1.5' });
+      expect(reattachForRetry).toHaveBeenCalledWith('gen-fallback-1', 'pred_grok_fallback_1');
+      expect(markFailed).not.toHaveBeenCalled();
+      expect(refundCredits).not.toHaveBeenCalled();
+    });
+
+    it('does NOT fall back to Grok when the user explicitly picked the model — normal fail+refund path (regression guard)', async () => {
+      (validateWebhook as jest.Mock).mockResolvedValue(true);
+      (getGenerationByPredictionId as jest.Mock).mockResolvedValue({
+        ...autoModelGeneration,
+        id: 'gen-fallback-2',
+        params: { ...autoModelGeneration.params, model_explicitly_picked: true },
+      });
+
+      const res = await post({
+        id: 'pred_content_policy_2',
+        status: 'failed',
+        error: 'ModelError: The input or output was flagged as sensitive ... (E005)',
+      });
+
+      expect(res.status).toBe(200);
+      expect(dispatchMock).not.toHaveBeenCalled();
+      expect(markFailed).toHaveBeenCalledWith('gen-fallback-2', 'content_policy');
+      expect(refundCredits).toHaveBeenCalledWith('u1', 27, 'pred_content_policy_2');
+    });
+
+    it('transient ReadError still redispatches same-model (never Grok) — regression guard for the existing retry path', async () => {
+      (validateWebhook as jest.Mock).mockResolvedValue(true);
+      (getGenerationByPredictionId as jest.Mock).mockResolvedValue(autoModelGeneration);
+      dispatchMock.mockResolvedValue({ providerPredictionId: 'pred_transient_same_model' });
+
+      const res = await post({
+        id: 'pred_transient_fallback_check',
+        status: 'failed',
+        error: 'Prediction failed: Async prediction failed: ReadError:',
+      });
+
+      expect(res.status).toBe(200);
+      expect(dispatchMock.mock.calls[0][0]).toMatchObject({ model: 'bytedance/seedance-2.0-mini' });
+      expect(reattachForRetry).toHaveBeenCalledWith('gen-fallback-1', 'pred_transient_same_model');
+    });
+  });
+
   describe('SC1 — post-archive raw face upload deletion', () => {
     it('deletes the R2 object and reference_uploads row for a succeeded faceswap generation', async () => {
       (validateWebhook as jest.Mock).mockResolvedValue(true);
