@@ -62,6 +62,12 @@ export async function presetResolver(req: Request, res: Response, next: NextFunc
     return;
   }
 
+  // Captured BEFORE the OVERWRITE below clobbers req.body.prompt with the server template —
+  // magic-editor's branch (its 'image' case) needs the client's original free-text value, and
+  // reading req.body.prompt at that point would see expandTemplate()'s output instead (for
+  // magic-editor, the literal passthrough marker string '{prompt}', not real user text).
+  const rawClientPrompt = typeof req.body.prompt === 'string' ? req.body.prompt : '';
+
   try {
     // Style grid validation (e.g. hairstyle) — 400 if the sent style id isn't in the def.
     let styleLabel: string | undefined;
@@ -198,8 +204,7 @@ export async function presetResolver(req: Request, res: Response, next: NextFunc
           }
           req.body.mask_url = await getUploadPresignedUrl((maskRow as { r2_key: string }).r2_key);
 
-          const clientText = typeof req.body.text === 'string' ? req.body.text.trim() : '';
-          req.body.prompt = clientText;
+          req.body.prompt = rawClientPrompt.trim();
         }
         break;
       }

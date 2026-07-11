@@ -1308,7 +1308,13 @@ describe('POST /api/generations — presets', () => {
 
   // ─── Magic Editor (09.2-08) — mask_upload_id resolution (T-09.2-17: ownership-scoped) ───
   describe('magic-editor: mask_upload_id resolution', () => {
-    it('resolves source image + mask to presigned URLs, passes client text as prompt, enqueues async magic-editor job', async () => {
+    it('resolves source image + mask to presigned URLs, passes client prompt through, enqueues async magic-editor job', async () => {
+      // Regression test (2026-07-11): the iOS client sends the user's typed edit instructions as
+      // `prompt` (GenerationRequestBody's CodingKeys has no `text` key). presetResolver used to
+      // read `req.body.text` instead, which is never sent — every magic-editor submission was
+      // silently rejected with INVALID_PROMPT before createGeneration ever ran (confirmed: zero
+      // magic-editor rows existed in prod). This test previously sent `text:` here too, which
+      // matched the bug instead of the real client contract and masked it. Must send `prompt`.
       mockUploadRowsSequence(
         [{ id: 'upload-source', r2_key: 'uploads/test-user-id/source.jpg' }],
         [{ id: 'upload-mask', r2_key: 'uploads/test-user-id/mask.png' }],
@@ -1321,7 +1327,7 @@ describe('POST /api/generations — presets', () => {
         preset_id: 'magic-editor',
         preset_input_upload_ids: ['upload-source'],
         mask_upload_id: 'upload-mask',
-        text: '  make the sky purple  ',
+        prompt: '  make the sky purple  ',
       });
 
       expect(res.status).toBe(200);
