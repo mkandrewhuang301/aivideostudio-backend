@@ -452,6 +452,10 @@ function prepareCost(req: Request, res: Response, next: NextFunction): void {
   // Alibaba HappyHorse 1.1 — text-to-video (0 images) OR single-image image-to-video (1 image).
   // Per-resolution pricing, native always-on audio (no toggle), duration 3–15. Uses an `images`
   // array (no [ImageN] token injection). v1: reject 2+ images (2–9 reference-to-video deferred).
+  // NOTE: the model's README marks `prompt` OPTIONAL for i2v, but we INTENTIONALLY keep it required
+  // (via the shared media_type='video' prompt check above) — every generation must carry a prompt so
+  // the planned LLM prompt-interceptor has a consistent input to enhance. Do NOT relax this to match
+  // the README without also handling the empty-prompt case in the interceptor contract.
   if (model && (SUPPORTED_HAPPYHORSE_MODELS as readonly string[]).includes(model)) {
     const refImages: string[] = Array.isArray(reference_images)
       ? reference_images.filter((u: unknown) => typeof u === 'string')
