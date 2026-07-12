@@ -14,6 +14,7 @@ import { scheduleUploadReaper } from './queue/uploadReaperWorker';
 import { scheduleYearlyGrant } from './queue/yearlyGrantWorker';
 import './queue/hiveScanWorker';
 import './queue/openaiGenerationWorker';
+import './queue/chainGenerationWorker';
 import './queue/ffmpegWorker';
 import { banCheckMiddleware } from './middleware/banCheck';
 import { reportsRouter } from './routes/reports';
