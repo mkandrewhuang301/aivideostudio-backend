@@ -249,6 +249,17 @@ export async function attachPredictionId(generationId: string, predictionId: str
   `);
 }
 
+// D-04: jsonb merge onto generations.params — used by the ffmpeg mux worker to stamp
+// silent_master_r2_key / applied_audio_r2_key pointers after markCompleted, without a migration
+// (params is already jsonb; mirrors the ad-hoc `postprocess` field precedent, RESEARCH.md A4).
+export async function mergeGenerationParams(generationId: string, patch: Record<string, unknown>): Promise<void> {
+  await db.execute(sql`
+    UPDATE generations
+    SET params = COALESCE(params, '{}'::jsonb) || ${JSON.stringify(patch)}::jsonb
+    WHERE id = ${generationId}::uuid
+  `);
+}
+
 export async function markCompleted(generationId: string, r2Key: string): Promise<boolean> {
   // Accepts 'pending' in addition to 'processing' to support the OpenAI inline path,
   // where the generation completes in the same request without going through 'processing'.

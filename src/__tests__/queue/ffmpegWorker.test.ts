@@ -29,6 +29,7 @@ jest.mock('../../config', () => ({
 jest.mock('../../services/generationService', () => ({
   markCompleted: jest.fn(),
   markFailed: jest.fn(),
+  mergeGenerationParams: jest.fn(),
 }));
 jest.mock('../../services/creditService', () => ({ refundCredits: jest.fn() }));
 jest.mock('../../services/apnsService', () => ({ sendGenerationComplete: jest.fn() }));
@@ -39,7 +40,7 @@ jest.mock('../../db/client', () => ({ db: { execute: jest.fn() } }));
 // NOT invent this mock path, leaving the internal shape to this plan.
 jest.mock('../../queue/ffmpegProcessor', () => ({ runFfmpegOp: jest.fn() }));
 
-import { markCompleted, markFailed } from '../../services/generationService';
+import { markCompleted, markFailed, mergeGenerationParams } from '../../services/generationService';
 import { refundCredits } from '../../services/creditService';
 import { sendGenerationComplete } from '../../services/apnsService';
 import { db } from '../../db/client';
@@ -66,9 +67,13 @@ beforeEach(() => {
   (db.execute as jest.Mock).mockResolvedValue({ rows: [{ apns_device_token: 'token-abc' }] });
   (markCompleted as jest.Mock).mockResolvedValue(true);
   (markFailed as jest.Mock).mockResolvedValue(true);
+  (mergeGenerationParams as jest.Mock).mockResolvedValue(undefined);
   (refundCredits as jest.Mock).mockResolvedValue(undefined);
   (sendGenerationComplete as jest.Mock).mockResolvedValue(undefined);
-  (runFfmpegOp as jest.Mock).mockResolvedValue(`generations/${JOB_DATA.generationId}.mp4`);
+  (runFfmpegOp as jest.Mock).mockResolvedValue({
+    r2Key: `generations/${JOB_DATA.generationId}.mp4`,
+    masterR2Key: `generations/${JOB_DATA.generationId}.silent.mp4`,
+  });
 });
 
 describe('processFfmpegJob', () => {
@@ -78,6 +83,25 @@ describe('processFfmpegJob', () => {
     expect(markCompleted).toHaveBeenCalledWith(JOB_DATA.generationId, expect.any(String));
     expect(sendGenerationComplete).toHaveBeenCalledWith('token-abc', JOB_DATA.generationId, 'video');
     expect(refundCredits).not.toHaveBeenCalled();
+  });
+
+  it('mux success: stamps silent_master_r2_key + applied_audio_r2_key on the row (D-04)', async () => {
+    await processFfmpegJob(JOB_DATA);
+
+    expect(mergeGenerationParams).toHaveBeenCalledWith(JOB_DATA.generationId, {
+      silent_master_r2_key: `generations/${JOB_DATA.generationId}.silent.mp4`,
+      applied_audio_r2_key: JOB_DATA.audioR2Key,
+    });
+  });
+
+  it('concat success: does NOT stamp silent_master_r2_key (no single silent source)', async () => {
+    (runFfmpegOp as jest.Mock).mockResolvedValue({ r2Key: `generations/${JOB_DATA.generationId}.mp4` });
+    const concatJobData = { ...JOB_DATA, op: 'concat' as const, audioR2Key: undefined };
+
+    await processFfmpegJob(concatJobData);
+
+    expect(markCompleted).toHaveBeenCalledWith(concatJobData.generationId, expect.any(String));
+    expect(mergeGenerationParams).not.toHaveBeenCalled();
   });
 });
 

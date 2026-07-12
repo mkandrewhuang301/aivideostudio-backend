@@ -13,7 +13,7 @@
 import { Queue, Worker, Job } from 'bullmq';
 import { execFile } from 'child_process';
 import { config } from '../config';
-import { markCompleted, markFailed } from '../services/generationService';
+import { markCompleted, markFailed, mergeGenerationParams } from '../services/generationService';
 import { refundCredits } from '../services/creditService';
 import { sendGenerationComplete } from '../services/apnsService';
 import { db } from '../db/client';
@@ -76,10 +76,23 @@ if (config.nodeEnv !== 'test') {
 export async function processFfmpegJob(data: FfmpegJobData): Promise<void> {
   const { generationId, userId, mediaType } = data;
 
-  const r2Key = await runFfmpegOp(data);
+  const { r2Key, masterR2Key } = await runFfmpegOp(data);
 
   const completed = await markCompleted(generationId, r2Key);
   if (completed) {
+    // D-04: stamp the silent-master + applied-audio pointers on the row (mux only — concat has no
+    // single silent source, masterR2Key is undefined). Best-effort, like the APNs block below —
+    // never blocks or fails the job over a bookkeeping write.
+    if (masterR2Key) {
+      try {
+        await mergeGenerationParams(generationId, {
+          silent_master_r2_key: masterR2Key,
+          applied_audio_r2_key: data.audioR2Key ?? null,
+        });
+      } catch (paramsErr) {
+        console.error('[ffmpeg-postprocess] mergeGenerationParams failed (non-blocking):', paramsErr);
+      }
+    }
     try {
       const userRows = await db.execute(sql`SELECT apns_device_token FROM users WHERE id = ${userId}::uuid`);
       const token = (userRows.rows?.[0] as { apns_device_token: string | null } | undefined)?.apns_device_token;
