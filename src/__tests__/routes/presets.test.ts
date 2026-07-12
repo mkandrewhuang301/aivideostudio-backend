@@ -15,7 +15,7 @@ describe('presets registry config', () => {
     expect(typeof PRESETS_VERSION).toBe('number');
   });
 
-  it('includes all 21 live presets (7 original + AI Influencer D-23 + Clothes Swap 09.1-11 + Faceswap 09.2-07 + Magic Editor 09.2-08 + 09.3-06 8-row registry drop + 09.6-08 kbo-fan-cam/marlon-motion)', () => {
+  it('includes all 22 live presets (7 original + AI Influencer D-23 + Clothes Swap 09.1-11 + Faceswap 09.2-07 + Magic Editor 09.2-08 + 09.3-06 8-row registry drop + 09.6-08 kbo-fan-cam/marlon-motion + 09.6-06 you-vs-you)', () => {
     const liveIds = SERVER_PRESETS.filter((p) => p.status === 'live').map((p) => p.preset_id);
     expect(liveIds.sort()).toEqual(
       [
@@ -40,6 +40,7 @@ describe('presets registry config', () => {
         'restore-old-photo',
         'kbo-fan-cam',
         'marlon-motion',
+        'you-vs-you',
       ].sort(),
     );
   });
@@ -96,6 +97,21 @@ describe('presets registry config', () => {
     const serialized = JSON.stringify(CLIENT_PRESETS);
     expect(serialized).not.toContain('driver_video_asset');
     expect(serialized).not.toContain('assets/presets/marlon-motion/driver-v1.mp4');
+  });
+
+  // 09.6-06 (SC3/D-11, T-09.6-17): you-vs-you's `chain` descriptor (both keyframe prompts + the
+  // HappyHorse choreography prompt_template) is server-only IP and must never reach the client.
+  it('CLIENT_PRESETS strips chain from every row (T-09.6-17)', () => {
+    for (const preset of CLIENT_PRESETS) {
+      expect(preset).not.toHaveProperty('chain');
+    }
+    // Note: media_type:'chain' is a legitimate client-safe VALUE (the you-vs-you row's media
+    // type) — only the def.chain OBJECT (key) is server-only, so this asserts on its unique
+    // nested content rather than the substring "chain" (which also matches the media_type value).
+    const serialized = JSON.stringify(CLIENT_PRESETS);
+    expect(serialized).not.toContain('wan-video/wan-2.7-image');
+    expect(serialized).not.toContain('young-you under the spotlight');
+    expect(serialized).not.toContain('image-1 as the opening shot');
   });
 
   // 09.3-06: PresetSheetMeta.preparing_label is deliberately CLIENT-SAFE (unlike every other

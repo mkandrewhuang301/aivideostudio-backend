@@ -191,6 +191,44 @@ jest.mock('../../config/presets', () => {
       cost: { type: 'per_second', credits_per_sec: 5, max_seconds: 30 },
       tile: { poster_url: 'https://x.example/poster.jpg', loop_url: 'https://x.example/loop.mp4' },
     },
+    // 09.6-06: the REAL you-vs-you registry row (mirrors src/config/presets.ts's live shape —
+    // 2-prompt chain, 2 image slots (2nd optional)) — distinct from the earlier 09.6-04
+    // 'test-you-vs-you' single-slot fixture used to prove the generic resolver mechanism.
+    {
+      preset_id: 'you-vs-you',
+      title: 'You vs You',
+      section: 'video_effects',
+      sort_order: 10,
+      status: 'live',
+      media_type: 'chain',
+      model: 'alibaba/happyhorse-1.1',
+      chain: {
+        image_stage: {
+          model: 'wan-video/wan-2.7-image',
+          quality: 'high',
+          prompts: [
+            'opening keyframe: current-you walking into the dark arena',
+            'ending keyframe: young-you under the spotlight',
+          ],
+        },
+        animate_stage: {
+          model: 'alibaba/happyhorse-1.1',
+          resolution: '720p',
+          duration: 5,
+          aspect_ratio: '9:16',
+          prompt_template: 'image-1 is the opening walk-in, image-2 is the ending reveal',
+        },
+      },
+      input_schema: {
+        slots: [
+          { kind: 'image', label: 'Your photo', source: 'any' },
+          { kind: 'image', label: 'Another photo of you', source: 'any', optional: true },
+        ],
+      },
+      postprocess: { op: 'mux', audio_r2_key: 'assets/presets/you-vs-you/audio-v1.m4a' },
+      cost: { type: 'per_second', credits_per_sec: 14, max_seconds: 15 },
+      tile: { poster_url: 'https://x.example/poster.jpg', loop_url: 'https://x.example/loop.mp4' },
+    },
   ];
   return { SERVER_PRESETS: FIXTURE_PRESETS };
 });
@@ -438,6 +476,49 @@ describe('presetResolver — 09.6-08 marlon-motion single-shot (character_replac
     expect(req.body.character_replace_video).toBe('assets/presets/marlon-motion/driver-v1.mp4');
     expect(req.body.character_replace_image).toBe('https://r2.example.com/signed/uploads/user-1/marlon-photo.jpg');
     expect(req._preset?.postprocess?.op).toBe('mux');
+    expect(next).toHaveBeenCalled();
+  });
+});
+
+describe('presetResolver — 09.6-06 you-vs-you live row (chain, 2-prompt/2-slot)', () => {
+  it('resolves both photo slots into chain_input_images and forwards __chain_def with the HappyHorse animate model', async () => {
+    mockUploadRows([
+      { id: 'upload-photo-1', r2_key: 'uploads/user-1/uvu-1.jpg' },
+      { id: 'upload-photo-2', r2_key: 'uploads/user-1/uvu-2.jpg' },
+    ]);
+    const req = makeReq({
+      preset_id: 'you-vs-you',
+      preset_input_upload_ids: ['upload-photo-1', 'upload-photo-2'],
+    });
+    const res = makeRes();
+    const next = jest.fn();
+
+    await presetResolver(req, res, next);
+
+    expect(req.body.media_type).toBe('chain');
+    expect(req.body.chain_input_images).toEqual([
+      'https://r2.example.com/signed/uploads/user-1/uvu-1.jpg',
+      'https://r2.example.com/signed/uploads/user-1/uvu-2.jpg',
+    ]);
+    expect(req.body.__chain_def.image_stage.prompts).toHaveLength(2);
+    expect(req.body.__chain_def.animate_stage.model).toBe('alibaba/happyhorse-1.1');
+    expect(req._preset?.postprocess?.op).toBe('mux');
+    expect(next).toHaveBeenCalled();
+  });
+
+  it('resolves with only the required photo slot (2nd optional slot left blank)', async () => {
+    mockUploadRows([{ id: 'upload-photo-1', r2_key: 'uploads/user-1/uvu-1.jpg' }]);
+    const req = makeReq({
+      preset_id: 'you-vs-you',
+      preset_input_upload_ids: ['upload-photo-1', null],
+    });
+    const res = makeRes();
+    const next = jest.fn();
+
+    await presetResolver(req, res, next);
+
+    expect(req.body.chain_input_images).toEqual(['https://r2.example.com/signed/uploads/user-1/uvu-1.jpg']);
+    expect(req.body.__chain_def.animate_stage.model).toBe('alibaba/happyhorse-1.1');
     expect(next).toHaveBeenCalled();
   });
 });
