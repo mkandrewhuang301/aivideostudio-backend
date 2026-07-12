@@ -18,6 +18,18 @@ function faceSlotUrls(req: Request): string[] {
   if (r.mediaType === 'avatar' && r.avatarImage) return [r.avatarImage]; // Motion Transfer face photo
   // Faceswap: scan the user's OWN uploaded face (swap source), never the target photo (09.2-07).
   if (r.mediaType === 'faceswap' && r.swapImage) return [r.swapImage];
+  // 09.6 GAP-2: Korean Baseball Fan Cam is single-shot HappyHorse (media_type 'video', selfie in
+  // referenceImages[0]). Guarded by registered preset_id membership so freeform 'video' presets
+  // (camera-moves, animate-old-photo) are NEVER blanket-scanned — only a registered face-input
+  // preset's selfie is scanned here.
+  const presetId = req._preset?.preset_id;
+  if (r.mediaType === 'video' && presetId && FACE_INPUT_PRESET_IDS.has(presetId) && r.referenceImages?.length) {
+    return r.referenceImages;
+  }
+  // 09.6 GAP-2: forward-protection for the wired Wan/DreamActor Marlon Motion Transfer fallbacks
+  // (D-03) — scans the user's uploaded face photo before dispatch.
+  if (r.mediaType === 'character_replace' && r.characterReplaceImage) return [r.characterReplaceImage];
+  // 09.6 GAP-2: the 'chain' media_type case (UVU + Marlon) is added in Plan 04.
   return [];
 }
 
