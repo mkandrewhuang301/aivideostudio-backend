@@ -521,6 +521,76 @@ export const SERVER_PRESETS: PresetDef[] = [
     },
     tile: placeholderTile('marlon-motion'),
   },
+  {
+    // You vs You (09.6 D-01, FINAL 2026-07-12): the phase's SOLE chain preset — proves the
+    // chained-job primitive built in Plans 04-05. Two Wan 2.7 Image keyframes (opening arena
+    // walk-in + young-you spotlight reveal) both land in HappyHorse's `images` reference array,
+    // with a choreography prompt naming image-1 as the opening and image-2 as the ending reveal
+    // (creative-liberty, not strict keyframe interpolation — D-01). Real billing is
+    // computeChainCost() = 2 x IMAGE_MODEL_COSTS['wan-video/wan-2.7-image'] (Plan 05's
+    // live-verified value) + computeHappyHorseCost(5, '720p') — `cost` below is a display hint
+    // only. Generic server prompts, no real names/IP (D-09).
+    preset_id: 'you-vs-you',
+    title: 'You vs You',
+    subtitle: 'Face your next opponent',
+    section: 'video_effects',
+    sort_order: 10,
+    status: 'live',
+    badge: 'HOT',
+    media_type: 'chain',
+    model: 'alibaba/happyhorse-1.1',
+    prompt_template: '', // chain path uses no top-level prompt_template — def.chain carries both prompts
+    input_schema: {
+      slots: [
+        { kind: 'image', label: 'Your photo', source: 'any' },
+        { kind: 'image', label: 'Another photo of you', source: 'any', optional: true },
+      ],
+    },
+    chain: {
+      image_stage: {
+        model: 'wan-video/wan-2.7-image',
+        quality: 'high',
+        prompts: [
+          'A cinematic photorealistic keyframe of the exact same person from the reference photo(s), ' +
+            'now walking into a vast dark cinematic arena alone, dramatic rim lighting, fog and haze in ' +
+            'the air, cold blue-toned shadows, tunnel entrance silhouette behind them, tense atmosphere ' +
+            'like the walkout before a championship match, vertical 9:16 framing, preserve the person\'s ' +
+            'exact face and identity.',
+          'A cinematic photorealistic keyframe of a noticeably younger version of the exact same person ' +
+            'from the reference photo(s), standing center-frame under a single bright spotlight in the ' +
+            'same dark arena, confident stance, warm golden spotlight beam cutting through haze, the rest ' +
+            'of the arena in darkness, triumphant reveal moment, vertical 9:16 framing, preserve the ' +
+            'person\'s exact facial identity, only de-age the apparent age.',
+        ],
+      },
+      animate_stage: {
+        model: 'alibaba/happyhorse-1.1',
+        resolution: '720p',
+        duration: 5,
+        aspect_ratio: '9:16',
+        prompt_template:
+          'Animate a short cinematic sequence using image-1 as the opening shot (the person walking ' +
+          'into the dark arena) and image-2 as the ending shot (their younger self revealed under the ' +
+          'spotlight). Creative liberty on the camera move and transition between the two moments — this ' +
+          'is not a strict frame interpolation, invent a compelling walk-in-to-reveal choreography that ' +
+          'lands on image-2 as the final beat, dramatic lighting throughout, vertical 9:16.',
+      },
+    },
+    // TODO(art): default "your next opponent: you" trend-audio track, aligned to the reveal
+    // beat — replace via `npm run upload:preset-art` once delivered (D-01/D-09).
+    postprocess: { op: 'mux', audio_r2_key: 'assets/presets/you-vs-you/audio-v1.m4a' },
+    // Display hint only — real billing is computeChainCost() (see comment above), NOT this field.
+    cost: { type: 'per_second', credits_per_sec: 14, max_seconds: 15 },
+    sheet: {
+      description:
+        'Upload a photo (or two) — face your next opponent: an epic arena walk-in that reveals ' +
+        'a younger you under the spotlight.',
+      aspect_label: 'Vertical',
+      duration_label: '5s',
+      resolution_label: '720p',
+    },
+    tile: placeholderTile('you-vs-you'),
+  },
 
   // ─── Photo Effects (output = still image — D-02 revised 2026-07-06, below Video Effects) ─
   {
