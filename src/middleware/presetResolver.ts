@@ -23,6 +23,8 @@ import { db } from '../db/client';
 import { referenceUploads } from '../db/schema';
 import { getUploadPresignedUrl } from '../services/archivalService';
 import { SERVER_PRESETS, type PresetDef } from '../config/presets';
+import { PERMISSIVE_I2V_MODEL } from '../services/generationService';
+import { expandScript } from '../services/openaiScriptService';
 
 const PRESETS_BY_ID: Record<string, PresetDef> = Object.fromEntries(
   SERVER_PRESETS.map((def) => [def.preset_id, def]),
@@ -33,8 +35,13 @@ declare global {
     interface Request {
       // input_upload_ids preserves null placeholders for empty optional slots (09.1-11) so a
       // later Remix/reopen can reconstruct which slots were left blank, index-aligned to the
-      // preset's input_schema.slots.
-      _preset?: { preset_id: string; input_upload_ids: Array<string | null> };
+      // preset's input_schema.slots. `postprocess` (09.3-05) is only present when the resolved
+      // preset declares one — generations.ts merges it onto the created row's params.postprocess.
+      _preset?: {
+        preset_id: string;
+        input_upload_ids: Array<string | null>;
+        postprocess?: { op: 'mux' | 'concat'; audio_r2_key?: string };
+      };
     }
   }
 }
@@ -74,6 +81,9 @@ export async function presetResolver(req: Request, res: Response, next: NextFunc
     // When the matched style option carries a thumb_url, it doubles as the reference image sent
     // to the model alongside the user's own photo (appended in the 'image' case below).
     let styleReferenceUrl: string | undefined;
+    // 09.3 D-04: viral motion packs bundle the DreamActor driving video PER STYLE OPTION rather
+    // than as a second user-uploaded slot — see the 'avatar' case below.
+    let styleDrivingVideoUrl: string | undefined;
     if (def.input_schema?.style_grid?.length) {
       const styleId = req.body.style_id;
       const match = def.input_schema.style_grid.find((s) => s.id === styleId);
@@ -83,6 +93,7 @@ export async function presetResolver(req: Request, res: Response, next: NextFunc
       }
       styleLabel = match.label;
       styleReferenceUrl = match.thumb_url;
+      styleDrivingVideoUrl = match.driving_video_url;
     }
 
     // Resolve slot inputs: client sends reference_uploads ids (index-aligned to input_schema.slots),
@@ -120,13 +131,38 @@ export async function presetResolver(req: Request, res: Response, next: NextFunc
     req.body.model = def.model;
     req.body.prompt = expandTemplate(def, styleLabel, !!styleReferenceUrl);
 
+    // 09.3 D-02 provenance pre-route: known real-face presets skip the doomed Seedance attempt
+    // and dispatch straight to the config-driven permissive model; known-fictional presets keep
+    // Seedance (def.model, already set above); 'try_seedance_fallback_grok' also keeps Seedance —
+    // the webhook's content_policy fallback branch (09.3-03) handles the Grok redispatch on block.
+    if (def.i2v_routing === 'grok') {
+      req.body.model = PERMISSIVE_I2V_MODEL;
+    }
+
+    // 09.3 D-05: script-driven presets (e.g. gorilla vlogger) expand the user's raw script into a
+    // dialogue-ready prompt via the LLM helper — fail-open (never throws) to the templated
+    // dialogue/prompt with {script} substituted, so a transient LLM outage never blocks dispatch.
+    if (def.script_expansion) {
+      const userScript = typeof req.body.text === 'string' ? req.body.text : '';
+      if (def.input_schema?.text?.required && !userScript.trim()) {
+        res.status(400).json({ error: 'text is required', code: 'INVALID_PRESET_INPUT' });
+        return;
+      }
+      const dialogueTemplate = def.dialogue_prompt_template || def.prompt_template || '{script}';
+      req.body.prompt = await expandScript({ userScript, dialogueTemplate });
+      // Dialogue needs synthesized speech — Seedance's audio-on ref-to-video path (D-05).
+      req.body.audio_enabled = true;
+    }
+
     const maxSeconds = def.cost?.type === 'per_second' ? def.cost.max_seconds : undefined;
 
     switch (def.media_type) {
       case 'avatar': {
-        // Motion Transfer: image + driving video slots.
+        // Motion Transfer: image + driving video slots. Viral motion packs (09.3 D-04) instead
+        // bundle the driving video PER STYLE OPTION (styleDrivingVideoUrl) — only the selfie slot
+        // is a user upload in that case, so the bundled URL takes priority over a second slot.
         req.body.avatar_image = slotUrls[0];
-        req.body.avatar_driving_video = slotUrls[1];
+        req.body.avatar_driving_video = styleDrivingVideoUrl || slotUrls[1];
         const clientDuration =
           typeof req.body.estimated_duration_seconds === 'number' && req.body.estimated_duration_seconds > 0
             ? req.body.estimated_duration_seconds
@@ -217,7 +253,11 @@ export async function presetResolver(req: Request, res: Response, next: NextFunc
       case 'video': {
         // Animate Old Photo — image-to-video, fixed short duration (no user-selectable duration
         // slot in the schema); use the preset's declared max_seconds as the actual duration.
-        req.body.reference_images = slotUrls;
+        // Character vlogger (09.3 D-05): character_asset (bundled canonical character still) goes
+        // FIRST in reference_images, ahead of any user upload slots.
+        req.body.reference_images = def.character_asset
+          ? [def.character_asset, ...slotUrls.filter(Boolean)]
+          : slotUrls;
         req.body.duration = maxSeconds ?? 5;
         req.body.resolution = '720p';
         break;
@@ -226,7 +266,11 @@ export async function presetResolver(req: Request, res: Response, next: NextFunc
         break;
     }
 
-    req._preset = { preset_id, input_upload_ids: uploadIds };
+    req._preset = {
+      preset_id,
+      input_upload_ids: uploadIds,
+      ...(def.postprocess ? { postprocess: def.postprocess } : {}),
+    };
     next();
   } catch (err) {
     console.error('[presetResolver] Error resolving preset:', err);

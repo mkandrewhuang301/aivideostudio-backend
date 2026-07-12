@@ -47,6 +47,13 @@ export interface PresetStyleOption {
   // server-side, no auto-detection from the user's photo (deliberate: see 2026-07-07 notes/
   // hairstyle-preset-style-images-gender-filter.md for why).
   gender_tag?: 'feminine' | 'masculine' | 'unisex';
+  /**
+   * SERVER-ONLY (09.3, D-04). Bundled DreamActor driving-video clip (R2/public URL) paired with
+   * this style option — e.g. viral motion packs, where the driving video is a bundled server
+   * asset rather than a second user-uploaded slot. Never reaches the client — `CLIENT_PRESETS`
+   * strips it from every `input_schema.style_grid` entry.
+   */
+  driving_video_url?: string;
 }
 
 export interface PresetInputSchema {
@@ -83,6 +90,13 @@ export interface PresetSheetMeta {
   duration_label?: string;
   /** Fixed, display-only resolution caption, e.g. "720p". */
   resolution_label?: string;
+  /**
+   * CLIENT-SAFE (09.3, D-05). Caption shown above the Generate bar while the request is
+   * submitting, for presets with a server-side pre-processing step the user should know is
+   * happening (e.g. LLM script expansion) — e.g. "Writing your script…". Unlike every other
+   * field on `PresetDef` prefixed SERVER-ONLY above, this one MUST reach `CLIENT_PRESETS`.
+   */
+  preparing_label?: string;
 }
 
 export interface PresetDef {
@@ -110,6 +124,41 @@ export interface PresetDef {
    * instead of one. Falls back to `prompt_template` when the style has no reference image.
    */
   prompt_template_with_reference?: string;
+  /**
+   * SERVER-ONLY (09.3, D-03/D-05). R2/public URL of the bundled canonical character still image
+   * (e.g. the gorilla vlogger) — injected server-side into `reference_images`, ahead of any user
+   * upload slots. Never reaches the client (CLIENT_PRESETS strips it).
+   */
+  character_asset?: string;
+  /**
+   * SERVER-ONLY (09.3, D-05). When true, presetResolver runs the user's free-text `text` field
+   * through `openaiScriptService.expandScript()` (fail-open to `dialogue_prompt_template`/
+   * `prompt_template` with `{script}` substituted) before dispatch.
+   */
+  script_expansion?: boolean;
+  /**
+   * SERVER-ONLY (09.3, D-05). Dialogue-specific template (may include `{script}`) used as the
+   * expandScript fail-open fallback and, for the primary path, the framing template the LLM
+   * output is dispatched as. Falls back to `prompt_template` when absent.
+   */
+  dialogue_prompt_template?: string;
+  /**
+   * SERVER-ONLY (09.3). Post-processing stamp (ffmpeg mux/concat) merged onto the generation
+   * row's `params.postprocess` by presetResolver/generations.ts — read by the webhook to decide
+   * whether to enqueue the ffmpeg worker instead of marking the generation complete immediately.
+   * Never reaches the client.
+   */
+  postprocess?: { op: 'mux' | 'concat'; audio_r2_key?: string };
+  /**
+   * SERVER-ONLY provenance (09.3, D-02). Pre-routes `req.body.model` before dispatch:
+   * - 'grok': known real-face preset — skip the doomed Seedance attempt, dispatch straight to
+   *   the config-driven `PERMISSIVE_I2V_MODEL` (Grok 1.5).
+   * - 'seedance': known-fictional preset — leave `def.model` (Seedance) as-is; best quality.
+   * - 'try_seedance_fallback_grok': freeform/unknown — dispatch Seedance as declared; the
+   *   webhook's content_policy fallback branch (09.3-03) handles the Grok redispatch on block.
+   * Never reaches the client.
+   */
+  i2v_routing?: 'seedance' | 'grok' | 'try_seedance_fallback_grok';
   input_schema?: PresetInputSchema;
   // SOON rows carry no cost — nothing is billed until the feature ships.
   cost?: PresetCost;
@@ -523,10 +572,29 @@ export const SERVER_PRESETS: PresetDef[] = [
 ];
 
 /**
- * Client-facing projection of SERVER_PRESETS — `prompt_template` deleted before this array
- * is ever touched by a response serializer. GET /api/presets serves this, never SERVER_PRESETS.
+ * Client-facing projection of SERVER_PRESETS — every SERVER-ONLY field (D-11, 09.3 D-02/D-03/D-05)
+ * deleted before this array is ever touched by a response serializer, including a deep strip of
+ * `input_schema.style_grid[].driving_video_url` (09.3 D-04, bundled motion-pack driving clips).
+ * GET /api/presets serves this, never SERVER_PRESETS.
  */
 export const CLIENT_PRESETS = SERVER_PRESETS.map((def) => {
-  const { prompt_template, prompt_template_with_reference, ...rest } = def;
+  const {
+    prompt_template,
+    prompt_template_with_reference,
+    character_asset,
+    script_expansion,
+    dialogue_prompt_template,
+    postprocess,
+    i2v_routing,
+    ...rest
+  } = def;
+
+  if (rest.input_schema?.style_grid?.length) {
+    rest.input_schema = {
+      ...rest.input_schema,
+      style_grid: rest.input_schema.style_grid.map(({ driving_video_url, ...styleRest }) => styleRest),
+    };
+  }
+
   return rest;
 });

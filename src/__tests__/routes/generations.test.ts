@@ -1674,3 +1674,89 @@ describe('DELETE /api/generations/:id', () => {
     expect(res.body.error).toBe('Not found or not authorized');
   });
 });
+
+// ─── POST /api/generations — preset postprocess merge (09.3-05) ─────────────
+// Uses an isolated module registry (jest.resetModules + jest.doMock('../../config/presets', ...))
+// with ONE test-only preset row carrying `postprocess` — the real first-registry-drop rows land
+// in 09.3-06/07 (this plan only wires the merge mechanism, see 09.3-05-PLAN.md's "do not flip
+// gorilla live or add the 8-row drop here"). Everything else (SERVER_PRESETS) is the REAL
+// registry via jest.requireActual, so presetResolver/prepareCost validation is exercised exactly
+// as production would. This describe block is LAST in the file — jest.resetModules() in afterAll
+// only affects requires made after it (none), so it cannot leak into earlier describes above.
+describe('POST /api/generations — preset postprocess merge (09.3-05)', () => {
+  const TEST_POSTPROCESS_PRESET = {
+    preset_id: 'test-postprocess-preset',
+    title: 'Test Postprocess Preset',
+    section: 'video_effects',
+    sort_order: 9999,
+    status: 'live',
+    media_type: 'video',
+    model: 'bytedance/seedance-2.0-mini',
+    prompt_template: 'a test prompt',
+    postprocess: { op: 'mux', audio_r2_key: 'audio/trend.m4a' },
+    input_schema: { slots: [] },
+    cost: { type: 'per_second', credits_per_sec: 8, max_seconds: 5 },
+    tile: { poster_url: 'https://x.example/poster.jpg', loop_url: 'https://x.example/loop.mp4' },
+  };
+
+  let isolatedApp: express.Express;
+  let localCreateGeneration: jest.Mock;
+  let localDb: { execute: jest.Mock };
+
+  beforeAll(() => {
+    jest.resetModules();
+    jest.doMock('../../config/presets', () => {
+      const actual = jest.requireActual('../../config/presets');
+      return { ...actual, SERVER_PRESETS: [...actual.SERVER_PRESETS, TEST_POSTPROCESS_PRESET] };
+    });
+
+    localDb = require('../../db/client').db;
+    localDb.execute.mockResolvedValue({ rows: [] });
+
+    const freshCreditService = require('../../services/creditService');
+    (freshCreditService.deductCredits as jest.Mock).mockResolvedValue(true);
+
+    const freshGenerationService = require('../../services/generationService');
+    (freshGenerationService.resolveDurationSeconds as jest.Mock).mockReturnValue(5);
+    (freshGenerationService.computeCostCredits as jest.Mock).mockReturnValue(40);
+    localCreateGeneration = freshGenerationService.createGeneration as jest.Mock;
+    localCreateGeneration.mockResolvedValue({ id: 'gen-postprocess-1' });
+
+    const freshReplicateProviderModule = require('../../services/providers/ReplicateProvider');
+    const FreshCtor = freshReplicateProviderModule.ReplicateProvider as jest.MockedClass<typeof ReplicateProvider>;
+
+    const { generationsRouter: freshRouter } = require('../../routes/generations');
+
+    const freshDispatch = FreshCtor.mock.results[0]?.value?.dispatch as jest.Mock;
+    freshDispatch.mockResolvedValue({ providerPredictionId: 'pred-postprocess-1' });
+
+    isolatedApp = express();
+    isolatedApp.use(express.json());
+    isolatedApp.use((req: Request, _res: Response, next: NextFunction) => {
+      req.user = { dbUserId: 'test-user-id', uid: 'fb-uid', email: 't@test.com' };
+      next();
+    });
+    isolatedApp.use('/api/generations', freshRouter);
+  });
+
+  afterAll(() => {
+    jest.dontMock('../../config/presets');
+    jest.resetModules();
+  });
+
+  it('merges def.postprocess onto rowParams.postprocess when the resolved preset declares one', async () => {
+    const res = await request(isolatedApp).post('/api/generations').send({
+      preset_id: 'test-postprocess-preset',
+      preset_input_upload_ids: [],
+    });
+
+    expect(res.status).toBe(200);
+    expect(localCreateGeneration).toHaveBeenCalledWith(
+      expect.objectContaining({
+        params: expect.objectContaining({
+          postprocess: { op: 'mux', audio_r2_key: 'audio/trend.m4a' },
+        }),
+      }),
+    );
+  });
+});

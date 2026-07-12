@@ -631,7 +631,14 @@ generationsRouter.post('/', promptModerationMiddleware, presetResolver, prepareC
     // the client's preset-badged card rendering + Remix reopen (D-11), never overwrites the
     // media-type-specific params computed above.
     const presetParams = req._preset
-      ? { preset_id: req._preset.preset_id, preset_input_upload_ids: req._preset.input_upload_ids }
+      ? {
+          preset_id: req._preset.preset_id,
+          preset_input_upload_ids: req._preset.input_upload_ids,
+          // 09.3-05: stamps the ffmpeg post-process op (mux/concat) onto the generation row when
+          // the resolved preset declares one — read by the webhook to enqueue ffmpegWorker instead
+          // of marking the generation complete immediately.
+          ...(req._preset.postprocess ? { postprocess: req._preset.postprocess } : {}),
+        }
       : {};
     // D-02: presets are always auto-routed (never trust the client to claim an explicit pick on a
     // preset row); freeform honors the client's flag, defaulting to false so the try-Seedance ->

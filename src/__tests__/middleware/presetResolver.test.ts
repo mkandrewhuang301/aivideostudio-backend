@@ -86,6 +86,18 @@ jest.mock('../../db/client', () => ({ db: { select: jest.fn() } }));
 jest.mock('../../db/schema', () => ({ referenceUploads: { id: 'id', user_id: 'user_id' } }));
 jest.mock('../../services/archivalService', () => ({ getUploadPresignedUrl: jest.fn() }));
 
+// config.ts calls requireEnv() at module-eval time — mock before openaiScriptService (transitively
+// imported by presetResolver.ts) pulls it in.
+jest.mock('../../config', () => ({ config: { openaiApiKey: 'mock-openai-key' } }));
+
+// Deterministic, network-free stand-in for the real fail-open contract (openaiScriptService.test.ts
+// covers the real fetch/fail-open behavior) — keeps this suite fast and offline.
+jest.mock('../../services/openaiScriptService', () => ({
+  expandScript: jest.fn(({ userScript, dialogueTemplate }: { userScript: string; dialogueTemplate: string }) =>
+    Promise.resolve(dialogueTemplate.replace('{script}', userScript)),
+  ),
+}));
+
 import { Request, Response } from 'express';
 import { db } from '../../db/client';
 import { getUploadPresignedUrl } from '../../services/archivalService';
