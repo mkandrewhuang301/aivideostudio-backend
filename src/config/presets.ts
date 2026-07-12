@@ -497,7 +497,6 @@ export const SERVER_PRESETS: PresetDef[] = [
         { id: 'perm', label: 'Perm', gender_tag: 'unisex' },
         { id: 'layered', label: 'Layered', gender_tag: 'unisex' },
         { id: 'slicked-back', label: 'Slicked Back', gender_tag: 'masculine', thumb_url: 'https://pub-cec5aa79de50452fa7eac827a03d7e04.r2.dev/presets/hairstyle/styles/slicked-back-v1.jpg' },
-        { id: 'undercut', label: 'Undercut', gender_tag: 'masculine' },
         { id: 'soft-waves', label: 'Soft Waves', gender_tag: 'unisex' },
         { id: 'french-braid', label: 'French Braid', gender_tag: 'feminine' },
         { id: 'box-braids', label: 'Box Braids', gender_tag: 'feminine' },
