@@ -59,6 +59,10 @@ export function computeGrokImagineCost(durationSeconds: number): number {
   return Math.ceil(durationSeconds * GROK_IMAGINE_CREDITS_PER_SEC);
 }
 
+// 09.3 D-02: config-driven swap point for the Seedance content_policy/copyright fallback
+// (webhooks/replicate.ts) — always the first (and only, today) entry in SUPPORTED_GROK_MODELS.
+export const PERMISSIVE_I2V_MODEL = SUPPORTED_GROK_MODELS[0];
+
 // ─── Alibaba HappyHorse 1.1 (text-to-video + image-to-video, native audio + lip-sync) ─────────
 // Premium general video model. Per-resolution per-second pricing (MODEL_RATES above): $0.14/s @720p,
 // $0.18/s @1080p — identical for t2v and i2v. Native audio + multilingual lip-sync is baked into the

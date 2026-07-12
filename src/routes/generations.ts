@@ -633,7 +633,13 @@ generationsRouter.post('/', promptModerationMiddleware, presetResolver, prepareC
     const presetParams = req._preset
       ? { preset_id: req._preset.preset_id, preset_input_upload_ids: req._preset.input_upload_ids }
       : {};
-    const rowParams = { ...params, ...presetParams };
+    // D-02: presets are always auto-routed (never trust the client to claim an explicit pick on a
+    // preset row); freeform honors the client's flag, defaulting to false so the try-Seedance ->
+    // Grok fallback (webhooks/replicate.ts) applies unless the user explicitly chose a model.
+    const modelExplicitlyPicked = req._preset
+      ? false
+      : Boolean(req.body?.model_explicitly_picked);
+    const rowParams = { ...params, ...presetParams, model_explicitly_picked: modelExplicitlyPicked };
 
     const { id: generationId } = await createGeneration({
       user_id: req.user.dbUserId,
