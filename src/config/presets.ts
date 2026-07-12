@@ -307,6 +307,124 @@ export const SERVER_PRESETS: PresetDef[] = [
     },
     tile: placeholderTile('ai-influencer'),
   },
+  {
+    // Viral Motions (09.3 SC4/D-04): bundled DreamActor driving videos × the user's single
+    // selfie — "you perform the viral move." One Home card + a style_grid inside the sheet
+    // (Dance/Runway/Fight v1) rather than one card per motion. The driving video is a bundled
+    // server asset PAIRED PER STYLE OPTION (`driving_video_url`), not a second user-uploaded
+    // slot like Motion Transfer's driving-video slot — presetResolver's 'avatar' case already
+    // prefers a style-bundled driving video over slotUrls[1] (09.3-05).
+    preset_id: 'viral-motions',
+    title: 'Viral Motions',
+    section: 'video_effects',
+    sort_order: 5,
+    status: 'live',
+    badge: 'HOT',
+    media_type: 'avatar',
+    model: 'bytedance/dreamactor-m2.0',
+    prompt_template: '', // avatar path uses no text prompt
+    input_schema: {
+      slots: [{ kind: 'image', label: 'Your photo', source: 'any' }],
+      // TODO(art): placeholder driving-video URLs — replace with the real bundled DreamActor
+      // motion-pack clips via `npm run upload:preset-art` once delivered (D-09).
+      style_grid: [
+        {
+          id: 'dance',
+          label: 'Dance',
+          driving_video_url: 'https://assets.fantasia.example/presets/viral-motions/dance-v1.mp4',
+        },
+        {
+          id: 'runway',
+          label: 'Runway',
+          driving_video_url: 'https://assets.fantasia.example/presets/viral-motions/runway-v1.mp4',
+        },
+        {
+          id: 'fight',
+          label: 'Fight',
+          driving_video_url: 'https://assets.fantasia.example/presets/viral-motions/fight-v1.mp4',
+        },
+      ],
+    },
+    // Same DreamActor per_second rate as Motion Transfer (computeDreamActorCost — 5 credits/sec).
+    cost: { type: 'per_second', credits_per_sec: 5, max_seconds: 30 },
+    sheet: {
+      description: 'Upload one selfie, pick a motion — you perform the viral move.',
+      aspect_label: 'Matches your photo',
+      duration_label: 'Up to 30s',
+      // No resolution_label — DreamActor's output resolution follows the input, same rationale
+      // as Motion Transfer above.
+    },
+    tile: placeholderTile('viral-motions'),
+  },
+  {
+    // Camera Moves (09.3 SC5): style_grid pack — cinematic camera motion applied to a single
+    // uploaded photo. Freeform/unknown user photo → try-Seedance-first, fall back to Grok 1.5 on
+    // a content-policy block (D-02's 'try_seedance_fallback_grok' provenance, handled by the
+    // webhook's existing 09.3-03 fallback branch — never a pre-classifier here).
+    preset_id: 'camera-moves',
+    title: 'Camera Moves',
+    section: 'video_effects',
+    sort_order: 6,
+    status: 'live',
+    badge: 'NEW',
+    media_type: 'video',
+    model: 'bytedance/seedance-2.0-mini',
+    i2v_routing: 'try_seedance_fallback_grok',
+    prompt_template:
+      'Animate this photo with a cinematic {style} camera move — smooth, professional camera ' +
+      'motion around the subject, keep the subject and background otherwise unchanged, no audio.',
+    input_schema: {
+      slots: [{ kind: 'image', label: 'Your photo', source: 'any' }],
+      style_grid: [
+        { id: 'orbit', label: 'Orbit' },
+        { id: 'dolly-in', label: 'Dolly In' },
+        { id: 'crane-up', label: 'Crane Up' },
+        { id: 'whip-pan', label: 'Whip Pan' },
+      ],
+    },
+    cost: { type: 'per_second', credits_per_sec: 9, max_seconds: 5 },
+    sheet: {
+      description: 'Upload a photo — cinematic camera motion brings it to life.',
+      aspect_label: 'Matches your photo',
+      duration_label: '5s',
+      resolution_label: '720p',
+    },
+    tile: placeholderTile('camera-moves'),
+  },
+  {
+    // VFX (09.3 SC5): style_grid pack — dramatic visual effect applied to a single uploaded
+    // photo. Same freeform routing rationale as Camera Moves above.
+    preset_id: 'vfx-pack',
+    title: 'VFX',
+    section: 'video_effects',
+    sort_order: 7,
+    status: 'live',
+    badge: 'NEW',
+    media_type: 'video',
+    model: 'bytedance/seedance-2.0-mini',
+    i2v_routing: 'try_seedance_fallback_grok',
+    prompt_template:
+      'Animate this photo with a dramatic {style} visual effect applied to the subject, ' +
+      'keep the subject recognizable throughout, cinematic quality, no audio.',
+    input_schema: {
+      slots: [{ kind: 'image', label: 'Your photo', source: 'any' }],
+      style_grid: [
+        { id: 'on-fire', label: 'On Fire' },
+        { id: 'disintegrate', label: 'Disintegrate' },
+        { id: 'levitate', label: 'Levitate' },
+        { id: 'gold', label: 'Gold' },
+        { id: 'marble', label: 'Marble' },
+      ],
+    },
+    cost: { type: 'per_second', credits_per_sec: 9, max_seconds: 5 },
+    sheet: {
+      description: 'Upload a photo — apply a dramatic visual effect.',
+      aspect_label: 'Matches your photo',
+      duration_label: '5s',
+      resolution_label: '720p',
+    },
+    tile: placeholderTile('vfx-pack'),
+  },
 
   // ─── Photo Effects (output = still image — D-02 revised 2026-07-06, below Video Effects) ─
   {
@@ -540,6 +658,112 @@ export const SERVER_PRESETS: PresetDef[] = [
     },
     tile: placeholderTile('magic-editor'),
   },
+  {
+    // Action Figure (09.3 SC5): first registry-drop image template — individual photo_effects
+    // card (not a pack), like Anime Yourself / Polaroid Hug.
+    preset_id: 'action-figure',
+    title: 'Action Figure',
+    section: 'photo_effects',
+    sort_order: 8,
+    status: 'live',
+    badge: 'NEW',
+    media_type: 'image',
+    model: 'openai/gpt-image-2-medium', // D-22: medium tier, 5 credits
+    prompt_template:
+      'Transform this person into a collectible blister-pack action figure — full-body plastic ' +
+      'action-figure sculpt of the same person, posed on a display base, packaged in a retail ' +
+      'blister-pack toy box with cardboard header art, preserving their likeness, outfit, and ' +
+      'accessories as figure-scale details.',
+    input_schema: {
+      slots: [{ kind: 'image', label: 'Your photo', source: 'any' }],
+    },
+    cost: { type: 'flat', credits: 5 },
+    sheet: {
+      description: 'Turn yourself into a blister-pack action figure.',
+      aspect_ratios: ['3:2', '1:1', '2:3'],
+      default_aspect_ratio: '1:1',
+      resolution_label: 'High resolution',
+    },
+    tile: placeholderTile('action-figure'),
+  },
+  {
+    // 90s Yearbook (09.3 SC5): first registry-drop image template.
+    preset_id: 'yearbook-90s',
+    title: '90s Yearbook',
+    section: 'photo_effects',
+    sort_order: 9,
+    status: 'live',
+    media_type: 'image',
+    model: 'openai/gpt-image-2-medium', // D-22: medium tier, 5 credits
+    prompt_template:
+      'Transform this photo into a classic 1990s school yearbook portrait of the same person — ' +
+      'soft studio laser-background, period-accurate 90s hairstyle and clothing styling, warm ' +
+      'film color grading, preserving their identity and facial features exactly.',
+    input_schema: {
+      slots: [{ kind: 'image', label: 'Your photo', source: 'any' }],
+    },
+    cost: { type: 'flat', credits: 5 },
+    sheet: {
+      description: 'Get a classic 90s school yearbook portrait.',
+      aspect_ratios: ['3:2', '1:1', '2:3'],
+      default_aspect_ratio: '1:1',
+      resolution_label: 'High resolution',
+    },
+    tile: placeholderTile('yearbook-90s'),
+  },
+  {
+    // Pro Headshot (09.3 SC5): first registry-drop image template.
+    preset_id: 'pro-headshot',
+    title: 'Pro Headshot',
+    section: 'photo_effects',
+    sort_order: 10,
+    status: 'live',
+    media_type: 'image',
+    model: 'openai/gpt-image-2-medium', // D-22: medium tier, 5 credits
+    prompt_template:
+      'Transform this selfie into a clean, professional corporate headshot of the same person — ' +
+      'neutral studio background, professional business attire, soft even studio lighting, sharp ' +
+      'focus, preserving their identity and facial features exactly.',
+    input_schema: {
+      slots: [{ kind: 'image', label: 'Your photo', source: 'any' }],
+    },
+    cost: { type: 'flat', credits: 5 },
+    sheet: {
+      description: 'A clean, professional headshot from any selfie.',
+      aspect_ratios: ['3:2', '1:1', '2:3'],
+      default_aspect_ratio: '1:1',
+      resolution_label: 'High resolution',
+    },
+    tile: placeholderTile('pro-headshot'),
+  },
+  {
+    // Restore Old Photo (09.3 SC5): first registry-drop image template. Distinct from
+    // Animate Old Photo (video_effects) — this one keeps the still photo and only
+    // colorizes/deblurs it.
+    preset_id: 'restore-old-photo',
+    title: 'Restore Old Photo',
+    section: 'photo_effects',
+    sort_order: 11,
+    status: 'live',
+    media_type: 'image',
+    model: 'openai/gpt-image-2-medium', // D-22: medium tier, 5 credits
+    prompt_template:
+      'Restore this old, damaged photograph — repair scratches, creases, and tears, deblur and ' +
+      'sharpen the image, naturally colorize it if it is black-and-white or faded, while ' +
+      'preserving the exact identity, pose, and composition of the people and scene.',
+    input_schema: {
+      slots: [{ kind: 'image', label: 'Old photo', source: 'any' }],
+    },
+    cost: { type: 'flat', credits: 5 },
+    sheet: {
+      description:
+        'Colorize and deblur an old photo — keep the memory, lose the damage.',
+      aspect_ratios: ['3:2', '1:1', '2:3'],
+      default_aspect_ratio: '1:1',
+      resolution_label: 'High resolution',
+    },
+    tile: placeholderTile('restore-old-photo'),
+  },
 
   // ─── Avatar Center ─────────────────────────────────────────────────────────
   {
@@ -554,11 +778,50 @@ export const SERVER_PRESETS: PresetDef[] = [
 
   // ─── Shows & Vlogs ───────────────────────────────────────────────────────
   {
+    // Gorilla Vlogs (09.3 SC3/D-05, flipped soon → live): the character-system proof. A bundled
+    // fictional AI character (no real face, no IP) — Seedance 2.0 reference-to-video with
+    // audio-on accepts fictional/AI characters directly (D-02: fictional presets go straight to
+    // Seedance, no Grok fallback needed). The user's raw script is expanded via
+    // openaiScriptService.expandScript() into dialogue + selfie-cam vlog framing (D-05) before
+    // dispatch — fail-open to a templated `{script}` substitution if the LLM call errors.
     preset_id: 'gorilla-vlogs',
     title: 'Gorilla Vlogs',
     section: 'shows_vlogs',
     sort_order: 1,
-    status: 'soon',
+    status: 'live',
+    badge: 'NEW',
+    media_type: 'video',
+    model: 'bytedance/seedance-2.0-mini',
+    i2v_routing: 'seedance', // known-fictional character — best quality, no Grok fallback needed
+    // TODO(art): placeholder character still — replace with the real bundled gorilla character
+    // asset via `npm run upload:preset-art` once delivered (D-09); presetResolver injects this
+    // URL into reference_images ahead of any user slots (there are none for this preset).
+    character_asset: 'https://assets.fantasia.example/presets/gorilla-vlogs/character-v1.jpg',
+    script_expansion: true,
+    dialogue_prompt_template:
+      'Selfie-cam vlog style, handheld phone camera framing: a gorilla vlogger holds up the ' +
+      'phone to film themself talking directly to the camera, natural gestures, casual vlog ' +
+      'energy, speaking the following as spoken dialogue: {script}',
+    // Same-family fallback if dialogue_prompt_template is ever absent (defense-in-depth — mirrors
+    // every other server-only template field's fallback shape in this registry).
+    prompt_template:
+      'Selfie-cam vlog style, handheld phone camera framing: a gorilla vlogger holds up the ' +
+      'phone to film themself talking directly to the camera, natural gestures, casual vlog ' +
+      'energy, speaking the following as spoken dialogue: {script}',
+    input_schema: {
+      slots: [],
+      text: { label: 'Your script', required: true },
+    },
+    // Matches animate-old-photo's Seedance-mini 720p per-second rate (MODEL_RATES nonVideoIn
+    // 720p = $0.09/s = 9 credits/s).
+    cost: { type: 'per_second', credits_per_sec: 9, max_seconds: 5 },
+    sheet: {
+      description: 'Type a short script — the gorilla vlogs it, selfie-cam style, with speech.',
+      aspect_label: 'Vertical',
+      duration_label: '5s',
+      resolution_label: '720p',
+      preparing_label: 'Writing your script…',
+    },
     tile: placeholderTile('gorilla-vlogs'),
   },
   {
