@@ -122,12 +122,12 @@ describe('processHiveScan', () => {
 });
 
 describe('handleScanFinalFailure', () => {
-  it('marks failed and refunds credits with hive-timeout idempotency key', async () => {
+  it('marks failed WITH the r2Key (so the already-archived object stays referenced, not orphaned) and refunds credits with hive-timeout idempotency key', async () => {
     const err = new Error('Hive still down after all retries');
 
     await handleScanFinalFailure(JOB_DATA, err);
 
-    expect(markFailed).toHaveBeenCalledWith(JOB_DATA.generationId);
+    expect(markFailed).toHaveBeenCalledWith(JOB_DATA.generationId, 'generic_error', JOB_DATA.r2Key);
     expect(refundCredits).toHaveBeenCalledWith(
       JOB_DATA.userId, JOB_DATA.costCredits, `hive-timeout-${JOB_DATA.generationId}`,
     );

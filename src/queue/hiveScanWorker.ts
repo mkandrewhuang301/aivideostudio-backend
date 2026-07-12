@@ -72,9 +72,11 @@ export async function processHiveScan(data: HiveScanJobData): Promise<void> {
 
 // Exported for testing — called when all retry attempts are exhausted.
 export async function handleScanFinalFailure(data: HiveScanJobData, err: Error): Promise<void> {
-  const { generationId, userId, costCredits } = data;
+  const { generationId, userId, costCredits, r2Key } = data;
   console.error(`[hive-scan-retry] All ${HIVE_SCAN_ATTEMPTS} attempts failed for ${generationId} — failing and refunding:`, err);
-  await markFailed(generationId).catch((e) => console.error('[hive-scan-retry] markFailed error:', e));
+  // FIX (2026-07-12): pass r2Key so the already-archived object stays referenced on the failed
+  // row instead of becoming a true orphan (see markFailed's doc comment).
+  await markFailed(generationId, 'generic_error', r2Key).catch((e) => console.error('[hive-scan-retry] markFailed error:', e));
   await refundCredits(userId, costCredits, `hive-timeout-${generationId}`).catch((e) =>
     console.error('[hive-scan-retry] refundCredits error:', e),
   );

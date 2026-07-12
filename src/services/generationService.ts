@@ -320,13 +320,27 @@ export function isTransientProviderError(error: unknown): boolean {
 export async function markFailed(
   generationId: string,
   reason: 'content_policy' | 'copyright' | 'generic_error' | 'provider_error' = 'generic_error',
+  // Optional (2026-07-12): pass when the media was already archived to R2 before the failure
+  // (e.g. hiveScanWorker's final-retry-exhausted path) — without this, that R2 object had no DB
+  // reference at all once the row failed (markCompleted is the only other writer of r2_key), a
+  // true orphan with no way to ever find or clean it up. `failed` status never exposes video_url
+  // regardless (that check is `status === 'completed' && r2_key`), so recording it here doesn't
+  // risk serving unscanned content — it only makes the row auditable/cleanable instead of lost.
+  r2Key?: string,
 ): Promise<boolean> {
-  const result = await db.execute(sql`
-    UPDATE generations
-    SET status = 'failed', completed_at = now(), failure_reason = ${reason}
-    WHERE id = ${generationId}::uuid AND status IN ('pending', 'processing')
-    RETURNING id
-  `);
+  const result = r2Key
+    ? await db.execute(sql`
+        UPDATE generations
+        SET status = 'failed', completed_at = now(), failure_reason = ${reason}, r2_key = ${r2Key}
+        WHERE id = ${generationId}::uuid AND status IN ('pending', 'processing')
+        RETURNING id
+      `)
+    : await db.execute(sql`
+        UPDATE generations
+        SET status = 'failed', completed_at = now(), failure_reason = ${reason}
+        WHERE id = ${generationId}::uuid AND status IN ('pending', 'processing')
+        RETURNING id
+      `);
   return (result.rows?.length ?? 0) > 0;
 }
 
