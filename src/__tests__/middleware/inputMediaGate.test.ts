@@ -101,4 +101,66 @@ describe('inputMediaGate', () => {
 
     expect(next).toHaveBeenCalled();
   });
+
+  // 09.6 GAP-2: video/character_replace face-input coverage. UVU + Marlon (media_type 'chain')
+  // are gated via the Plan-04 'chain' case (tested there) — not covered here.
+  describe('09.6 GAP-2: video/character_replace face-input coverage', () => {
+    it('blocks KBO (registered "video" preset) selfie with 403 when scanInputMedia flags nsfw', async () => {
+      mockScanInputMedia.mockResolvedValue({ blocked: true, reason: 'nsfw' });
+      const { req, res, next } = makeReqResNext(
+        { mediaType: 'video', referenceImages: ['https://r2/kbo-selfie.jpg'] },
+        { preset_id: 'kbo-fan-cam', input_upload_ids: ['sel-1'] },
+      );
+
+      await inputMediaGate(req, res, next);
+
+      expect(mockScanInputMedia).toHaveBeenCalledWith('https://r2/kbo-selfie.jpg');
+      expect(res.status).toHaveBeenCalledWith(403);
+      expect(res.json).toHaveBeenCalledWith(
+        expect.objectContaining({ code: 'INPUT_MEDIA_BLOCKED', reason: 'nsfw' }),
+      );
+      expect(next).not.toHaveBeenCalled();
+    });
+
+    it('passes a clean KBO (registered "video" preset) selfie through to next()', async () => {
+      mockScanInputMedia.mockResolvedValue({ blocked: false });
+      const { req, res, next } = makeReqResNext(
+        { mediaType: 'video', referenceImages: ['https://r2/kbo-selfie.jpg'] },
+        { preset_id: 'kbo-fan-cam', input_upload_ids: ['sel-1'] },
+      );
+
+      await inputMediaGate(req, res, next);
+
+      expect(mockScanInputMedia).toHaveBeenCalledWith('https://r2/kbo-selfie.jpg');
+      expect(next).toHaveBeenCalled();
+      expect(res.status).not.toHaveBeenCalled();
+    });
+
+    it('does NOT scan an unregistered "video" preset (freeform camera-moves) — stays ungated', async () => {
+      const { req, res, next } = makeReqResNext(
+        { mediaType: 'video', referenceImages: ['https://r2/camera-moves-input.jpg'] },
+        { preset_id: 'camera-moves', input_upload_ids: ['ref-1'] },
+      );
+
+      await inputMediaGate(req, res, next);
+
+      expect(mockScanInputMedia).not.toHaveBeenCalled();
+      expect(next).toHaveBeenCalled();
+      expect(res.status).not.toHaveBeenCalled();
+    });
+
+    it('scans the face photo for a registered character_replace preset', async () => {
+      mockScanInputMedia.mockResolvedValue({ blocked: false });
+      const { req, res, next } = makeReqResNext(
+        { mediaType: 'character_replace', characterReplaceImage: 'https://r2/marlon-face.jpg' },
+        { preset_id: 'marlon-motion', input_upload_ids: ['face-1', 'vid-1'] },
+      );
+
+      await inputMediaGate(req, res, next);
+
+      expect(mockScanInputMedia).toHaveBeenCalledWith('https://r2/marlon-face.jpg');
+      expect(next).toHaveBeenCalled();
+      expect(res.status).not.toHaveBeenCalled();
+    });
+  });
 });
