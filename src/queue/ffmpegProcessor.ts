@@ -55,10 +55,11 @@ async function runFfmpeg(args: string[]): Promise<void> {
 
 /**
  * Downloads inputs, runs the mux or concat ffmpeg command, uploads the result to R2, and returns
- * the final r2Key (`generations/${generationId}.mp4`). Always cleans up the temp dir, even on
+ * the final r2Key (`generations/${generationId}.mp4`) plus, for mux ops, the preserved silent
+ * master key (`generations/${generationId}.silent.mp4`). Always cleans up the temp dir, even on
  * error — the caller (processFfmpegJob) lets BullMQ's retry/final-failure handling take over.
  */
-export async function runFfmpegOp(data: FfmpegJobData): Promise<string> {
+export async function runFfmpegOp(data: FfmpegJobData): Promise<{ r2Key: string; masterR2Key?: string }> {
   const { generationId, inputR2Keys, audioR2Key, op } = data;
   // T-09.3-03: only ever write under os.tmpdir()/ffmpeg-${generationId}-* — scoped to this job.
   const tempDir = await mkdtemp(path.join(tmpdir(), `ffmpeg-${generationId}-`));
@@ -71,12 +72,20 @@ export async function runFfmpegOp(data: FfmpegJobData): Promise<string> {
       const clipPath = path.join(tempDir, 'clip.mp4');
       const audioPath = path.join(tempDir, 'audio.m4a');
       await downloadR2KeyToFile(inputR2Keys[0], clipPath);
+      // D-04: preserve the pre-mux (silent) clip at a distinct key BEFORE muxing, so the
+      // canonical generations/${id}.mp4 key can be safely overwritten by the muxed output below
+      // without clobbering the swappable silent source the future editor phase re-muxes from.
+      const masterR2Key = `generations/${generationId}.silent.mp4`;
+      await uploadFileToR2(clipPath, masterR2Key);
       await downloadR2KeyToFile(audioR2Key, audioPath);
       await runFfmpeg([
         '-y', '-i', clipPath, '-i', audioPath,
         '-map', '0:v', '-map', '1:a', '-shortest',
         '-c:v', 'copy', '-c:a', 'aac', outPath,
       ]);
+      const r2Key = `generations/${generationId}.mp4`;
+      await uploadFileToR2(outPath, r2Key);
+      return { r2Key, masterR2Key };
     } else {
       const clipPaths: string[] = [];
       for (let i = 0; i < inputR2Keys.length; i++) {
@@ -96,11 +105,10 @@ export async function runFfmpegOp(data: FfmpegJobData): Promise<string> {
         // Codec/resolution mismatch across clips — fall back to a re-encode.
         await runFfmpeg(['-y', '-f', 'concat', '-safe', '0', '-i', listPath, '-c:v', 'libx264', '-c:a', 'aac', outPath]);
       }
+      const r2Key = `generations/${generationId}.mp4`;
+      await uploadFileToR2(outPath, r2Key);
+      return { r2Key };
     }
-
-    const r2Key = `generations/${generationId}.mp4`;
-    await uploadFileToR2(outPath, r2Key);
-    return r2Key;
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }
