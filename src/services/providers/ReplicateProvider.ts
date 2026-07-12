@@ -79,6 +79,16 @@ export class ReplicateProvider implements ModelProvider {
         resolution: input.resolution,
         aspect_ratio: input.aspectRatio,
       };
+    } else if (input.model === 'kwaivgi/kling-v3-motion-control') {
+      // Kling v3 motion control — STANDALONE integration (Plan 09.6-03), no 9.6 preset wires
+      // this yet. Live-verified schema (2026-07-12): required `image` (reference character
+      // image) + `video` (reference driver video), `mode` enum std/pro (default 'pro' upstream;
+      // we always send it explicitly here so callers control the tier).
+      replicateInput = {
+        image: input.klingMotionImage,
+        video: input.klingMotionVideo,
+        mode: input.klingMotionMode ?? 'std',
+      };
     } else if (input.model === 'alibaba/happyhorse-1.1') {
       // HappyHorse 1.1: text-to-video (empty images array) OR image-to-video (single first-frame
       // image). Uses an `images` array field (NOT Seedance's reference_images + [ImageN] tokens).
