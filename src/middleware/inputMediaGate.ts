@@ -29,7 +29,9 @@ function faceSlotUrls(req: Request): string[] {
   // 09.6 GAP-2: forward-protection for the wired Wan/DreamActor Marlon Motion Transfer fallbacks
   // (D-03) — scans the user's uploaded face photo before dispatch.
   if (r.mediaType === 'character_replace' && r.characterReplaceImage) return [r.characterReplaceImage];
-  // 09.6 GAP-2: the 'chain' media_type case (UVU + Marlon) is added in Plan 04.
+  // 09.6 GAP-2/Plan 04: the 'chain' media_type case — You vs You's resolved photo slot(s) feed
+  // the chain's image_stage; scan every one before dispatch (T-09.6-10).
+  if (r.mediaType === 'chain' && r.chainInputImages?.length) return r.chainInputImages;
   return [];
 }
 

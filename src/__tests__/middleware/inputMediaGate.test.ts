@@ -102,8 +102,8 @@ describe('inputMediaGate', () => {
     expect(next).toHaveBeenCalled();
   });
 
-  // 09.6 GAP-2: video/character_replace face-input coverage. UVU + Marlon (media_type 'chain')
-  // are gated via the Plan-04 'chain' case (tested there) — not covered here.
+  // 09.6 GAP-2: video/character_replace face-input coverage. UVU's 'chain' media_type case is
+  // covered in the describe block below (09.6-04).
   describe('09.6 GAP-2: video/character_replace face-input coverage', () => {
     it('blocks KBO (registered "video" preset) selfie with 403 when scanInputMedia flags nsfw', async () => {
       mockScanInputMedia.mockResolvedValue({ blocked: true, reason: 'nsfw' });
@@ -161,6 +161,40 @@ describe('inputMediaGate', () => {
       expect(mockScanInputMedia).toHaveBeenCalledWith('https://r2/marlon-face.jpg');
       expect(next).toHaveBeenCalled();
       expect(res.status).not.toHaveBeenCalled();
+    });
+  });
+
+  // 09.6-04: the chained-job primitive's 'chain' media_type — sole consumer is You vs You (UVU).
+  describe("09.6-04: 'chain' media_type face-input coverage (You vs You)", () => {
+    it('scans the resolved photo slot(s) for a registered chain preset (you-vs-you)', async () => {
+      mockScanInputMedia.mockResolvedValue({ blocked: false });
+      const { req, res, next } = makeReqResNext(
+        { mediaType: 'chain', chainInputImages: ['https://r2/uvu-photo.jpg'] },
+        { preset_id: 'you-vs-you', input_upload_ids: ['photo-1'] },
+      );
+
+      await inputMediaGate(req, res, next);
+
+      expect(mockScanInputMedia).toHaveBeenCalledWith('https://r2/uvu-photo.jpg');
+      expect(next).toHaveBeenCalled();
+      expect(res.status).not.toHaveBeenCalled();
+    });
+
+    it('blocks a registered chain preset (you-vs-you) with 403 when scanInputMedia flags nsfw', async () => {
+      mockScanInputMedia.mockResolvedValue({ blocked: true, reason: 'nsfw' });
+      const { req, res, next } = makeReqResNext(
+        { mediaType: 'chain', chainInputImages: ['https://r2/uvu-photo.jpg'] },
+        { preset_id: 'you-vs-you', input_upload_ids: ['photo-1'] },
+      );
+
+      await inputMediaGate(req, res, next);
+
+      expect(mockScanInputMedia).toHaveBeenCalledWith('https://r2/uvu-photo.jpg');
+      expect(res.status).toHaveBeenCalledWith(403);
+      expect(res.json).toHaveBeenCalledWith(
+        expect.objectContaining({ code: 'INPUT_MEDIA_BLOCKED', reason: 'nsfw' }),
+      );
+      expect(next).not.toHaveBeenCalled();
     });
   });
 });

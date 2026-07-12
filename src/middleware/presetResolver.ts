@@ -250,6 +250,25 @@ export async function presetResolver(req: Request, res: Response, next: NextFunc
         req.body.target_image = slotUrls[1];
         break;
       }
+      case 'chain': {
+        // Chained-job primitive (09.6, D-01/D-05) — sole consumer is You vs You (UVU). The
+        // resolved user photo slot(s) feed the chain's image_stage; the animate/mux config lives
+        // entirely in def.chain (server-only, never reaches the client). Do NOT overwrite
+        // req.body.prompt here — chain presets carry no prompt_template, so the outer OVERWRITE
+        // above already left it '' (expandTemplate returns '' with no template to expand).
+        if (!def.chain) {
+          res.status(400).json({ error: 'Preset is missing its chain descriptor', code: 'INVALID_PRESET' });
+          return;
+        }
+        const resolvedSlots = slotUrls.filter(Boolean);
+        if (resolvedSlots.length === 0) {
+          res.status(400).json({ error: 'Missing required photo', code: 'INVALID_PRESET_INPUT' });
+          return;
+        }
+        req.body.chain_input_images = resolvedSlots;
+        req.body.__chain_def = def.chain;
+        break;
+      }
       case 'video': {
         // Animate Old Photo — image-to-video, fixed short duration (no user-selectable duration
         // slot in the schema); use the preset's declared max_seconds as the actual duration.

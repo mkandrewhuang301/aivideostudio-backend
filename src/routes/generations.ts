@@ -22,6 +22,7 @@ import {
   resolveHappyHorseDuration,
   computeCharacterReplaceCost,
   computeFaceswapCost,
+  computeChainCost,
   createGeneration,
   attachPredictionId,
   listGenerations,
@@ -202,14 +203,17 @@ function prepareCost(req: Request, res: Response, next: NextFunction): void {
     swap_image,
     target_image,
     hair_source,
+    // chain-specific (09.6, D-01/D-05) — set by presetResolver's 'chain' case; never client-supplied
+    chain_input_images,
+    __chain_def,
     // shared for avatar + upscale + character-replace billing (duration not known upfront)
     estimated_duration_seconds,
   } = req.body ?? {};
 
-  // avatar/upscale/character-replace/faceswap branches take no text prompt (D-16/D-22/D-23
-  // presets: motion-transfer, enhancer-video, enhancer-image, ai-influencer, faceswap all have an
-  // empty prompt_template) — only image/video/grok branches require one.
-  if (media_type !== 'avatar' && media_type !== 'upscale' && media_type !== 'character_replace' && media_type !== 'faceswap' && (!prompt || typeof prompt !== 'string')) {
+  // avatar/upscale/character-replace/faceswap/chain branches take no text prompt (D-16/D-22/D-23
+  // presets: motion-transfer, enhancer-video, enhancer-image, ai-influencer, faceswap, chain all
+  // have an empty prompt_template) — only image/video/grok branches require one.
+  if (media_type !== 'avatar' && media_type !== 'upscale' && media_type !== 'character_replace' && media_type !== 'faceswap' && media_type !== 'chain' && (!prompt || typeof prompt !== 'string')) {
     res.status(400).json({ error: 'prompt is required', code: 'INVALID_PROMPT' });
     return;
   }
@@ -495,6 +499,44 @@ function prepareCost(req: Request, res: Response, next: NextFunction): void {
       audioEnabled: true, // native audio baked in — no toggle
       cost,
       referenceImages: refImages.length > 0 ? [refImages[0]] : undefined,
+    };
+    next();
+    return;
+  }
+
+  // Chained-job primitive (09.6, D-01/D-05) — sole 9.6 consumer is You vs You (UVU). Billed via
+  // the cents-rule combined cost (image-stage keyframes + HappyHorse animate); the client's cost/
+  // duration values are never read (T-09.6-09) — cost comes entirely from the server chain
+  // descriptor (__chain_def, stamped by presetResolver's 'chain' case). No dispatch yet (Plan 05).
+  if (media_type === 'chain') {
+    const chainInputImages: string[] = Array.isArray(chain_input_images)
+      ? chain_input_images.filter((u: unknown) => typeof u === 'string')
+      : [];
+    if (chainInputImages.length === 0) {
+      res.status(400).json({ error: 'chain_input_images is required', code: 'INVALID_INPUT' });
+      return;
+    }
+    const chainDef = __chain_def as NonNullable<import('../config/presets').PresetDef['chain']> | undefined;
+    if (!chainDef) {
+      res.status(400).json({ error: 'Missing chain descriptor', code: 'INVALID_INPUT' });
+      return;
+    }
+    let animateDuration: number;
+    try {
+      animateDuration = resolveHappyHorseDuration(chainDef.animate_stage.duration);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message, code: 'INVALID_DURATION' });
+      return;
+    }
+    const clampedChainDef = { ...chainDef, animate_stage: { ...chainDef.animate_stage, duration: animateDuration } };
+    const cost = computeChainCost(clampedChainDef);
+    req.body.cost_credits = cost;
+    req._resolved = {
+      prompt: '',
+      model: clampedChainDef.animate_stage.model,
+      mediaType: 'chain',
+      chainInputImages,
+      cost,
     };
     next();
     return;

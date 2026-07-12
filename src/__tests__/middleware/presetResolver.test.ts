@@ -132,6 +132,33 @@ jest.mock('../../config/presets', () => {
       cost: { type: 'per_second', credits_per_sec: 5, max_seconds: 30 },
       tile: { poster_url: 'https://x.example/poster.jpg', loop_url: 'https://x.example/loop.mp4' },
     },
+    // 09.6-04: the chained-job primitive (D-01/D-05) — sole consumer is You vs You (UVU).
+    {
+      preset_id: 'test-you-vs-you',
+      title: 'Test You vs You',
+      section: 'video_effects',
+      sort_order: 6,
+      status: 'live',
+      media_type: 'chain',
+      model: 'alibaba/happyhorse-1.1', // animate model, for row display (set by def author)
+      chain: {
+        image_stage: {
+          model: 'wan-video/wan-2.7-image',
+          quality: 'high',
+          prompts: ['opening keyframe: current-you walking into the dark arena', 'ending keyframe: young-you under the spotlight'],
+        },
+        animate_stage: {
+          model: 'alibaba/happyhorse-1.1',
+          resolution: '720p',
+          duration: 8,
+          aspect_ratio: '9:16',
+          prompt_template: 'image-1 is the opening, image-2 is the ending reveal',
+        },
+      },
+      input_schema: { slots: [{ kind: 'image', label: 'Your photo', source: 'any' }] },
+      cost: { type: 'flat', credits: 1 },
+      tile: { poster_url: 'https://x.example/poster.jpg', loop_url: 'https://x.example/loop.mp4' },
+    },
   ];
   return { SERVER_PRESETS: FIXTURE_PRESETS };
 });
@@ -291,5 +318,53 @@ describe('presetResolver — D-02 i2v_routing pre-route (SC2, RED until 09.3-03)
 
     expect(req.body.model).toBe('bytedance/seedance-2.0-mini');
     expect(next).toHaveBeenCalled();
+  });
+});
+
+describe("presetResolver — 'chain' media_type (09.6-04, D-01/D-05)", () => {
+  it('resolves the user photo slot into chain_input_images and stamps __chain_def, without overwriting prompt', async () => {
+    mockUploadRows([{ id: 'upload-photo', r2_key: 'uploads/user-1/uvu-photo.jpg' }]);
+    const req = makeReq({
+      preset_id: 'test-you-vs-you',
+      preset_input_upload_ids: ['upload-photo'],
+    });
+    const res = makeRes();
+    const next = jest.fn();
+
+    await presetResolver(req, res, next);
+
+    expect(req.body.chain_input_images).toEqual(['https://r2.example.com/signed/uploads/user-1/uvu-photo.jpg']);
+    expect(req.body.__chain_def).toEqual({
+      image_stage: {
+        model: 'wan-video/wan-2.7-image',
+        quality: 'high',
+        prompts: ['opening keyframe: current-you walking into the dark arena', 'ending keyframe: young-you under the spotlight'],
+      },
+      animate_stage: {
+        model: 'alibaba/happyhorse-1.1',
+        resolution: '720p',
+        duration: 8,
+        aspect_ratio: '9:16',
+        prompt_template: 'image-1 is the opening, image-2 is the ending reveal',
+      },
+    });
+    expect(req.body.media_type).toBe('chain');
+    expect(req.body.prompt).toBe(''); // no prompt_template on chain presets — never overwritten with user text
+    expect(next).toHaveBeenCalled();
+  });
+
+  it('rejects with 400 INVALID_PRESET_INPUT when no photo slot resolves', async () => {
+    const req = makeReq({
+      preset_id: 'test-you-vs-you',
+      preset_input_upload_ids: [],
+    });
+    const res = makeRes();
+    const next = jest.fn();
+
+    await presetResolver(req, res, next);
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'INVALID_PRESET_INPUT' }));
+    expect(next).not.toHaveBeenCalled();
   });
 });
