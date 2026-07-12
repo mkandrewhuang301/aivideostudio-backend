@@ -237,6 +237,33 @@ export function computeFaceswapCost(): number {
   return IMAGE_MODEL_COSTS['openai/gpt-image-2-medium'];
 }
 
+// ─── Kling v3 Motion Control (STANDALONE, Plan 09.6-03) ────────────────────────
+// kwaivgi/kling-v3-motion-control: transfers motion from a reference driver video onto a
+// reference character image (std 720p / pro 1080p). This is a pure provider-layer integration —
+// no 9.6 preset wires it (Marlon uses wan-video/wan-2.2-animate-replace instead, Plan 08); it
+// exists so a FUTURE motion-transfer preset can dispatch it via the API.
+// Live schema verified 2026-07-12 (curl https://api.replicate.com/v1/models/kwaivgi/kling-v3-motion-control):
+//   required: image (reference character image, uri), video (reference driver video, uri, 3-30s)
+//   mode: enum ['std','pro'], default 'pro' — std=720p cost-effective, pro=1080p higher quality
+//   character_orientation: enum ['image','video'], default 'image' — 'image' caps driver video at
+//     10s, 'video' allows up to 30s
+//   prompt: string (optional), keep_original_sound: boolean (default true)
+// Live pricing verified 2026-07-12 (https://replicate.com/kwaivgi/kling-v3-motion-control pricing
+// table): std = $0.07/sec of output video, pro = $0.12/sec of output video.
+// pricing verified live 2026-07-12 — re-verify at build (Replicate model page)
+export const KLING_MOTION_RATE: Record<'std' | 'pro', number> = {
+  std: 0.07, // $/sec
+  pro: 0.12, // $/sec
+};
+
+export const SUPPORTED_KLING_MOTION_MODELS = ['kwaivgi/kling-v3-motion-control'] as const;
+export type SupportedKlingMotionModel = typeof SUPPORTED_KLING_MOTION_MODELS[number];
+
+export function computeKlingMotionControlCost(durationSeconds: number, mode: 'std' | 'pro' = 'std'): number {
+  const ratePerSec = KLING_MOTION_RATE[mode] ?? KLING_MOTION_RATE.std;
+  return Math.ceil(durationSeconds * ratePerSec * CENTS_PER_DOLLAR);
+}
+
 export function computeCostCredits(input: {
   durationSeconds: number;
   resolution: '480p' | '720p' | '1080p' | '4k';

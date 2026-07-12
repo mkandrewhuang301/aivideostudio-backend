@@ -45,6 +45,10 @@ export interface GenerationInput {
   // Chain-specific (09.6, D-01/D-05) — the resolved user photo slot(s) feeding the chain's
   // image_stage (e.g. UVU's 1-2 keyframe source photos). No dispatch consumer yet (Plan 05).
   chainInputImages?: string[];
+  // Kling v3 motion control — STANDALONE integration (Plan 09.6-03); no 9.6 preset wires these yet.
+  klingMotionImage?: string;              // presigned URL — reference character image
+  klingMotionVideo?: string;              // presigned URL — reference driver video
+  klingMotionMode?: 'std' | 'pro';        // std 720p / pro 1080p
 }
 
 export interface DispatchResult {
