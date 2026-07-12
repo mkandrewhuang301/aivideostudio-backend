@@ -26,6 +26,7 @@ import {
 import { refundCredits } from '../../services/creditService';
 import { sendGenerationComplete } from '../../services/apnsService';
 import { hiveScanQueue } from '../../queue/hiveScanWorker';
+import { ffmpegQueue } from '../../queue/ffmpegWorker';
 import { db } from '../../db/client';
 import { referenceUploads } from '../../db/schema';
 import { sql, inArray } from 'drizzle-orm';
@@ -40,6 +41,15 @@ const provider = new ReplicateProvider();
 async function fetchDeviceToken(userId: string): Promise<string | null> {
   const userRows = await db.execute(sql`SELECT apns_device_token FROM users WHERE id = ${userId}::uuid`);
   return (userRows.rows?.[0] as { apns_device_token: string | null } | undefined)?.apns_device_token ?? null;
+}
+
+// T-09.3-10: params.postprocess is jsonb and (per 09.3-05) will eventually be stamped by our own
+// presetResolver — but until that lands, and defensively even after, never trust audio_r2_key as
+// an arbitrary fetch target. It must look like one of our own internal R2 keys (assets/ prefix),
+// never an absolute URL — the ffmpeg worker only ever presigns+fetches R2 keys, so an unexpected
+// key here would otherwise let a tampered request pull an arbitrary object out of our own bucket.
+function isValidPostprocessAudioKey(key: string): boolean {
+  return key.startsWith('assets/') && !key.includes('://');
 }
 
 // Reconstructs the same GenerationInput the original dispatch used, from the generation row's
@@ -172,6 +182,39 @@ replicateWebhookRouter.post('/', async (req: Request, res: Response) => {
           await refundCredits(generation.user_id, generation.cost_credits, `csam-quarantine-${payload.id}`);
           console.warn(`[webhook/replicate] CSAM flagged: generation ${generation.id} quarantined, credits refunded.`);
           res.status(200).json({ received: true });
+          return;
+        }
+      }
+
+      // 09.3 SC1: params.postprocess (stamped later by presetResolver, 09.3-05) routes the just-
+      // archived clip through the ffmpeg worker (mux trend audio / concat clips) instead of
+      // marking completed immediately — the worker itself calls markCompleted once ffmpeg is
+      // done. Only reachable once Hive has passed (or is disabled) above, so CSAM scanning is
+      // never bypassed for postprocessed generations either.
+      const params = (generation.params ?? {}) as Record<string, unknown>;
+      const postprocess = params.postprocess as { op?: string; audio_r2_key?: string } | undefined;
+      const postprocessOp = postprocess?.op;
+      if (postprocessOp === 'mux' || postprocessOp === 'concat') {
+        const audioR2Key = postprocess?.audio_r2_key;
+        if (audioR2Key !== undefined && !isValidPostprocessAudioKey(audioR2Key)) {
+          console.error(
+            `[webhook/replicate] Rejecting postprocess for generation ${generation.id}: invalid audio_r2_key (must be an assets/-prefixed R2 key, not a URL)`,
+          );
+          // Fall through to the normal markCompleted path below rather than trust a possibly-
+          // tampered value or silently drop the user's paid-for generation.
+        } else {
+          await ffmpegQueue.add('postprocess', {
+            generationId: generation.id,
+            userId: generation.user_id,
+            costCredits: generation.cost_credits,
+            op: postprocessOp,
+            inputR2Keys: [r2Key],
+            audioR2Key,
+            mediaType: 'video',
+          });
+          await deleteRawFaceUploads(generation); // SC1 — best-effort, clip is already archived
+          console.log(`[webhook/replicate] postprocess (${postprocessOp}) queued for generation ${generation.id}`);
+          res.status(200).json({ received: true, postprocess: postprocessOp });
           return;
         }
       }

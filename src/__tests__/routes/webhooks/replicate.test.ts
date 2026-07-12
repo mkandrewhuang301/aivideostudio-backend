@@ -42,6 +42,11 @@ jest.mock('../../../queue/hiveScanWorker', () => ({
   hiveScanQueue: { add: mockHiveScanQueueAdd },
 }));
 
+const mockFfmpegQueueAdd = jest.fn();
+jest.mock('../../../queue/ffmpegWorker', () => ({
+  ffmpegQueue: { add: mockFfmpegQueueAdd },
+}));
+
 jest.mock('../../../services/archivalService', () => ({
   archiveToR2: jest.fn(),
   getUploadPresignedUrl: jest.fn(),
@@ -399,6 +404,74 @@ describe('replicateWebhookRouter', () => {
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ received: true, skipped: 'generation_not_found' });
     expect(archiveToR2).not.toHaveBeenCalled();
+  });
+
+  describe('postprocess -> ffmpegQueue enqueue (09.3 SC1)', () => {
+    it('enqueues ffmpegQueue for a mux postprocess generation and does NOT markCompleted', async () => {
+      (validateWebhook as jest.Mock).mockResolvedValue(true);
+      (getGenerationByPredictionId as jest.Mock).mockResolvedValue({
+        id: 'gen-postprocess-1',
+        user_id: 'u1',
+        status: 'processing',
+        cost_credits: 27,
+        media_type: 'video',
+        params: { postprocess: { op: 'mux', audio_r2_key: 'assets/trend-audio/love-island.m4a' } },
+      });
+      (archiveToR2 as jest.Mock).mockResolvedValue('generations/gen-postprocess-1.mp4');
+
+      const res = await post({ id: 'pred_postprocess_1', status: 'succeeded', output: ['https://replicate.delivery/clip.mp4'] });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ received: true, postprocess: 'mux' });
+      expect(mockFfmpegQueueAdd).toHaveBeenCalledWith('postprocess', {
+        generationId: 'gen-postprocess-1',
+        userId: 'u1',
+        costCredits: 27,
+        op: 'mux',
+        inputR2Keys: ['generations/gen-postprocess-1.mp4'],
+        audioR2Key: 'assets/trend-audio/love-island.m4a',
+        mediaType: 'video',
+      });
+      expect(markCompleted).not.toHaveBeenCalled();
+      expect(sendGenerationComplete).not.toHaveBeenCalled();
+    });
+
+    it('marks completed as usual when params.postprocess is absent (regression guard)', async () => {
+      (validateWebhook as jest.Mock).mockResolvedValue(true);
+      (getGenerationByPredictionId as jest.Mock).mockResolvedValue({
+        id: 'gen-1',
+        user_id: 'u1',
+        status: 'processing',
+        cost_credits: 45,
+        params: {},
+      });
+
+      const res = await post({ id: 'pred_123', status: 'succeeded', output: ['https://replicate.delivery/abc.mp4'] });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ received: true });
+      expect(markCompleted).toHaveBeenCalledWith('gen-1', 'generations/gen-1.mp4');
+      expect(mockFfmpegQueueAdd).not.toHaveBeenCalled();
+    });
+
+    it('falls back to markCompleted and does NOT enqueue when audio_r2_key is not an internal assets/ key (T-09.3-10)', async () => {
+      (validateWebhook as jest.Mock).mockResolvedValue(true);
+      (getGenerationByPredictionId as jest.Mock).mockResolvedValue({
+        id: 'gen-postprocess-2',
+        user_id: 'u1',
+        status: 'processing',
+        cost_credits: 27,
+        media_type: 'video',
+        params: { postprocess: { op: 'mux', audio_r2_key: 'https://evil.example.com/steal.m4a' } },
+      });
+      (archiveToR2 as jest.Mock).mockResolvedValue('generations/gen-postprocess-2.mp4');
+
+      const res = await post({ id: 'pred_postprocess_2', status: 'succeeded', output: ['https://replicate.delivery/clip.mp4'] });
+
+      expect(res.status).toBe(200);
+      expect(mockFfmpegQueueAdd).not.toHaveBeenCalled();
+      expect(markCompleted).toHaveBeenCalledWith('gen-postprocess-2', 'generations/gen-postprocess-2.mp4');
+    });
   });
 
   describe('transient-failure auto-retry', () => {
