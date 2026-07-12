@@ -43,8 +43,8 @@ export async function generateImageWithOpenAI(
 // Magic Editor (SC4): OpenAI-DIRECT inline mask edit. Replicate's openai/gpt-image-2 has NO mask
 // param, so this bypasses Replicate entirely and calls OpenAI's multipart /v1/images/edits
 // endpoint directly — mask = alpha PNG, transparent region = edit target, opaque = preserve.
-// Called synchronously (in-request) from POST /api/generations — never dispatched via
-// ReplicateProvider, never goes through the webhook.
+// Dispatched from openaiGenerationWorker.ts (async, 09.2-13/D-C) — NOT in the synchronous
+// POST /api/generations request path (this function's stale prior doc comment said otherwise).
 export async function generateImageEditWithMask(
   imageUrl: string,
   maskUrl: string,
@@ -56,9 +56,17 @@ export async function generateImageEditWithMask(
     throw new Error('Failed to fetch source/mask for mask edit');
   }
 
+  // The source image's content-type must match its actual bytes — the iOS client uploads it as
+  // JPEG (2026-07-12: switched from PNG to cut Magic Editor's submit-to-navigate time, since a
+  // 2048px photo PNG can run several MB vs. a few hundred KB as JPEG). Read it from R2's response
+  // instead of assuming a fixed type, so this stays correct regardless of what the client sends.
+  // The mask must stay PNG (needs an alpha channel — JPEG has none), unaffected by this.
+  const imageContentType = imgRes.headers.get('content-type') || 'image/png';
+  const imageExt = imageContentType.includes('jpeg') || imageContentType.includes('jpg') ? 'jpg' : 'png';
+
   const form = new FormData();
   form.append('model', 'gpt-image-2');
-  form.append('image', new Blob([await imgRes.arrayBuffer()], { type: 'image/png' }), 'source.png');
+  form.append('image', new Blob([await imgRes.arrayBuffer()], { type: imageContentType }), `source.${imageExt}`);
   form.append('mask', new Blob([await maskRes.arrayBuffer()], { type: 'image/png' }), 'mask.png');
   form.append(
     'prompt',
