@@ -86,6 +86,8 @@ jest.mock('../../services/generationService', () => ({
   SUPPORTED_GROK_MODELS: ['xai/grok-imagine-video-1.5'],
   SUPPORTED_HAPPYHORSE_MODELS: ['alibaba/happyhorse-1.1'],
   SUPPORTED_FACESWAP_MODELS: ['openai/gpt-image-2-medium'],
+  computeCharacterReplaceCost: jest.fn(),
+  computeChainCost: jest.fn(),
   classifyFailureReason: jest.requireActual('../../services/generationService').classifyFailureReason,
 }));
 
@@ -116,6 +118,13 @@ jest.mock('../../services/openaiImageService', () => ({
 // this instead of running the OpenAI call inline in the request.
 jest.mock('../../queue/openaiGenerationQueue', () => ({
   openaiGenerationQueue: {
+    add: jest.fn().mockResolvedValue(undefined),
+  },
+}));
+
+// 09.6-05: the chained-job primitive (UVU) enqueues onto this instead of dispatching inline.
+jest.mock('../../queue/chainGenerationQueue', () => ({
+  chainGenerationQueue: {
     add: jest.fn().mockResolvedValue(undefined),
   },
 }));
@@ -157,6 +166,7 @@ import {
   computeHappyHorseCost,
   resolveHappyHorseDuration,
   computeFaceswapCost,
+  computeChainCost,
   createGeneration,
   attachPredictionId,
   listGenerations,
@@ -168,6 +178,7 @@ import {
 import { getGenerationPresignedUrl, getUploadPresignedUrl } from '../../services/archivalService';
 import { generateImageWithOpenAI, generateImageEditWithMask, generateFaceswap } from '../../services/openaiImageService';
 import { openaiGenerationQueue } from '../../queue/openaiGenerationQueue';
+import { chainGenerationQueue } from '../../queue/chainGenerationQueue';
 import { ReplicateProvider } from '../../services/providers/ReplicateProvider';
 import { db } from '../../db/client';
 
@@ -505,6 +516,84 @@ describe('POST /api/generations — faceswap (async, enqueues to openaiGeneratio
       'dispatch-failure-gen-faceswap-enqueue-fail',
     );
     expect(generateFaceswap).not.toHaveBeenCalled();
+    expect(dispatchMock).not.toHaveBeenCalled();
+  });
+});
+
+// ─── POST /api/generations — chain (09.6-05, D-01/D-05) ──────────────────────
+// The chained-job primitive's sole consumer is You vs You (UVU). This is the ONLY resolved
+// mediaType that never dispatches inline in this route — it always enqueues onto
+// chainGenerationQueue and returns 'processing' immediately; Stage1/Stage2 dispatch logic itself
+// is covered separately in chainGenerationWorker.test.ts.
+
+describe('POST /api/generations — chain (async, enqueues to chainGenerationWorker)', () => {
+  const CHAIN_DEF = {
+    image_stage: { model: 'wan-video/wan-2.7-image', quality: 'high' as const, prompts: ['opening keyframe', 'reveal keyframe'] },
+    animate_stage: { model: 'alibaba/happyhorse-1.1', resolution: '720p' as const, duration: 8, aspect_ratio: '9:16', prompt_template: 'choreography prompt' },
+  };
+  const CHAIN_BODY = {
+    media_type: 'chain',
+    chain_input_images: ['https://example.com/user-photo.jpg'],
+    __chain_def: CHAIN_DEF,
+  };
+
+  it('returns 400 INVALID_INPUT when chain_input_images is empty, without dispatch or deduction', async () => {
+    const res = await request(app)
+      .post('/api/generations')
+      .send({ ...CHAIN_BODY, chain_input_images: [] });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_INPUT');
+    expect(chainGenerationQueue.add).not.toHaveBeenCalled();
+    expect(createGeneration).not.toHaveBeenCalled();
+    expect(deductCredits).not.toHaveBeenCalled();
+  });
+
+  it('enqueues a chain job and returns processing immediately — never dispatches inline', async () => {
+    (computeChainCost as jest.Mock).mockReturnValue(30);
+    (resolveHappyHorseDuration as jest.Mock).mockReturnValue(8);
+    (deductCredits as jest.Mock).mockResolvedValue(true);
+    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-chain-1' });
+
+    const res = await request(app).post('/api/generations').send(CHAIN_BODY);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ generation_id: 'gen-chain-1', status: 'processing' });
+    expect(createGeneration).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'pending', cost_credits: 30, media_type: 'chain' }),
+    );
+    expect(deductCredits).toHaveBeenCalledWith('test-user-id', 30);
+    expect(chainGenerationQueue.add).toHaveBeenCalledWith('generate', {
+      generationId: 'gen-chain-1',
+      userId: 'test-user-id',
+      cost: 30,
+      userPhotoUrls: ['https://example.com/user-photo.jpg'],
+      imageStage: CHAIN_DEF.image_stage,
+      animateStage: CHAIN_DEF.animate_stage,
+    });
+    expect(dispatchMock).not.toHaveBeenCalled();
+    expect(attachPredictionId).not.toHaveBeenCalled();
+  });
+
+  it('enqueue failure returns 502 with refund, never leaves the row pending unrefunded', async () => {
+    (computeChainCost as jest.Mock).mockReturnValue(30);
+    (resolveHappyHorseDuration as jest.Mock).mockReturnValue(8);
+    (deductCredits as jest.Mock).mockResolvedValue(true);
+    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-chain-enqueue-fail' });
+    (chainGenerationQueue.add as jest.Mock).mockRejectedValueOnce(new Error('Redis unreachable'));
+    (markFailed as jest.Mock).mockResolvedValue(true);
+    (refundCredits as jest.Mock).mockResolvedValue(undefined);
+
+    const res = await request(app).post('/api/generations').send(CHAIN_BODY);
+
+    expect(res.status).toBe(502);
+    expect(res.body.error).toContain('Credits have been refunded');
+    expect(markFailed).toHaveBeenCalledWith('gen-chain-enqueue-fail', 'generic_error');
+    expect(refundCredits).toHaveBeenCalledWith(
+      'test-user-id',
+      30,
+      'dispatch-failure-gen-chain-enqueue-fail',
+    );
     expect(dispatchMock).not.toHaveBeenCalled();
   });
 });
@@ -1553,6 +1642,41 @@ describe('GET /api/generations', () => {
     // Infra must not leak.
     expect(row.params.swap_image).toBeUndefined();
     expect(row.params.target_image).toBeUndefined();
+  });
+
+  // T-09.6-13: the server-only chain descriptor (prompts, models, duration) must never reach the
+  // client — presetSafeSerialization strips ANY preset row's params to just preset_id +
+  // preset_input_upload_ids, so params.chain is dropped along with everything else (list).
+  it('never leaks params.chain for a you-vs-you chain preset row (list)', async () => {
+    const chainItem = {
+      ...completedItem,
+      id: 'gen-chain-ser',
+      media_type: 'chain',
+      model: 'alibaba/happyhorse-1.1',
+      prompt: null,
+      r2_key: 'generations/gen-chain-ser.mp4',
+      params: {
+        preset_id: 'you-vs-you',
+        preset_input_upload_ids: ['upload-selfie'],
+        postprocess: { op: 'mux', audio_r2_key: 'audio/uvu-default.mp3' },
+        chain: {
+          image_stage: { model: 'wan-video/wan-2.7-image', quality: 'high', prompts: ['secret keyframe prompt one', 'secret keyframe prompt two'] },
+          animate_stage: { model: 'alibaba/happyhorse-1.1', resolution: '720p', duration: 8, aspect_ratio: '9:16', prompt_template: 'secret choreography prompt' },
+        },
+      },
+    };
+    (listGenerations as jest.Mock).mockResolvedValue([chainItem]);
+
+    const res = await request(app).get('/api/generations');
+
+    expect(res.status).toBe(200);
+    const row = res.body.items[0];
+    expect(row.params).toEqual({
+      preset_id: 'you-vs-you',
+      preset_input_upload_ids: ['upload-selfie'],
+    });
+    expect(row.params.chain).toBeUndefined();
+    expect(row.params.postprocess).toBeUndefined();
   });
 });
 
