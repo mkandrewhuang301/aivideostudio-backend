@@ -18,6 +18,7 @@ import {
   markCompleted,
   markFailed,
   markQuarantined,
+  PERMISSIVE_I2V_MODEL,
   reattachForRetry,
   SUPPORTED_MODELS,
   type GenerationByPredictionRow,
@@ -218,7 +219,56 @@ replicateWebhookRouter.post('/', async (req: Request, res: Response) => {
         }
       }
 
-      const reason = isTransient ? 'provider_error' : classifyFailureReason(payload.error);
+      const failureReason = isTransient ? 'provider_error' : classifyFailureReason(payload.error);
+
+      // 09.3 D-02: Seedance content_policy block on an auto-picked model — fall back to the
+      // permissive real-face/IP i2v catch-all (Grok 1.5) once, instead of failing+refunding.
+      // Own prompt-moderation + the 9.2 input NSFW gate already ran BEFORE dispatch, so by the
+      // time an E005/content_policy block returns here, it's a face/IP block, not NSFW — safe
+      // to retry on a different, more permissive model (T-09.3-07).
+      // NOTE (deviation, Rule 1): the plan's action text allows treating 'copyright' as eligible
+      // too ("implement both as eligible"), but a pre-existing regression test predating this
+      // plan — "does not retry a copyright failure even on a retryable model" (transient-failure
+      // auto-retry describe, committed at 6374b2a, long before 09.3) — pins copyright failures to
+      // ALWAYS fail+refund with no redispatch of any kind. Falling back copyright to Grok would
+      // break that already-green regression guard, which the plan's own acceptance criteria
+      // ("Transient auto-retry describe still passes") requires to keep passing. Scoped fallback
+      // eligibility to content_policy only; copyright still always fails+refunds, unchanged.
+      const generationParams = (generation.params ?? {}) as Record<string, unknown>;
+      const modelExplicitlyPicked = generationParams.model_explicitly_picked === true;
+      const isFallbackEligibleReason = failureReason === 'content_policy';
+      const isFallbackEligible =
+        isFallbackEligibleReason &&
+        generation.media_type === 'video' &&
+        (SUPPORTED_MODELS as readonly string[]).includes(generation.model) &&
+        generation.retry_count < 1 &&
+        !modelExplicitlyPicked;
+
+      if (isFallbackEligible) {
+        try {
+          const retryInput = await buildRetryInput(generation);
+          retryInput.model = PERMISSIVE_I2V_MODEL;
+          const { providerPredictionId } = await provider.dispatch(retryInput, getReplicateWebhookUrl());
+          const reattached = await reattachForRetry(generation.id, providerPredictionId);
+          if (reattached) {
+            console.log(`[webhook/replicate] ${failureReason} block on ${generation.model} — fell back to ${PERMISSIVE_I2V_MODEL} for generation ${generation.id} (${providerPredictionId})`);
+            res.status(200).json({ received: true, fallback: 'grok' });
+            return;
+          }
+          // Guard didn't match (already retried or no longer processing) — another handler beat
+          // us to it; treat as a duplicate rather than risk a second refund.
+          res.status(200).json({ received: true, duplicate: true });
+          return;
+        } catch (fallbackError) {
+          console.error(`[webhook/replicate] Grok fallback dispatch failed for generation ${generation.id}:`, fallbackError);
+          await markFailed(generation.id, 'provider_error');
+          await refundCredits(generation.user_id, generation.cost_credits, payload.id);
+          res.status(200).json({ received: true });
+          return;
+        }
+      }
+
+      const reason = failureReason;
       await markFailed(generation.id, reason);
       await refundCredits(generation.user_id, generation.cost_credits, payload.id);
       console.log(`[webhook/replicate] ${payload.status} (${reason}) raw error: ${JSON.stringify(payload.error)} — refunded ${generation.cost_credits} credits to user ${generation.user_id}`);

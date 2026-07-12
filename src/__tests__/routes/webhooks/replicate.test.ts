@@ -56,6 +56,7 @@ jest.mock('../../../services/generationService', () => ({
   isTransientProviderError: jest.requireActual('../../../services/generationService').isTransientProviderError,
   classifyFailureReason: jest.requireActual('../../../services/generationService').classifyFailureReason,
   SUPPORTED_MODELS: jest.requireActual('../../../services/generationService').SUPPORTED_MODELS,
+  PERMISSIVE_I2V_MODEL: jest.requireActual('../../../services/generationService').PERMISSIVE_I2V_MODEL,
 }));
 
 jest.mock('../../../services/hiveService', () => ({
