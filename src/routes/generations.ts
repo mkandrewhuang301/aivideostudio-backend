@@ -46,6 +46,7 @@ import { refundCredits } from '../services/creditService';
 import { classifyFailureReason, markFailed } from '../services/generationService';
 import { getGenerationPresignedUrl, getUploadPresignedUrl } from '../services/archivalService';
 import { openaiGenerationQueue } from '../queue/openaiGenerationQueue';
+import { chainGenerationQueue } from '../queue/chainGenerationQueue';
 import { getReplicateWebhookUrl } from '../config';
 import type { GenerationInput } from '../services/providers/ModelProvider';
 import { db } from '../db/client';
@@ -690,6 +691,12 @@ generationsRouter.post('/', promptModerationMiddleware, presetResolver, prepareC
           // the resolved preset declares one — read by the webhook to enqueue ffmpegWorker instead
           // of marking the generation complete immediately.
           ...(req._preset.postprocess ? { postprocess: req._preset.postprocess } : {}),
+          // 09.6 D-01/D-05/T-09.6-13: server-only chain descriptor (image_stage prompts +
+          // animate_stage config) for the chained-job primitive (UVU). Stamped so the worker's
+          // enqueue below can be reconstructed from the row if ever needed for debugging — NEVER
+          // reaches the client: presetSafeSerialization strips every preset row's params down to
+          // just preset_id + preset_input_upload_ids regardless of what else is stored here.
+          ...(req.body.__chain_def ? { chain: req.body.__chain_def } : {}),
         }
       : {};
     // D-02: presets are always auto-routed (never trust the client to claim an explicit pick on a
@@ -709,6 +716,39 @@ generationsRouter.post('/', promptModerationMiddleware, presetResolver, prepareC
       cost_credits: resolved.cost,
       media_type: resolved.mediaType,
     });
+
+    // Chained-job primitive (09.6, D-01/D-05, T-09.6-11/T-09.6-12): the SOLE 9.6 consumer is You
+    // vs You (UVU). Credits are already deducted (creditCheckMiddleware, mounted before this
+    // handler) — this ONLY enqueues the chain job (Stage1 keyframes -> Stage2 HappyHorse, run in
+    // chainGenerationWorker.ts) and returns 'processing' immediately. There is no inline dispatch
+    // path for 'chain' — Stage1's replicate.run() call alone can take many seconds, well past the
+    // client's HTTP timeout, same rationale as the Magic Editor/faceswap async conversions below.
+    if (resolved.mediaType === 'chain') {
+      const chainDef = req.body.__chain_def as
+        | { image_stage: { model: string; quality: 'high' | 'medium' | 'low'; prompts: string[] };
+            animate_stage: { model: string; resolution: '720p' | '1080p'; duration: number; aspect_ratio: string; prompt_template: string } }
+        | undefined;
+      try {
+        if (!chainDef) throw new Error('Missing chain descriptor');
+        await chainGenerationQueue.add('generate', {
+          generationId,
+          userId: req.user.dbUserId,
+          cost: resolved.cost,
+          userPhotoUrls: resolved.chainInputImages!,
+          imageStage: chainDef.image_stage,
+          animateStage: chainDef.animate_stage,
+        });
+      } catch (err) {
+        console.error(`[generations] Failed to enqueue chain job for ${generationId}:`, err);
+        await markFailed(generationId, 'generic_error');
+        await refundCredits(req.user.dbUserId, resolved.cost, `dispatch-failure-${generationId}`);
+        res.status(502).json({ error: 'Generation service unavailable. Credits have been refunded.' });
+        return;
+      }
+
+      res.status(200).json({ generation_id: generationId, status: 'processing' });
+      return;
+    }
 
     // Magic Editor (SC4, 09.2-08): OpenAI-direct mask edit. D-C (gap closure, 09.2-13): this used
     // to run the OpenAI call SYNCHRONOUSLY in-request — gpt-image-2 edits take ~47s, well past
