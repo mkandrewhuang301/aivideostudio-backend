@@ -45,12 +45,19 @@ jest.mock('../../services/creditService', () => ({ refundCredits: jest.fn() }));
 // D-E guard: this module must NEVER reap raw face uploads. Mock it so we can assert it's not called.
 jest.mock('../../services/uploadCleanup', () => ({ deleteRawFaceUploads: jest.fn() }));
 
+// openaiGenerationWorker now imports hiveScanQueue from hiveScanWorker.ts (the Hive-error-retry
+// fix) — that module also imports apnsService + db/client, which need the same mocks
+// hiveScanWorker.test.ts already uses, or module load would try a real Neon connection.
+jest.mock('../../services/apnsService', () => ({ sendGenerationComplete: jest.fn() }));
+jest.mock('../../db/client', () => ({ db: { execute: jest.fn() } }));
+
 import { generateFaceswap, generateImageEditWithMask } from '../../services/openaiImageService';
 import { scanForCsam } from '../../services/hiveService';
 import { markCompleted, markFailed, markQuarantined } from '../../services/generationService';
 import { refundCredits } from '../../services/creditService';
 import { deleteRawFaceUploads } from '../../services/uploadCleanup';
 import { processOpenAIGeneration } from '../../queue/openaiGenerationWorker';
+import { hiveScanQueue } from '../../queue/hiveScanWorker';
 import type { OpenAIGenerationJob } from '../../queue/openaiGenerationQueue';
 
 const FACESWAP_JOB: OpenAIGenerationJob = {
@@ -124,13 +131,20 @@ describe('processOpenAIGeneration — faceswap', () => {
     expect(deleteRawFaceUploads).not.toHaveBeenCalled();
   });
 
-  it('Hive scan error → still markCompleted (scan already ran, do not leave pending)', async () => {
+  it('Hive scan error → queues a retry via hiveScanQueue, never markCompleted (CLAUDE.md Rule 4: no unscanned content shipped)', async () => {
     (generateFaceswap as jest.Mock).mockResolvedValue('generations/gen-fs-1.png');
     (scanForCsam as jest.Mock).mockRejectedValue(new Error('Hive timeout'));
 
     await processOpenAIGeneration(FACESWAP_JOB);
 
-    expect(markCompleted).toHaveBeenCalledWith('gen-fs-1', 'generations/gen-fs-1.png');
+    expect(hiveScanQueue.add).toHaveBeenCalledWith('scan', {
+      generationId: 'gen-fs-1',
+      r2Key: 'generations/gen-fs-1.png',
+      userId: 'user-1',
+      costCredits: 5,
+      mediaType: 'image',
+    });
+    expect(markCompleted).not.toHaveBeenCalled();
     expect(markQuarantined).not.toHaveBeenCalled();
     expect(refundCredits).not.toHaveBeenCalled();
   });

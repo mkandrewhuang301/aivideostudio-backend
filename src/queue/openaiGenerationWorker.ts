@@ -16,6 +16,7 @@ import { generateFaceswap, generateImageEditWithMask } from '../services/openaiI
 import { markCompleted, markFailed, markQuarantined, classifyFailureReason } from '../services/generationService';
 import { refundCredits } from '../services/creditService';
 import { scanForCsam } from '../services/hiveService';
+import { hiveScanQueue } from './hiveScanWorker';
 import type { OpenAIGenerationJob } from './openaiGenerationQueue';
 
 const QUEUE_NAME = 'openai-generation';
@@ -55,11 +56,20 @@ export async function processOpenAIGeneration(data: OpenAIGenerationJob): Promis
         return;
       }
     } catch (hiveErr) {
-      // The scan already ran the OpenAI call and produced r2Key — do NOT leave the row pending
-      // waiting on a scan retry queue that doesn't exist for this path; log and complete, same
-      // as any other best-effort Hive failure elsewhere in the codebase.
-      console.error(`[openai-generation] Hive scan error for ${generationId} — completing without retry:`, hiveErr);
-      await markCompleted(generationId, r2Key);
+      // FIX (2026-07-12): this used to mark the row completed on any Hive error, shipping
+      // unscanned content — CLAUDE.md Rule 4 violation. hiveScanQueue (hiveScanWorker.ts) is a
+      // generic, media-type-agnostic retry queue that already exists for exactly this — the
+      // Replicate webhook path (webhooks/replicate.ts) already routes Hive errors through it.
+      // Mirror that here instead of completing without a scan.
+      console.error(`[openai-generation] Hive scan error for ${generationId} — queuing retry:`, hiveErr);
+      await hiveScanQueue.add('scan', {
+        generationId,
+        r2Key,
+        userId,
+        costCredits: cost,
+        mediaType: 'image', // both faceswap and magic-editor are image edits
+      });
+      console.log(`[openai-generation] Hive retry queued for generation ${generationId}`);
       return;
     }
   }
