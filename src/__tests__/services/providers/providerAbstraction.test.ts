@@ -276,7 +276,7 @@ describe('ReplicateProvider.dispatch — Wan 2.2 Animate Replace (AI Influencer,
     mockGet.mockReset();
   });
 
-  it('sends { video, character_image, resolution: "720" } for character_replace', async () => {
+  it('sends { video, character_image, resolution: "720", merge_audio: true } for character_replace (default, no characterReplaceMergeAudio — ai-influencer unchanged)', async () => {
     mockCreate.mockResolvedValue({ id: 'pred-replace-1' });
 
     const provider = new ReplicateProvider();
@@ -297,8 +297,36 @@ describe('ReplicateProvider.dispatch — Wan 2.2 Animate Replace (AI Influencer,
       video: 'https://example.com/source.mp4',
       character_image: 'https://example.com/character.jpg',
       resolution: '720',
+      merge_audio: true,
     });
     expect(callArgs.webhook_events_filter).toEqual(['completed']);
+  });
+
+  // 09.6-08 (D-04): Marlon Motion Transfer sets characterReplaceMergeAudio: false (mux
+  // postprocess present) so the raw Wan output is silent — a clean Plan-01 silent master.
+  it('sends merge_audio: false when characterReplaceMergeAudio is explicitly false (Marlon)', async () => {
+    mockCreate.mockResolvedValue({ id: 'pred-replace-2' });
+
+    const provider = new ReplicateProvider();
+    await provider.dispatch(
+      {
+        prompt: '',
+        model: 'wan-video/wan-2.2-animate-replace',
+        mediaType: 'character_replace',
+        characterReplaceVideo: 'https://example.com/driver.mp4',
+        characterReplaceImage: 'https://example.com/photo.jpg',
+        characterReplaceMergeAudio: false,
+      },
+      'https://example.com/webhooks/replicate',
+    );
+
+    const callArgs = mockCreate.mock.calls[0][0];
+    expect(callArgs.input).toEqual({
+      video: 'https://example.com/driver.mp4',
+      character_image: 'https://example.com/photo.jpg',
+      resolution: '720',
+      merge_audio: false,
+    });
   });
 });
 

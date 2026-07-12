@@ -15,7 +15,7 @@ describe('presets registry config', () => {
     expect(typeof PRESETS_VERSION).toBe('number');
   });
 
-  it('includes all 19 live presets (7 original + AI Influencer D-23 + Clothes Swap 09.1-11 + Faceswap 09.2-07 + Magic Editor 09.2-08 + 09.3-06 8-row registry drop)', () => {
+  it('includes all 21 live presets (7 original + AI Influencer D-23 + Clothes Swap 09.1-11 + Faceswap 09.2-07 + Magic Editor 09.2-08 + 09.3-06 8-row registry drop + 09.6-08 kbo-fan-cam/marlon-motion)', () => {
     const liveIds = SERVER_PRESETS.filter((p) => p.status === 'live').map((p) => p.preset_id);
     expect(liveIds.sort()).toEqual(
       [
@@ -38,6 +38,8 @@ describe('presets registry config', () => {
         'yearbook-90s',
         'pro-headshot',
         'restore-old-photo',
+        'kbo-fan-cam',
+        'marlon-motion',
       ].sort(),
     );
   });
@@ -82,6 +84,18 @@ describe('presets registry config', () => {
     expect(serialized).not.toContain('script_expansion');
     expect(serialized).not.toContain('driving_video_url');
     expect(serialized).not.toContain('postprocess');
+  });
+
+  // 09.6-08 (SC3/D-11, T-09.6-21): kbo-fan-cam/marlon-motion's server-only fields — the strong
+  // stadium prompt and Marlon's bundled driver clip key must never leak to the client.
+  it('CLIENT_PRESETS strips driver_video_asset and postprocess from every row (SC3/D-11, T-09.6-21)', () => {
+    for (const preset of CLIENT_PRESETS) {
+      expect(preset).not.toHaveProperty('driver_video_asset');
+      expect(preset).not.toHaveProperty('postprocess');
+    }
+    const serialized = JSON.stringify(CLIENT_PRESETS);
+    expect(serialized).not.toContain('driver_video_asset');
+    expect(serialized).not.toContain('assets/presets/marlon-motion/driver-v1.mp4');
   });
 
   // 09.3-06: PresetSheetMeta.preparing_label is deliberately CLIENT-SAFE (unlike every other

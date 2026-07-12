@@ -159,6 +159,38 @@ jest.mock('../../config/presets', () => {
       cost: { type: 'flat', credits: 1 },
       tile: { poster_url: 'https://x.example/poster.jpg', loop_url: 'https://x.example/loop.mp4' },
     },
+    // 09.6-08: kbo-fan-cam — SINGLE-SHOT 'video' path (selfie -> HappyHorse + mux, no chain).
+    {
+      preset_id: 'kbo-fan-cam',
+      title: 'Korean Baseball Fan Cam',
+      section: 'video_effects',
+      sort_order: 8,
+      status: 'live',
+      media_type: 'video',
+      model: 'alibaba/happyhorse-1.1',
+      prompt_template: 'STRONG stadium fan-cam prompt',
+      input_schema: { slots: [{ kind: 'image', label: 'Your selfie', source: 'any' }] },
+      postprocess: { op: 'mux', audio_r2_key: 'assets/presets/kbo-fan-cam/audio-v1.m4a' },
+      cost: { type: 'per_second', credits_per_sec: 14, max_seconds: 5 },
+      tile: { poster_url: 'https://x.example/poster.jpg', loop_url: 'https://x.example/loop.mp4' },
+    },
+    // 09.6-08: marlon-motion — SINGLE-SHOT 'character_replace' path with a BUNDLED driver clip
+    // (driver_video_asset) instead of a second user-uploaded video slot (ai-influencer's shape).
+    {
+      preset_id: 'marlon-motion',
+      title: 'Marlon Motion Transfer',
+      section: 'video_effects',
+      sort_order: 9,
+      status: 'live',
+      media_type: 'character_replace',
+      model: 'wan-video/wan-2.2-animate-replace',
+      prompt_template: '',
+      input_schema: { slots: [{ kind: 'image', label: 'Your photo', source: 'any' }] },
+      driver_video_asset: 'assets/presets/marlon-motion/driver-v1.mp4',
+      postprocess: { op: 'mux', audio_r2_key: 'assets/presets/marlon-motion/audio-v1.m4a' },
+      cost: { type: 'per_second', credits_per_sec: 5, max_seconds: 30 },
+      tile: { poster_url: 'https://x.example/poster.jpg', loop_url: 'https://x.example/loop.mp4' },
+    },
   ];
   return { SERVER_PRESETS: FIXTURE_PRESETS };
 });
@@ -366,5 +398,46 @@ describe("presetResolver — 'chain' media_type (09.6-04, D-01/D-05)", () => {
     expect(res.status).toHaveBeenCalledWith(400);
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'INVALID_PRESET_INPUT' }));
     expect(next).not.toHaveBeenCalled();
+  });
+});
+
+describe('presetResolver — 09.6-08 kbo-fan-cam single-shot (video path)', () => {
+  it('resolves the selfie slot into reference_images, keeps the video media_type, and stamps the mux postprocess', async () => {
+    mockUploadRows([{ id: 'upload-selfie', r2_key: 'uploads/user-1/selfie.jpg' }]);
+    const req = makeReq({
+      preset_id: 'kbo-fan-cam',
+      preset_input_upload_ids: ['upload-selfie'],
+    });
+    const res = makeRes();
+    const next = jest.fn();
+
+    await presetResolver(req, res, next);
+
+    expect(req.body.media_type).toBe('video');
+    expect(req.body.model).toBe('alibaba/happyhorse-1.1');
+    expect(req.body.resolution).toBe('720p');
+    expect(req.body.reference_images).toEqual(['https://r2.example.com/signed/uploads/user-1/selfie.jpg']);
+    expect(req._preset?.postprocess?.op).toBe('mux');
+    expect(next).toHaveBeenCalled();
+  });
+});
+
+describe('presetResolver — 09.6-08 marlon-motion single-shot (character_replace bundled driver)', () => {
+  it('pairs the bundled driver_video_asset with the user photo slot, not a second upload slot', async () => {
+    mockUploadRows([{ id: 'upload-photo', r2_key: 'uploads/user-1/marlon-photo.jpg' }]);
+    const req = makeReq({
+      preset_id: 'marlon-motion',
+      preset_input_upload_ids: ['upload-photo'],
+    });
+    const res = makeRes();
+    const next = jest.fn();
+
+    await presetResolver(req, res, next);
+
+    expect(req.body.media_type).toBe('character_replace');
+    expect(req.body.character_replace_video).toBe('assets/presets/marlon-motion/driver-v1.mp4');
+    expect(req.body.character_replace_image).toBe('https://r2.example.com/signed/uploads/user-1/marlon-photo.jpg');
+    expect(req._preset?.postprocess?.op).toBe('mux');
+    expect(next).toHaveBeenCalled();
   });
 });
