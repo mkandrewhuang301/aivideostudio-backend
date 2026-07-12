@@ -436,6 +436,49 @@ export const SERVER_PRESETS: PresetDef[] = [
     },
     tile: placeholderTile('vfx-pack'),
   },
+  {
+    // Korean Baseball Fan Cam (09.6 D-02, FINAL 2026-07-12): SINGLE-SHOT — selfie straight into
+    // HappyHorse 1.1 (no GPT-Image-2 compositor step; dropped for the generate-then-reupload
+    // latency hit). The stadium-fancam illusion rides entirely on prompt strength (the reference
+    // + STRONG prompt combo), so this is the existing 09.3 single-call 'video' path + postprocess
+    // mux — NOT a chain (chain primitive's sole 9.6 consumer is You vs You).
+    // 09.6 D-02 FALLBACK: if HappyHorse preserves the selfie's original background instead of
+    // transplanting to the stadium (build-time test), add a Wan 2.7 Image compositor step (same
+    // model UVU uses, Plan 05 — NOT GPT-Image-2, which was rejected for permissiveness) and
+    // convert this row to a chain (see Plans 04/05).
+    preset_id: 'kbo-fan-cam',
+    title: 'Korean Baseball Fan Cam',
+    subtitle: 'You, in the stands',
+    section: 'video_effects',
+    sort_order: 8,
+    status: 'live',
+    badge: 'NEW',
+    media_type: 'video',
+    model: 'alibaba/happyhorse-1.1',
+    prompt_template:
+      'Turn this selfie into a candid Korean baseball stadium fan-cam shot: telephoto lens ' +
+      'compression, the person seated in the stadium crowd under bright stadium floodlights at ' +
+      'night, cheering and reacting with excitement, other fans blurred around them in a candid ' +
+      'crowd framing, vertical 9:16 broadcast composition, a lower-third scoreboard graphic overlay ' +
+      'at the bottom of frame (generic team names and score, no real team or broadcaster logos), ' +
+      'mild broadcast-camera softness and grain, preserve the person\'s exact face and identity.',
+    input_schema: {
+      slots: [{ kind: 'image', label: 'Your selfie', source: 'any' }],
+    },
+    // TODO(art): default stadium ambience/crowd-noise track — replace via `npm run
+    // upload:preset-art` once delivered (D-09).
+    postprocess: { op: 'mux', audio_r2_key: 'assets/presets/kbo-fan-cam/audio-v1.m4a' },
+    // $0.14/sec @720p (HappyHorse pricing, matches D-01's UVU rate) — computeHappyHorseCost.
+    cost: { type: 'per_second', credits_per_sec: 14, max_seconds: 5 },
+    sheet: {
+      description:
+        'Upload a selfie — land courtside in a candid Korean baseball stadium fan-cam moment.',
+      aspect_label: 'Vertical',
+      duration_label: '5s',
+      resolution_label: '720p',
+    },
+    tile: placeholderTile('kbo-fan-cam'),
+  },
 
   // ─── Photo Effects (output = still image — D-02 revised 2026-07-06, below Video Effects) ─
   {
