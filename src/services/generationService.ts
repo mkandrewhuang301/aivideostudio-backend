@@ -7,6 +7,7 @@ import { db } from '../db/client';
 import { generations } from '../db/schema';
 import { sql, desc, lt, eq, and, notInArray, or } from 'drizzle-orm';
 import type { GenerationStatus, NewGeneration } from '../db/schema';
+import type { PresetDef } from '../config/presets';
 
 export const CREDITS_PER_DOLLAR = 50; // subscription/topup grant scale only (revenuecat.ts: 500 credits ≈ $9.99) — NEVER use for per-generation cost math
 
@@ -125,6 +126,18 @@ export type SupportedImageModel = typeof SUPPORTED_IMAGE_MODELS[number];
 // Flat cost for image models — no duration involved (CLAUDE.md Rule 7 does not apply to images)
 export function computeImageCostCredits(model: string): number {
   return IMAGE_MODEL_COSTS[model] ?? 0;
+}
+
+// ─── Chained-job primitive (09.6, D-01/D-05) — sole consumer is You vs You (UVU) ──────────────
+// image_stage keyframes (Wan 2.7 Image, priced generically via IMAGE_MODEL_COSTS — do NOT
+// hardcode a model id or number here; Plan 05 adds the actual
+// IMAGE_MODEL_COSTS['wan-video/wan-2.7-image'] entry once its live pricing is verified) summed
+// with the HappyHorse animate stage (cents rule: 1 credit = 1¢ provider cost, rounded up per
+// stage). Kling motion-control was dropped from the chain's animate step — HappyHorse-only.
+export function computeChainCost(chain: NonNullable<PresetDef['chain']>): number {
+  const imageStageCost = chain.image_stage.prompts.length * (IMAGE_MODEL_COSTS[chain.image_stage.model] ?? 0);
+  const animateStageCost = computeHappyHorseCost(chain.animate_stage.duration, chain.animate_stage.resolution);
+  return imageStageCost + animateStageCost;
 }
 
 // ─── DreamActor M2.0 (avatar) ─────────────────────────────────────────────────

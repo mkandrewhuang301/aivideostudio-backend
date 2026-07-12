@@ -61,7 +61,7 @@ const VALID_VIDEO_ASPECT_RATIOS = ['16:9', '9:16', '1:1', '4:3', '3:4'];
 interface ResolvedGenerationRequest {
   prompt: string;
   model: string;
-  mediaType: 'video' | 'image' | 'avatar' | 'upscale' | 'character_replace' | 'faceswap';
+  mediaType: 'video' | 'image' | 'avatar' | 'upscale' | 'character_replace' | 'faceswap' | 'chain';
   // Video-only
   durationSeconds?: number;
   resolution?: '480p' | '720p' | '1080p' | '4k';
@@ -95,6 +95,9 @@ interface ResolvedGenerationRequest {
   swapImage?: string;
   targetImage?: string;
   hairSource?: 'target' | 'user';
+  // Chain-only (09.6, D-01/D-05) — resolved user photo slot(s) for the chain's image_stage
+  // (UVU's sole 9.6 consumer). No dispatch consumer yet (Plan 05 adds the worker).
+  chainInputImages?: string[];
   cost: number;
 }
 

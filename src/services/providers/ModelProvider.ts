@@ -5,7 +5,7 @@
 export interface GenerationInput {
   prompt: string;
   model: string;
-  mediaType?: 'video' | 'image' | 'avatar' | 'upscale' | 'character_replace' | 'faceswap';
+  mediaType?: 'video' | 'image' | 'avatar' | 'upscale' | 'character_replace' | 'faceswap' | 'chain';
   // Video-specific (undefined for image/avatar/upscale generations)
   durationSeconds?: number;              // NEVER -1 when present (CLAUDE.md Rule 7)
   resolution?: '480p' | '720p' | '1080p' | '4k';
@@ -37,6 +37,9 @@ export interface GenerationInput {
   swapImage?: string;    // presigned URL — user's source face (the face to place)
   targetImage?: string;  // presigned URL — image the face is placed onto
   hairSource?: 'target' | 'user'; // default 'target'
+  // Chain-specific (09.6, D-01/D-05) — the resolved user photo slot(s) feeding the chain's
+  // image_stage (e.g. UVU's 1-2 keyframe source photos). No dispatch consumer yet (Plan 05).
+  chainInputImages?: string[];
 }
 
 export interface DispatchResult {

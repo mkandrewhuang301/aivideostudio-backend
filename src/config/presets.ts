@@ -20,7 +20,7 @@ export const PRESETS_VERSION = 1;
 export type PresetSection = 'hero' | 'video_effects' | 'photo_effects' | 'avatar_center' | 'shows_vlogs';
 export type PresetStatus = 'live' | 'soon';
 export type PresetBadge = 'NEW' | 'HOT';
-export type PresetMediaType = 'video' | 'image' | 'avatar' | 'upscale' | 'character_replace' | 'faceswap';
+export type PresetMediaType = 'video' | 'image' | 'avatar' | 'upscale' | 'character_replace' | 'faceswap' | 'chain';
 
 export interface PresetSlot {
   kind: 'image' | 'video';
@@ -149,6 +149,17 @@ export interface PresetDef {
    * Never reaches the client.
    */
   postprocess?: { op: 'mux' | 'concat'; audio_r2_key?: string };
+  /**
+   * SERVER-ONLY (09.6, D-01/D-05). The chained-job pipeline descriptor for `media_type: 'chain'`
+   * presets — the SOLE 9.6 consumer is You vs You (UVU): `image_stage` composes N keyframes
+   * (Wan 2.7 Image, model-generic lookup — see `computeChainCost`), `animate_stage` is
+   * HappyHorse-1.1-only (the Kling motion-control path was dropped; Marlon ships single-shot).
+   * Never reaches the client — `CLIENT_PRESETS` strips this field entirely (D-11, T-09.6-08).
+   */
+  chain?: {
+    image_stage: { model: string; quality: 'high' | 'medium' | 'low'; prompts: string[] };
+    animate_stage: { model: string; resolution: '720p' | '1080p'; duration: number; aspect_ratio: string; prompt_template: string };
+  };
   /**
    * SERVER-ONLY provenance (09.3, D-02). Pre-routes `req.body.model` before dispatch:
    * - 'grok': known real-face preset — skip the doomed Seedance attempt, dispatch straight to
@@ -872,6 +883,7 @@ export const CLIENT_PRESETS = SERVER_PRESETS.map((def) => {
     dialogue_prompt_template,
     postprocess,
     i2v_routing,
+    chain,
     ...rest
   } = def;
 
