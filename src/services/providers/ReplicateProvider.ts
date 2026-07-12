@@ -48,6 +48,10 @@ export class ReplicateProvider implements ModelProvider {
         video: input.characterReplaceVideo,
         character_image: input.characterReplaceImage,
         resolution: '720',
+        // D-04: defaults true (ai-influencer's existing behavior — driver clip's own audio
+        // survives); Marlon's mux-postprocess dispatch sets this false via prepareCost so the raw
+        // clip is silent (clean Plan-01 silent master, re-muxed with the bundled default track).
+        merge_audio: input.characterReplaceMergeAudio ?? true,
       };
     } else if (input.mediaType === 'upscale' && input.model === 'recraft-ai/recraft-crisp-upscale') {
       // Recraft Crisp Upscale (Enhancer — image path): single-field schema, the entire model

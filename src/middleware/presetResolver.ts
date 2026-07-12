@@ -175,8 +175,18 @@ export async function presetResolver(req: Request, res: Response, next: NextFunc
         // AI Influencer (D-23): user's own video (motion/background source) + a character image
         // that replaces them — the inverse framing from Motion Transfer, which keeps the PHOTO's
         // background rather than the user's own video's background.
-        req.body.character_replace_video = slotUrls[0];
-        req.body.character_replace_image = slotUrls[1];
+        // Marlon Motion Transfer (09.6 D-03): a BUNDLED driver clip (def.driver_video_asset)
+        // replaces the user-uploaded video slot — the user's single photo slot (slotUrls[0])
+        // becomes character_replace_image, pairing with the bundled driver as
+        // character_replace_video. ai-influencer (no driver_video_asset) keeps the original
+        // two-slot shape unchanged.
+        if (def.driver_video_asset) {
+          req.body.character_replace_video = def.driver_video_asset;
+          req.body.character_replace_image = slotUrls[0];
+        } else {
+          req.body.character_replace_video = slotUrls[0];
+          req.body.character_replace_image = slotUrls[1];
+        }
         const clientDuration =
           typeof req.body.estimated_duration_seconds === 'number' && req.body.estimated_duration_seconds > 0
             ? req.body.estimated_duration_seconds

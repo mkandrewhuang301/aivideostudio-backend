@@ -33,6 +33,11 @@ export interface GenerationInput {
   // Character-replace-specific — Wan 2.2 Animate Replace (wan-video/wan-2.2-animate-replace)
   characterReplaceVideo?: string; // presigned URL — source video whose background/motion/lighting is kept
   characterReplaceImage?: string; // presigned URL — character image that replaces the person in the video
+  // 09.6 D-04: Wan's own merge_audio defaults TRUE (preserves the driver clip's audio in the
+  // output). Set false for presets that mux a separate default audio track afterward (Marlon) so
+  // the raw dispatch output is silent — a clean Plan-01 silent master. Undefined/true preserves
+  // ai-influencer's existing behavior exactly (no postprocess, driver-clip audio stays).
+  characterReplaceMergeAudio?: boolean;
   // Faceswap-specific — Easel Advanced Face Swap (easel/advanced-face-swap)
   swapImage?: string;    // presigned URL — user's source face (the face to place)
   targetImage?: string;  // presigned URL — image the face is placed onto

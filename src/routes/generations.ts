@@ -89,9 +89,11 @@ interface ResolvedGenerationRequest {
   upscalerTargetFps?: number;
   // Upscale-only (Recraft Crisp Upscale — image path; distinct from the video upscaler above)
   upscalerInputImage?: string;
-  // Character-replace-only (Wan 2.2 Animate Replace — AI Influencer, D-23)
+  // Character-replace-only (Wan 2.2 Animate Replace — AI Influencer, D-23; Marlon Motion
+  // Transfer bundled-driver, 09.6 D-03/D-04)
   characterReplaceVideo?: string;
   characterReplaceImage?: string;
+  characterReplaceMergeAudio?: boolean;
   // Faceswap-only (inline OpenAI gpt-image-2, 09.2-12)
   swapImage?: string;
   targetImage?: string;
@@ -268,6 +270,10 @@ function prepareCost(req: Request, res: Response, next: NextFunction): void {
       ? estimated_duration_seconds : 5;
     const cost = computeCharacterReplaceCost(estimatedDuration);
     req.body.cost_credits = cost;
+    // 09.6 D-04: presets with a mux postprocess (Marlon) mux a separate default audio track after
+    // dispatch, so the raw Wan output must be silent — a clean Plan-01 silent master. ai-influencer
+    // (no postprocess) keeps merge_audio unset, preserving its existing driver-audio behavior.
+    const characterReplaceMergeAudio = req._preset?.postprocess?.op === 'mux' ? false : undefined;
     req._resolved = {
       prompt: '',
       model: replaceModel,
@@ -275,6 +281,7 @@ function prepareCost(req: Request, res: Response, next: NextFunction): void {
       durationSeconds: estimatedDuration,
       characterReplaceVideo: character_replace_video as string,
       characterReplaceImage: character_replace_image as string,
+      characterReplaceMergeAudio,
       cost,
     };
     next();
@@ -794,6 +801,7 @@ generationsRouter.post('/', promptModerationMiddleware, presetResolver, prepareC
       // Character-replace-only
       characterReplaceVideo: resolved.characterReplaceVideo,
       characterReplaceImage: resolved.characterReplaceImage,
+      characterReplaceMergeAudio: resolved.characterReplaceMergeAudio,
       // Faceswap-only
       swapImage: resolved.swapImage,
       targetImage: resolved.targetImage,

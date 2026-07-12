@@ -161,6 +161,14 @@ export interface PresetDef {
     animate_stage: { model: string; resolution: '720p' | '1080p'; duration: number; aspect_ratio: string; prompt_template: string };
   };
   /**
+   * SERVER-ONLY (09.6, D-03). Bundled driver clip (R2 key) for single-shot `character_replace`
+   * presets that pair a bundled driving video with the user's ONE photo slot (Marlon Motion
+   * Transfer) rather than requiring the user to upload their own driving video (ai-influencer's
+   * shape, unchanged). presetResolver injects this URL into `character_replace_video`; the user's
+   * slot[0] becomes `character_replace_image`. Never reaches the client (CLIENT_PRESETS strips it).
+   */
+  driver_video_asset?: string;
+  /**
    * SERVER-ONLY provenance (09.3, D-02). Pre-routes `req.body.model` before dispatch:
    * - 'grok': known real-face preset — skip the doomed Seedance attempt, dispatch straight to
    *   the config-driven `PERMISSIVE_I2V_MODEL` (Grok 1.5).
@@ -478,6 +486,40 @@ export const SERVER_PRESETS: PresetDef[] = [
       resolution_label: '720p',
     },
     tile: placeholderTile('kbo-fan-cam'),
+  },
+  {
+    // Marlon Motion Transfer (09.6 D-03, FINAL 2026-07-12, "Method 1"): SINGLE-SHOT — user photo
+    // + a bundled driver clip straight into Wan 2.2 animate-replace (ALREADY WIRED for
+    // ai-influencer, reused verbatim here). No GPT-Image-2 step. `driver_video_asset` (server-only)
+    // is injected as the character_replace_video; the user's single photo slot becomes
+    // character_replace_image — see presetResolver's character_replace case below.
+    preset_id: 'marlon-motion',
+    title: 'Marlon Motion Transfer',
+    subtitle: 'Step into the clip',
+    section: 'video_effects',
+    sort_order: 9,
+    status: 'live',
+    badge: 'HOT',
+    media_type: 'character_replace',
+    model: 'wan-video/wan-2.2-animate-replace',
+    prompt_template: '', // character_replace path uses no text prompt
+    input_schema: {
+      slots: [{ kind: 'image', label: 'Your photo', source: 'any' }],
+    },
+    // TODO(art): real bundled driver clip — replace via `npm run upload:preset-art` once
+    // delivered (D-09); presetResolver injects this URL as character_replace_video.
+    driver_video_asset: 'assets/presets/marlon-motion/driver-v1.mp4',
+    // TODO(art): default trend/driver audio track — replace via `npm run upload:preset-art`.
+    postprocess: { op: 'mux', audio_r2_key: 'assets/presets/marlon-motion/audio-v1.m4a' },
+    cost: { type: 'per_second', credits_per_sec: 5, max_seconds: 30 },
+    sheet: {
+      description:
+        'Upload your photo — step into the clip, matching every move, pose, and beat exactly.',
+      aspect_label: 'Matches the clip',
+      duration_label: 'Up to 30s',
+      resolution_label: '720p',
+    },
+    tile: placeholderTile('marlon-motion'),
   },
 
   // ─── Photo Effects (output = still image — D-02 revised 2026-07-06, below Video Effects) ─
@@ -927,6 +969,7 @@ export const CLIENT_PRESETS = SERVER_PRESETS.map((def) => {
     postprocess,
     i2v_routing,
     chain,
+    driver_video_asset,
     ...rest
   } = def;
 
