@@ -78,6 +78,60 @@ jest.mock('../../config/presets', () => {
       cost: { type: 'per_second', credits_per_sec: 8, max_seconds: 5 },
       tile: { poster_url: 'https://x.example/poster.jpg', loop_url: 'https://x.example/loop.mp4' },
     },
+    // 09.3-06: the REAL first-registry-drop shapes (actual preset_id, character_asset URL,
+    // dialogue template, and style_grid ids/driving URLs mirrored from src/config/presets.ts) —
+    // closes the gap between the synthetic 'test-gorilla-vlogs'/'test-viral-motions' fixtures
+    // above and the live rows that actually shipped in 09.3-06.
+    {
+      preset_id: 'gorilla-vlogs',
+      title: 'Gorilla Vlogs',
+      section: 'shows_vlogs',
+      sort_order: 1,
+      status: 'live',
+      media_type: 'video',
+      model: 'bytedance/seedance-2.0-mini',
+      i2v_routing: 'seedance',
+      character_asset: 'https://assets.fantasia.example/presets/gorilla-vlogs/character-v1.jpg',
+      script_expansion: true,
+      dialogue_prompt_template:
+        'Selfie-cam vlog style, handheld phone camera framing: a gorilla vlogger holds up the ' +
+        'phone to film themself talking directly to the camera, natural gestures, casual vlog ' +
+        'energy, speaking the following as spoken dialogue: {script}',
+      input_schema: { slots: [], text: { label: 'Your script', required: true } },
+      cost: { type: 'per_second', credits_per_sec: 9, max_seconds: 5 },
+      tile: { poster_url: 'https://x.example/poster.jpg', loop_url: 'https://x.example/loop.mp4' },
+    },
+    {
+      preset_id: 'viral-motions',
+      title: 'Viral Motions',
+      section: 'video_effects',
+      sort_order: 5,
+      status: 'live',
+      media_type: 'avatar',
+      model: 'bytedance/dreamactor-m2.0',
+      input_schema: {
+        slots: [{ kind: 'image', label: 'Your photo', source: 'any' }],
+        style_grid: [
+          {
+            id: 'dance',
+            label: 'Dance',
+            driving_video_url: 'https://assets.fantasia.example/presets/viral-motions/dance-v1.mp4',
+          },
+          {
+            id: 'runway',
+            label: 'Runway',
+            driving_video_url: 'https://assets.fantasia.example/presets/viral-motions/runway-v1.mp4',
+          },
+          {
+            id: 'fight',
+            label: 'Fight',
+            driving_video_url: 'https://assets.fantasia.example/presets/viral-motions/fight-v1.mp4',
+          },
+        ],
+      },
+      cost: { type: 'per_second', credits_per_sec: 5, max_seconds: 30 },
+      tile: { poster_url: 'https://x.example/poster.jpg', loop_url: 'https://x.example/loop.mp4' },
+    },
   ];
   return { SERVER_PRESETS: FIXTURE_PRESETS };
 });
@@ -164,6 +218,46 @@ describe('presetResolver — motion pack bundled driving video (SC4, RED until 0
 
     expect(req.body.avatar_image).toBe('https://r2.example.com/signed/uploads/user-1/selfie.jpg');
     expect(req.body.avatar_driving_video).toBe('https://r2.example.com/assets/viral-motions/dance-1.mp4');
+    expect(next).toHaveBeenCalled();
+  });
+});
+
+describe('presetResolver — 09.3-06 live registry shapes (SC3/SC4)', () => {
+  it("real 'gorilla-vlogs' row injects character_asset and expands the script into dialogue", async () => {
+    const req = makeReq({
+      preset_id: 'gorilla-vlogs',
+      text: 'my day at the office',
+      preset_input_upload_ids: [],
+    });
+    const res = makeRes();
+    const next = jest.fn();
+
+    await presetResolver(req, res, next);
+
+    expect(req.body.reference_images).toEqual(
+      expect.arrayContaining(['https://assets.fantasia.example/presets/gorilla-vlogs/character-v1.jpg']),
+    );
+    expect(req.body.prompt).toContain('my day at the office');
+    expect(req.body.model).toBe('bytedance/seedance-2.0-mini'); // i2v_routing:'seedance' — no Grok override
+    expect(next).toHaveBeenCalled();
+  });
+
+  it("real 'viral-motions' row pairs the user selfie with the style-bundled driving video (not a second upload slot)", async () => {
+    mockUploadRows([{ id: 'upload-selfie', r2_key: 'uploads/user-1/selfie.jpg' }]);
+    const req = makeReq({
+      preset_id: 'viral-motions',
+      style_id: 'dance',
+      preset_input_upload_ids: ['upload-selfie'],
+    });
+    const res = makeRes();
+    const next = jest.fn();
+
+    await presetResolver(req, res, next);
+
+    expect(req.body.avatar_image).toBe('https://r2.example.com/signed/uploads/user-1/selfie.jpg');
+    expect(req.body.avatar_driving_video).toBe(
+      'https://assets.fantasia.example/presets/viral-motions/dance-v1.mp4',
+    );
     expect(next).toHaveBeenCalled();
   });
 });

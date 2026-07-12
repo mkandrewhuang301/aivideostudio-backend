@@ -15,7 +15,7 @@ describe('presets registry config', () => {
     expect(typeof PRESETS_VERSION).toBe('number');
   });
 
-  it('includes all 11 wave-1 live presets (7 original + AI Influencer D-23 + Clothes Swap 09.1-11 + Faceswap 09.2-07 + Magic Editor 09.2-08)', () => {
+  it('includes all 19 live presets (7 original + AI Influencer D-23 + Clothes Swap 09.1-11 + Faceswap 09.2-07 + Magic Editor 09.2-08 + 09.3-06 8-row registry drop)', () => {
     const liveIds = SERVER_PRESETS.filter((p) => p.status === 'live').map((p) => p.preset_id);
     expect(liveIds.sort()).toEqual(
       [
@@ -30,6 +30,14 @@ describe('presets registry config', () => {
         'clothes-swap',
         'faceswap',
         'magic-editor',
+        'gorilla-vlogs',
+        'viral-motions',
+        'camera-moves',
+        'vfx-pack',
+        'action-figure',
+        'yearbook-90s',
+        'pro-headshot',
+        'restore-old-photo',
       ].sort(),
     );
   });
@@ -38,8 +46,8 @@ describe('presets registry config', () => {
     // 'try-on' was activated as the live 'clothes-swap' preset (09.1-11, supersedes the earlier
     // avatar-based AI Try-On concept — see 09.1-CONTEXT.md D-24 SUPERSEDED banner) and is no
     // longer SOON. 'faceswap' was activated as a live preset (09.2-07) and is also no longer SOON.
-    // 09.3 SC3/SC5: 'gorilla-vlogs' flips soon→live as the character-system proof (D-05) — RED
-    // until 09.3-05/06 ships the row; this is the regression guard for that flip.
+    // 09.3 SC3/SC5: 'gorilla-vlogs' flipped soon→live as the character-system proof (D-05, shipped
+    // 09.3-06) — this is the permanent regression guard for that flip.
     const soonIds = SERVER_PRESETS.filter((p) => p.status === 'soon').map((p) => p.preset_id);
     expect(soonIds).toEqual(
       expect.arrayContaining(['cinema-studio', 'avatar-center', 'fruit-island']),
@@ -56,27 +64,38 @@ describe('presets registry config', () => {
     expect(JSON.stringify(CLIENT_PRESETS)).not.toContain('prompt_template');
   });
 
-  // 09.3 Wave 0 (SC3): the character-system registry fields (D-03/D-05) are server-only, same
-  // strip rule as prompt_template — RED until 09.3-05/06 actually adds these fields to PresetDef
-  // (today they don't exist at all, so this trivially passes; it becomes a real regression guard
-  // the moment those fields land).
+  // 09.3 (SC3): the character-system registry fields (D-03/D-05) are server-only — this is now a
+  // live regression guard since the 09.3-06 8-row drop actually exercises these fields
+  // (gorilla-vlogs's character_asset/script_expansion/dialogue_prompt_template, viral-motions'
+  // style_grid driving_video_url).
   it('CLIENT_PRESETS strips the new 09.3 character-system server-only fields from every row (SC3)', () => {
     for (const preset of CLIENT_PRESETS) {
       expect(preset).not.toHaveProperty('character_asset');
       expect(preset).not.toHaveProperty('dialogue_prompt_template');
       expect(preset).not.toHaveProperty('script_expansion');
+      expect(preset).not.toHaveProperty('postprocess');
+      expect(preset).not.toHaveProperty('i2v_routing');
     }
     const serialized = JSON.stringify(CLIENT_PRESETS);
     expect(serialized).not.toContain('character_asset');
     expect(serialized).not.toContain('dialogue_prompt_template');
     expect(serialized).not.toContain('script_expansion');
     expect(serialized).not.toContain('driving_video_url');
+    expect(serialized).not.toContain('postprocess');
   });
 
-  // 09.3 Wave 0 (SC3/SC4/SC5): the first registry drop — gorilla vlogger (character system proof),
-  // viral motion pack (DreamActor bundled driving video), camera-move + VFX packs, and 4 image
-  // templates (Action Figure / 90s Yearbook / Pro Headshot / Restore Old Photo per CONTEXT D-06
-  // Claude's-discretion suggestion). RED until 09.3-05/06/07 land these rows as status:'live'.
+  // 09.3-06: PresetSheetMeta.preparing_label is deliberately CLIENT-SAFE (unlike every other
+  // server-only field stripped above) — gorilla-vlogs's client projection must still carry the
+  // "Writing your script…" caption for the iOS PresetInputSheet submitting state.
+  it('CLIENT_PRESETS preserves sheet.preparing_label on the gorilla-vlogs client projection', () => {
+    const gorilla = CLIENT_PRESETS.find((p) => p.preset_id === 'gorilla-vlogs');
+    expect(gorilla?.sheet?.preparing_label).toBe('Writing your script…');
+  });
+
+  // 09.3-06: the first registry drop — gorilla vlogger (character system proof), viral motion
+  // pack (DreamActor bundled driving video), camera-move + VFX packs, and 4 image templates
+  // (Action Figure / 90s Yearbook / Pro Headshot / Restore Old Photo per CONTEXT D-06 Claude's-
+  // discretion suggestion) — now live as a permanent regression guard.
   it('includes the 09.3 first registry drop as live rows (SC3/SC4/SC5)', () => {
     const liveIds = SERVER_PRESETS.filter((p) => p.status === 'live').map((p) => p.preset_id);
     expect(liveIds).toEqual(

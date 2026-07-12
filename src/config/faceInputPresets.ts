@@ -6,6 +6,7 @@
 export const FACE_INPUT_PRESET_IDS = new Set<string>([
   'faceswap', // 09.2 faceswap preset (swap face slot)
   'motion-transfer', // 09.1 Motion Transfer (avatar image slot)
+  'viral-motions', // 09.3 Viral Motions (D-04 real-face selfie -> 9.2 gate + raw-face deletion)
 ]);
 
 // media_type fallback for face-input detection when preset_id is absent.
