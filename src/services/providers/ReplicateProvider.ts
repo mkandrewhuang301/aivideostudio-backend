@@ -5,8 +5,53 @@
 import Replicate from 'replicate';
 import { config } from '../../config';
 import { ModelProvider, GenerationInput, DispatchResult, PredictionStatus } from './ModelProvider';
+import { archiveToR2 } from '../archivalService';
 
 const replicate = new Replicate({ auth: config.replicateApiToken });
+
+// ─── Chained-job image stage: Wan 2.7 Image (09.6-05) ─────────────────────────
+// Composes chain keyframe(s) (UVU's 2 cinematic stills — arena walk-in / spotlight reveal) from
+// the user's own photo(s) + a server prompt. Composition is REQUIRED because HappyHorse animates
+// a reference image IN PLACE — it does not transplant a subject into a new scene (R-03) — so the
+// keyframe's background must already exist before HappyHorse ever sees it.
+//
+// This is the codebase's FIRST SYNCHRONOUS Replicate call (`replicate.run()`, blocks until the
+// prediction completes and returns the output directly) — every other Replicate call in this file
+// is async (`dispatch()` above uses `predictions.create` + webhook). That's intentional here: the
+// chain worker (chainGenerationWorker.ts) needs the archived keyframe key back before it can
+// dispatch Stage 2 (HappyHorse), and there's no separate webhook route for this one-off image call
+// — mirrors the synchronous CALL SHAPE openaiImageService.ts's generateFaceswap already uses
+// (await → archive → return key), just backed by `replicate.run()` instead of an OpenAI fetch.
+//
+// Live schema verified 2026-07-12 (curl https://api.replicate.com/v1/models/wan-video/wan-2.7-image):
+//   Input.required: prompt (string, up to 5000 chars)
+//   Input.optional: images (array<uri>, up to 9, default []) — the user photo(s) go here;
+//                   size (enum incl '1K'/'2K'/custom dims, default '2K') — pinned to '1K' here
+//                   (ample for a HappyHorse i2v reference frame, keeps the sync call fast);
+//                   num_outputs (1-4, default 1) — always 1 (one keyframe per call)
+//   Output: array of output image URIs (never base64) — archived via archiveToR2 below.
+// Live pricing verified 2026-07-12 (replicate.com/wan-video/wan-2.7-image pricing table): $0.03
+// per output image ("or around 33 images for $1") — see generationService.ts
+// IMAGE_MODEL_COSTS['wan-video/wan-2.7-image']. Do NOT hardcode a prompt — always caller-supplied.
+export async function generateKeyframeFromPhotos(
+  userPhotoUrls: string[],
+  prompt: string,
+  outputKeyArg: string,
+): Promise<string> {
+  const output = (await replicate.run('wan-video/wan-2.7-image', {
+    input: {
+      prompt,
+      images: userPhotoUrls,
+      size: '1K',
+      num_outputs: 1,
+    },
+  })) as unknown;
+  const outputUrl = Array.isArray(output) ? output[0] : output;
+  if (typeof outputUrl !== 'string' || !outputUrl) {
+    throw new Error('wan-video/wan-2.7-image returned no output image');
+  }
+  return archiveToR2(outputUrl, outputKeyArg, 'image/png');
+}
 
 export class ReplicateProvider implements ModelProvider {
   async dispatch(input: GenerationInput, webhookUrl: string): Promise<DispatchResult> {
