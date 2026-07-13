@@ -659,8 +659,8 @@ export const SERVER_PRESETS: PresetDef[] = [
     input_schema: {
       slots: [{ kind: 'image', label: 'Your photo', source: 'any' }],
       style_grid: [
-        { id: 'bob', label: 'Bob', gender_tag: 'unisex' },
-        { id: 'pixie-cut', label: 'Pixie Cut', gender_tag: 'feminine' },
+        { id: 'bob', label: 'Bob', gender_tag: 'unisex', thumb_url: 'https://pub-cec5aa79de50452fa7eac827a03d7e04.r2.dev/presets/hairstyle/styles/bob-v1.jpg' },
+        { id: 'pixie-cut', label: 'Pixie Cut', gender_tag: 'feminine', thumb_url: 'https://pub-cec5aa79de50452fa7eac827a03d7e04.r2.dev/presets/hairstyle/styles/pixie-cut-v1.jpg' },
         { id: 'crew-cut', label: 'Buzz', gender_tag: 'masculine', thumb_url: 'https://pub-cec5aa79de50452fa7eac827a03d7e04.r2.dev/presets/hairstyle/styles/crew-cut-v1.jpg' },
         { id: 'side-swept-bangs', label: 'Curtain Bangs', gender_tag: 'feminine' },
         { id: 'perm', label: 'Perm', gender_tag: 'unisex' },
@@ -694,6 +694,24 @@ export const SERVER_PRESETS: PresetDef[] = [
         { id: 'swept-back', label: 'Swept Back', gender_tag: 'masculine', thumb_url: 'https://pub-cec5aa79de50452fa7eac827a03d7e04.r2.dev/presets/hairstyle/styles/swept-back-v1.jpg' },
         { id: 'textured-fringe', label: 'Textured Fringe', gender_tag: 'masculine', thumb_url: 'https://pub-cec5aa79de50452fa7eac827a03d7e04.r2.dev/presets/hairstyle/styles/textured-fringe-v1.jpg' },
         { id: 'wolf-cut', label: 'Wolf Cut', gender_tag: 'masculine', thumb_url: 'https://pub-cec5aa79de50452fa7eac827a03d7e04.r2.dev/presets/hairstyle/styles/wolf-cut-v1.jpg' },
+        // 2026-07-13: women's hairstyle batch — reference photos for feminine-tagged styles (wired
+        // identically to the male batch: thumb_url doubles as the 2nd reference image sent to
+        // gpt-image-2, {style}=label). Color-only variants (blonde/silver/pink/highlights) are
+        // uploaded but intentionally NOT listed here yet — pending color-swap-vs-hairstyle-swap
+        // decision (they share one wavy-lob cut, so as hairstyle swaps they'd also change the cut).
+        { id: 'afro', label: 'Afro', gender_tag: 'feminine', thumb_url: 'https://pub-cec5aa79de50452fa7eac827a03d7e04.r2.dev/presets/hairstyle/styles/afro-v1.jpg' },
+        { id: 'bantu-knots', label: 'Bantu Knots', gender_tag: 'feminine', thumb_url: 'https://pub-cec5aa79de50452fa7eac827a03d7e04.r2.dev/presets/hairstyle/styles/bantu-knots-v1.jpg' },
+        { id: 'braids', label: 'Braids', gender_tag: 'feminine', thumb_url: 'https://pub-cec5aa79de50452fa7eac827a03d7e04.r2.dev/presets/hairstyle/styles/braids-v1.jpg' },
+        { id: 'feed-in-braids', label: 'Feed-in Braids', gender_tag: 'feminine', thumb_url: 'https://pub-cec5aa79de50452fa7eac827a03d7e04.r2.dev/presets/hairstyle/styles/feed-in-braids-v1.jpg' },
+        { id: 'graduated-bob', label: 'Graduated Bob', gender_tag: 'feminine', thumb_url: 'https://pub-cec5aa79de50452fa7eac827a03d7e04.r2.dev/presets/hairstyle/styles/graduated-bob-v1.jpg' },
+        { id: 'long-shag', label: 'Long Shag', gender_tag: 'feminine', thumb_url: 'https://pub-cec5aa79de50452fa7eac827a03d7e04.r2.dev/presets/hairstyle/styles/long-shag-v1.jpg' },
+        { id: 'long-wavy', label: 'Long Wavy', gender_tag: 'feminine', thumb_url: 'https://pub-cec5aa79de50452fa7eac827a03d7e04.r2.dev/presets/hairstyle/styles/long-wavy-v1.jpg' },
+        { id: 'messy-bun', label: 'Messy Bun', gender_tag: 'feminine', thumb_url: 'https://pub-cec5aa79de50452fa7eac827a03d7e04.r2.dev/presets/hairstyle/styles/messy-bun-v1.jpg' },
+        { id: 'pigtails', label: 'Pigtails', gender_tag: 'feminine', thumb_url: 'https://pub-cec5aa79de50452fa7eac827a03d7e04.r2.dev/presets/hairstyle/styles/pigtails-v1.jpg' },
+        { id: 'textured-lob', label: 'Textured Lob', gender_tag: 'feminine', thumb_url: 'https://pub-cec5aa79de50452fa7eac827a03d7e04.r2.dev/presets/hairstyle/styles/textured-lob-v1.jpg' },
+        { id: 'wash-and-go', label: 'Wash & Go', gender_tag: 'feminine', thumb_url: 'https://pub-cec5aa79de50452fa7eac827a03d7e04.r2.dev/presets/hairstyle/styles/wash-and-go-v1.jpg' },
+        { id: 'womens-wolf-cut', label: 'Wolf Cut', gender_tag: 'feminine', thumb_url: 'https://pub-cec5aa79de50452fa7eac827a03d7e04.r2.dev/presets/hairstyle/styles/womens-wolf-cut-v1.jpg' },
+        { id: 'womens-bald', label: 'Bald', gender_tag: 'feminine', thumb_url: 'https://pub-cec5aa79de50452fa7eac827a03d7e04.r2.dev/presets/hairstyle/styles/womens-bald-v1.jpg' },
       ],
     },
     cost: { type: 'flat', credits: 5 },
