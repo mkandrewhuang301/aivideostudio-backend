@@ -15,11 +15,13 @@ import { scheduleYearlyGrant } from './queue/yearlyGrantWorker';
 import './queue/hiveScanWorker';
 import './queue/openaiGenerationWorker';
 import './queue/chainGenerationWorker';
+import './queue/influencerProWorker';
 import './queue/ffmpegWorker';
 import { banCheckMiddleware } from './middleware/banCheck';
 import { reportsRouter } from './routes/reports';
 import { uploadsRouter } from './routes/uploads';
 import { privacyRouter } from './routes/privacy';
+import { termsRouter } from './routes/terms';
 import { ratesRouter } from './routes/rates';
 import { presetsRouter } from './routes/presets';
 
@@ -76,6 +78,7 @@ app.use('/api/reports', reportsRouter);
 app.use('/api/uploads', uploadsRouter);
 
 app.use('/privacy', privacyRouter);
+app.use('/terms', termsRouter);
 app.use('/rates', ratesRouter);
 
 app.listen(config.port, () => {

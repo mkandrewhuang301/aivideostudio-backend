@@ -174,6 +174,27 @@ jest.mock('../../config/presets', () => {
       cost: { type: 'per_second', credits_per_sec: 14, max_seconds: 5 },
       tile: { poster_url: 'https://x.example/poster.jpg', loop_url: 'https://x.example/loop.mp4' },
     },
+    // ai-influencer — the TWO-slot 'character_replace' shape (user video + character photo, no
+    // driver_video_asset) — distinct from marlon-motion's bundled-driver single-slot shape below.
+    // Used to test the Pro-tier quality-flag scoping (character_replace_quality stamping).
+    {
+      preset_id: 'ai-influencer',
+      title: 'AI Influencer',
+      section: 'video_effects',
+      sort_order: 4,
+      status: 'live',
+      media_type: 'character_replace',
+      model: 'wan-video/wan-2.2-animate-replace',
+      prompt_template: '',
+      input_schema: {
+        slots: [
+          { kind: 'video', label: 'Your video', source: 'any' },
+          { kind: 'image', label: 'Choose your character', source: 'any' },
+        ],
+      },
+      cost: { type: 'per_second', credits_per_sec: 5, max_seconds: 30 },
+      tile: { poster_url: 'https://x.example/poster.jpg', loop_url: 'https://x.example/loop.mp4' },
+    },
     // 09.6-08: marlon-motion — SINGLE-SHOT 'character_replace' path with a BUNDLED driver clip
     // (driver_video_asset) instead of a second user-uploaded video slot (ai-influencer's shape).
     {
@@ -456,6 +477,61 @@ describe('presetResolver — 09.6-08 kbo-fan-cam single-shot (video path)', () =
     expect(req.body.resolution).toBe('720p');
     expect(req.body.reference_images).toEqual(['https://r2.example.com/signed/uploads/user-1/selfie.jpg']);
     expect(req._preset?.postprocess?.op).toBe('mux');
+    expect(next).toHaveBeenCalled();
+  });
+});
+
+describe('presetResolver — AI Influencer Pro tier quality-flag scoping', () => {
+  it("ai-influencer + quality:'pro' stamps character_replace_quality:'pro'", async () => {
+    mockUploadRows([
+      { id: 'upload-video', r2_key: 'uploads/user-1/influencer-video.mp4' },
+      { id: 'upload-photo', r2_key: 'uploads/user-1/influencer-character.jpg' },
+    ]);
+    const req = makeReq({
+      preset_id: 'ai-influencer',
+      quality: 'pro',
+      preset_input_upload_ids: ['upload-video', 'upload-photo'],
+    });
+    const res = makeRes();
+    const next = jest.fn();
+
+    await presetResolver(req, res, next);
+
+    expect(req.body.character_replace_quality).toBe('pro');
+    expect(next).toHaveBeenCalled();
+  });
+
+  it("ai-influencer with no quality field (Standard tier) never stamps character_replace_quality", async () => {
+    mockUploadRows([
+      { id: 'upload-video', r2_key: 'uploads/user-1/influencer-video.mp4' },
+      { id: 'upload-photo', r2_key: 'uploads/user-1/influencer-character.jpg' },
+    ]);
+    const req = makeReq({
+      preset_id: 'ai-influencer',
+      preset_input_upload_ids: ['upload-video', 'upload-photo'],
+    });
+    const res = makeRes();
+    const next = jest.fn();
+
+    await presetResolver(req, res, next);
+
+    expect(req.body.character_replace_quality).toBeUndefined();
+    expect(next).toHaveBeenCalled();
+  });
+
+  it("marlon-motion + quality:'pro' is IGNORED — never stamps character_replace_quality (scoped strictly to ai-influencer)", async () => {
+    mockUploadRows([{ id: 'upload-photo', r2_key: 'uploads/user-1/marlon-photo.jpg' }]);
+    const req = makeReq({
+      preset_id: 'marlon-motion',
+      quality: 'pro',
+      preset_input_upload_ids: ['upload-photo'],
+    });
+    const res = makeRes();
+    const next = jest.fn();
+
+    await presetResolver(req, res, next);
+
+    expect(req.body.character_replace_quality).toBeUndefined();
     expect(next).toHaveBeenCalled();
   });
 });

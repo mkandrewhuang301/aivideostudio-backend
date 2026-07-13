@@ -125,14 +125,20 @@ export class ReplicateProvider implements ModelProvider {
         aspect_ratio: input.aspectRatio,
       };
     } else if (input.model === 'kwaivgi/kling-v3-motion-control') {
-      // Kling v3 motion control — STANDALONE integration (Plan 09.6-03), no 9.6 preset wires
-      // this yet. Live-verified schema (2026-07-12): required `image` (reference character
-      // image) + `video` (reference driver video), `mode` enum std/pro (default 'pro' upstream;
-      // we always send it explicitly here so callers control the tier).
+      // Kling v3 motion control — wired by AI Influencer Pro (influencerProWorker.ts, 3rd stage).
+      // Live-verified schema (2026-07-12): required `image` (reference character image) + `video`
+      // (reference driver video), `mode` enum std/pro (default 'pro' upstream; we always send it
+      // explicitly here so callers control the tier), `character_orientation` enum image/video
+      // (default 'image'; Pro tier always sends 'video' — the whole point is preserving the
+      // ORIGINAL video's motion/duration, not the character image's), `prompt` (optional, default
+      // ""), `keep_original_sound` (default true).
       replicateInput = {
         image: input.klingMotionImage,
         video: input.klingMotionVideo,
         mode: input.klingMotionMode ?? 'std',
+        ...(input.klingMotionPrompt ? { prompt: input.klingMotionPrompt } : {}),
+        character_orientation: input.klingMotionCharacterOrientation ?? 'image',
+        keep_original_sound: input.klingMotionKeepOriginalSound ?? true,
       };
     } else if (input.model === 'alibaba/happyhorse-1.1') {
       // HappyHorse 1.1: text-to-video (empty images array) OR image-to-video (single first-frame

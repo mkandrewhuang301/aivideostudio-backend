@@ -269,6 +269,23 @@ export function computeKlingMotionControlCost(durationSeconds: number, mode: 'st
   return Math.ceil(durationSeconds * ratePerSec * CENTS_PER_DOLLAR);
 }
 
+// ─── AI Influencer Pro tier (character_replace_quality: 'pro') ────────────────
+// 3-step pipeline: ffmpeg frame extract (free, local compute, no provider cost) -> Wan 2.7 Image
+// composite (character photo + extracted frame -> single flat-cost still) -> Kling v3 Motion
+// Control transferring the ORIGINAL video's motion onto the composite. Uses Kling's 'std' mode
+// (720p, $0.07/sec) deliberately, NOT its 'pro' mode (2026-07-13, user-clarified) — this preset's
+// "Pro" tier means the 3-step compositing PIPELINE itself (vs. Standard's single-shot Wan 2.2
+// Animate Replace), not Kling's own internal quality flag; the two "pro" labels are unrelated and
+// picking Kling's cheaper std tier avoids conflating them. Billed as: real (clamped) video
+// duration x Kling std's per-second rate, PLUS the flat Wan 2.7 composite cost — both stages bill
+// per-output-unit (not opaque compute time), so the combined cost is fully knowable upfront
+// (CLAUDE.md Rule 1: atomic deduction needs a known cost before dispatch). Standard tier
+// (wan-2.2-animate-replace direct) is unaffected — computeCharacterReplaceCost above still prices
+// it exactly as before.
+export function computeCharacterReplaceProCost(durationSeconds: number): number {
+  return computeKlingMotionControlCost(durationSeconds, 'std') + (IMAGE_MODEL_COSTS['wan-video/wan-2.7-image'] ?? 0);
+}
+
 export function computeCostCredits(input: {
   durationSeconds: number;
   resolution: '480p' | '720p' | '1080p' | '4k';

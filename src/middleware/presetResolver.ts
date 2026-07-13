@@ -192,6 +192,14 @@ export async function presetResolver(req: Request, res: Response, next: NextFunc
             ? req.body.estimated_duration_seconds
             : 5;
         req.body.estimated_duration_seconds = maxSeconds ? Math.min(clientDuration, maxSeconds) : clientDuration;
+        // AI Influencer Pro tier: 3-step pipeline (frame extract -> Wan 2.7 composite -> Kling v3
+        // Motion Control) instead of the direct Wan 2.2 Animate Replace dispatch. Scoped strictly
+        // to preset_id === 'ai-influencer' — Marlon Motion Transfer (09.6 D-03) is deliberately
+        // single-shot-only and must never take this path even if a stray `quality` field were
+        // sent against it.
+        if (preset_id === 'ai-influencer' && req.body.quality === 'pro') {
+          req.body.character_replace_quality = 'pro';
+        }
         break;
       }
       case 'upscale': {
@@ -249,6 +257,15 @@ export async function presetResolver(req: Request, res: Response, next: NextFunc
             return;
           }
           req.body.mask_url = await getUploadPresignedUrl((maskRow as { r2_key: string }).r2_key);
+
+          // The painted alpha mask is an internal artifact, not a user-facing reference. Now that
+          // we know this upload IS a mask, tag its kind so GET /api/uploads excludes it from the
+          // @-mention library (it stays unnamed, so the 24h upload reaper still cleans it up).
+          // (2026-07-13 — masks were leaking into the reference list.)
+          await db
+            .update(referenceUploads)
+            .set({ kind: 'mask' })
+            .where(and(eq(referenceUploads.id, maskUploadId), eq(referenceUploads.user_id, userId)));
 
           req.body.prompt = rawClientPrompt.trim();
         }

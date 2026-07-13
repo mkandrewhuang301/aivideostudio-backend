@@ -18,6 +18,8 @@ import {
   computeUpscalerCost,
   computeImageUpscaleCost,
   computeCharacterReplaceCost,
+  computeCharacterReplaceProCost,
+  computeKlingMotionControlCost,
   computeFaceswapCost,
   computeHappyHorseCost,
   resolveHappyHorseDuration,
@@ -184,6 +186,15 @@ describe('cents-rule cost functions (verified, not re-broken)', () => {
 
   it('SUPPORTED_CHARACTER_REPLACE_MODELS registers wan-video/wan-2.2-animate-replace', () => {
     expect(SUPPORTED_CHARACTER_REPLACE_MODELS).toContain('wan-video/wan-2.2-animate-replace');
+  });
+
+  it('computeCharacterReplaceProCost(5s) == Kling std (7/sec, NOT pro — the pipeline itself is "Pro") + Wan 2.7 flat (3) == 38 credits', () => {
+    expect(computeCharacterReplaceProCost(5)).toBe(computeKlingMotionControlCost(5, 'std') + 3);
+    expect(computeCharacterReplaceProCost(5)).toBe(38);
+  });
+
+  it('computeCharacterReplaceProCost always costs more than Standard tier at the same duration', () => {
+    expect(computeCharacterReplaceProCost(30)).toBeGreaterThan(computeCharacterReplaceCost(30));
   });
 
   it('computeFaceswapCost() == 5 credits (gpt-image-2-medium tier) — flat per-run cost, no duration', () => {

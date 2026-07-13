@@ -45,10 +45,15 @@ export interface GenerationInput {
   // Chain-specific (09.6, D-01/D-05) — the resolved user photo slot(s) feeding the chain's
   // image_stage (e.g. UVU's 1-2 keyframe source photos). No dispatch consumer yet (Plan 05).
   chainInputImages?: string[];
-  // Kling v3 motion control — STANDALONE integration (Plan 09.6-03); no 9.6 preset wires these yet.
+  // Kling v3 motion control — wired by AI Influencer's Pro tier (influencerProWorker.ts) as the
+  // final stage of its 3-step pipeline; 09.6 presets never wire this directly (Marlon uses
+  // wan-2.2-animate-replace instead, by design).
   klingMotionImage?: string;              // presigned URL — reference character image
   klingMotionVideo?: string;              // presigned URL — reference driver video
   klingMotionMode?: 'std' | 'pro';        // std 720p / pro 1080p
+  klingMotionPrompt?: string;             // optional; Replicate default ""
+  klingMotionCharacterOrientation?: 'image' | 'video'; // 'image' caps driver video at 10s, 'video' at 30s
+  klingMotionKeepOriginalSound?: boolean; // Replicate default true
 }
 
 export interface DispatchResult {

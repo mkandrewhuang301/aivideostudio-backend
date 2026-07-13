@@ -21,6 +21,7 @@ import {
   computeHappyHorseCost,
   resolveHappyHorseDuration,
   computeCharacterReplaceCost,
+  computeCharacterReplaceProCost,
   computeFaceswapCost,
   computeChainCost,
   createGeneration,
@@ -47,6 +48,7 @@ import { classifyFailureReason, markFailed } from '../services/generationService
 import { getGenerationPresignedUrl, getUploadPresignedUrl } from '../services/archivalService';
 import { openaiGenerationQueue } from '../queue/openaiGenerationQueue';
 import { chainGenerationQueue } from '../queue/chainGenerationQueue';
+import { influencerProQueue } from '../queue/influencerProQueue';
 import { getReplicateWebhookUrl } from '../config';
 import type { GenerationInput } from '../services/providers/ModelProvider';
 import { db } from '../db/client';
@@ -95,6 +97,11 @@ interface ResolvedGenerationRequest {
   characterReplaceVideo?: string;
   characterReplaceImage?: string;
   characterReplaceMergeAudio?: boolean;
+  // AI Influencer Pro tier only — presence routes dispatch to influencerProQueue's 3-step
+  // pipeline (frame extract -> Wan 2.7 composite -> Kling v3 Motion Control) instead of the
+  // inline Wan 2.2 Animate Replace dispatch below. Undefined for Standard tier and every other
+  // character_replace preset (Marlon).
+  characterReplaceQuality?: 'pro';
   // Faceswap-only (inline OpenAI gpt-image-2, 09.2-12)
   swapImage?: string;
   targetImage?: string;
@@ -202,6 +209,7 @@ function prepareCost(req: Request, res: Response, next: NextFunction): void {
     // character-replace-specific (Wan 2.2 Animate Replace — AI Influencer, D-23)
     character_replace_video,
     character_replace_image,
+    character_replace_quality,
     // faceswap-specific (inline OpenAI gpt-image-2, 09.2-12; formerly Easel via Replicate, 09.2-07)
     swap_image,
     target_image,
@@ -254,11 +262,6 @@ function prepareCost(req: Request, res: Response, next: NextFunction): void {
   }
 
   if (media_type === 'character_replace') {
-    const replaceModel = model ?? 'wan-video/wan-2.2-animate-replace';
-    if (!(SUPPORTED_CHARACTER_REPLACE_MODELS as readonly string[]).includes(replaceModel)) {
-      res.status(400).json({ error: `model must be one of: ${SUPPORTED_CHARACTER_REPLACE_MODELS.join(', ')}`, code: 'INVALID_MODEL' });
-      return;
-    }
     if (!character_replace_video || typeof character_replace_video !== 'string') {
       res.status(400).json({ error: 'character_replace_video (presigned URL) is required', code: 'INVALID_INPUT' });
       return;
@@ -269,6 +272,36 @@ function prepareCost(req: Request, res: Response, next: NextFunction): void {
     }
     const estimatedDuration = typeof estimated_duration_seconds === 'number' && estimated_duration_seconds > 0
       ? estimated_duration_seconds : 5;
+
+    // AI Influencer Pro tier (presetResolver-stamped, ai-influencer only — never client-picked
+    // directly): bypasses the Wan 2.2 Animate Replace model entirely, billed via the combined
+    // Kling-std-per-second + Wan-2.7-flat cost (Kling 'std', not 'pro' — this preset's "Pro"
+    // tier is the compositing pipeline itself, unrelated to Kling's own quality flag). Model is
+    // stamped as the Kling id purely for
+    // accurate DB/regen display — it's never validated against SUPPORTED_CHARACTER_REPLACE_MODELS
+    // (that whitelist is Wan-only) since it's never client-supplied for this branch.
+    if (character_replace_quality === 'pro') {
+      const cost = computeCharacterReplaceProCost(estimatedDuration);
+      req.body.cost_credits = cost;
+      req._resolved = {
+        prompt: '',
+        model: 'kwaivgi/kling-v3-motion-control',
+        mediaType: 'character_replace',
+        durationSeconds: estimatedDuration,
+        characterReplaceVideo: character_replace_video as string,
+        characterReplaceImage: character_replace_image as string,
+        characterReplaceQuality: 'pro',
+        cost,
+      };
+      next();
+      return;
+    }
+
+    const replaceModel = model ?? 'wan-video/wan-2.2-animate-replace';
+    if (!(SUPPORTED_CHARACTER_REPLACE_MODELS as readonly string[]).includes(replaceModel)) {
+      res.status(400).json({ error: `model must be one of: ${SUPPORTED_CHARACTER_REPLACE_MODELS.join(', ')}`, code: 'INVALID_MODEL' });
+      return;
+    }
     const cost = computeCharacterReplaceCost(estimatedDuration);
     req.body.cost_credits = cost;
     // 09.6 D-04: presets with a mux postprocess (Marlon) mux a separate default audio track after
@@ -740,6 +773,33 @@ generationsRouter.post('/', promptModerationMiddleware, presetResolver, prepareC
         });
       } catch (err) {
         console.error(`[generations] Failed to enqueue chain job for ${generationId}:`, err);
+        await markFailed(generationId, 'generic_error');
+        await refundCredits(req.user.dbUserId, resolved.cost, `dispatch-failure-${generationId}`);
+        res.status(502).json({ error: 'Generation service unavailable. Credits have been refunded.' });
+        return;
+      }
+
+      res.status(200).json({ generation_id: generationId, status: 'processing' });
+      return;
+    }
+
+    // AI Influencer Pro tier (character_replace_quality: 'pro'): same async-enqueue shape as the
+    // 'chain' branch above — credits are already deducted (creditCheckMiddleware), this only
+    // enqueues influencerProWorker.ts's 3-step pipeline (frame extract -> Wan 2.7 composite ->
+    // Kling v3 Motion Control) and returns 'processing' immediately. No inline dispatch path here:
+    // the frame extract + Wan 2.7 composite calls alone can take many seconds, well past the
+    // client's HTTP timeout (same rationale as Magic Editor/faceswap below).
+    if (resolved.mediaType === 'character_replace' && resolved.characterReplaceQuality === 'pro') {
+      try {
+        await influencerProQueue.add('generate', {
+          generationId,
+          userId: req.user.dbUserId,
+          cost: resolved.cost,
+          characterImageUrl: resolved.characterReplaceImage!,
+          sourceVideoUrl: resolved.characterReplaceVideo!,
+        });
+      } catch (err) {
+        console.error(`[generations] Failed to enqueue AI Influencer Pro job for ${generationId}:`, err);
         await markFailed(generationId, 'generic_error');
         await refundCredits(req.user.dbUserId, resolved.cost, `dispatch-failure-${generationId}`);
         res.status(502).json({ error: 'Generation service unavailable. Credits have been refunded.' });
