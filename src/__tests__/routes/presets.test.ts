@@ -53,7 +53,7 @@ describe('presets registry config', () => {
     // 09.3-06) — this is the permanent regression guard for that flip.
     const soonIds = SERVER_PRESETS.filter((p) => p.status === 'soon').map((p) => p.preset_id);
     expect(soonIds).toEqual(
-      expect.arrayContaining(['cinema-studio', 'avatar-center', 'fruit-island']),
+      expect.arrayContaining(['edit-studio', 'avatar-center', 'fruit-island']),
     );
     expect(soonIds).not.toContain('try-on');
     expect(soonIds).not.toContain('faceswap');

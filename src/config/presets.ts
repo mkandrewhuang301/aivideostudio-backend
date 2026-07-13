@@ -199,13 +199,16 @@ function placeholderTile(presetId: string): PresetTile {
 export const SERVER_PRESETS: PresetDef[] = [
   // ─── Hero ────────────────────────────────────────────────────────────────
   {
-    preset_id: 'cinema-studio',
-    title: 'Cinema Studio',
+    preset_id: 'edit-studio',
+    title: 'Edit Studio',
     subtitle: 'Coming Soon',
     section: 'hero',
     sort_order: 1,
     status: 'soon',
-    tile: { ...placeholderTile('cinema-studio'), aspect: '16:9' },
+    // Renamed from 'cinema-studio' (2026-07-13) — repurposed as the hero card for the
+    // upcoming in-app CapCut-style editor (Phase 13: Edit Studio), not the deprioritized
+    // Anime Studio concept the old name implied.
+    tile: { ...placeholderTile('edit-studio'), aspect: '16:9' },
   },
 
   // ─── Video Effects (output = video — D-02 revised 2026-07-06, above Photo Effects) ─
