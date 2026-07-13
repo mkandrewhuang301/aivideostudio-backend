@@ -16,7 +16,7 @@ import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { r2, R2_BUCKET } from '../storage/r2';
 import { db } from '../db/client';
 import { referenceUploads, generations } from '../db/schema';
-import { eq, desc, and, sql } from 'drizzle-orm';
+import { eq, ne, desc, and, sql } from 'drizzle-orm';
 
 export const uploadsRouter = Router();
 
@@ -129,9 +129,12 @@ uploadsRouter.get('/', async (req: Request, res: Response) => {
     return;
   }
   try {
+    // Default (no explicit kindFilter) excludes internal 'mask' uploads — the alpha masks the
+    // Magic Editor paints are not user-facing references and must never appear in the @-mention
+    // library. An explicit ?kind= request is still honored verbatim. (2026-07-13)
     const whereClause = kindFilter
       ? and(eq(referenceUploads.user_id, req.user.dbUserId), eq(referenceUploads.kind, kindFilter))
-      : eq(referenceUploads.user_id, req.user.dbUserId);
+      : and(eq(referenceUploads.user_id, req.user.dbUserId), ne(referenceUploads.kind, 'mask'));
 
     const rows = await db
       .select()
