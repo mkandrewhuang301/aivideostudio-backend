@@ -33,18 +33,67 @@ const connectionOptions = {
   enableReadyCheck: false,
 };
 
-export type FfmpegOp = 'mux' | 'concat';
+export type FfmpegOp = 'mux' | 'concat' | 'compose';
+
+// Phase 13 (Edit Studio) — 'compose' job type contract. Defines the shape the export pipeline
+// (plans 06/07) dispatches into the queue; this plan only defines the contract, it does NOT
+// implement the compose worker branch (that lives in ffmpegProcessor.ts, plan 06).
+export interface ComposeClipSpec {
+  r2Key: string;
+  mediaType: 'video' | 'image';
+  trimStartSeconds: number;
+  trimEndSeconds: number;
+}
+
+export interface ComposeTextSpec {
+  text: string;
+  xNorm: number;
+  yNorm: number;
+  startSeconds: number;
+  endSeconds: number;
+}
+
+export interface ComposeAudioSpec {
+  r2Key: string;
+  startOffsetSeconds: number;
+  trimStartSeconds: number;
+  trimEndSeconds: number;
+}
+
+export interface ComposeCaptionCue {
+  startSeconds: number;
+  endSeconds: number;
+  words: { text: string; startSeconds: number; endSeconds: number }[];
+}
+
+export interface ComposeCaptionStyle {
+  fontSize: number;
+  color: string;
+  highlightColor: string;
+  position: 'top' | 'middle' | 'bottom';
+}
+
+export interface ComposeSpec {
+  aspectRatio: '9:16' | '4:5' | '1:1' | '16:9';
+  clips: ComposeClipSpec[];
+  textOverlays: ComposeTextSpec[];
+  audioClips: ComposeAudioSpec[];
+  captionCues: ComposeCaptionCue[];
+  captionStyle: ComposeCaptionStyle;
+}
 
 export interface FfmpegJobData {
   generationId: string;
   userId: string;
   costCredits: number;
   op: FfmpegOp;
-  /** R2 keys for video clip(s). mux uses [0]; concat uses all in order. */
+  /** R2 keys for video clip(s). mux uses [0]; concat uses all in order. Unused (pass []) for compose. */
   inputR2Keys: string[];
   /** Required for op:'mux' — trend/ambience audio R2 key. */
   audioR2Key?: string;
   mediaType: 'video';
+  /** Required for op:'compose' (plan 06 implements the worker branch that consumes this). */
+  compose?: ComposeSpec;
 }
 
 export const ffmpegQueue = new Queue<FfmpegJobData>(QUEUE_NAME, {
