@@ -19,7 +19,8 @@ import { Readable } from 'node:stream';
 import { Upload } from '@aws-sdk/lib-storage';
 import { r2, R2_BUCKET } from '../storage/r2';
 import { getGenerationPresignedUrl } from '../services/archivalService';
-import type { FfmpegJobData } from './ffmpegWorker';
+import { buildAssFile } from '../services/assCaptionBuilder';
+import type { FfmpegJobData, ComposeSpec } from './ffmpegWorker';
 
 const execFileAsync = promisify(execFile);
 
@@ -51,6 +52,139 @@ async function uploadFileToR2(localPath: string, r2Key: string): Promise<void> {
 // T-09.3-03: argv array only — never interpolate a raw key/path into a shell string.
 async function runFfmpeg(args: string[]): Promise<void> {
   await execFileAsync('ffmpeg', args);
+}
+
+// Phase 13 (Edit Studio) — 'compose' op support (plan 06). ---------------------------------------
+
+// 13-RESEARCH.md Open Question 3 (RESOLVED via 13-UI-SPEC.md): export always hard-caps at 1080p
+// regardless of source clip resolution, keyed off the project's chosen aspect ratio.
+const COMPOSE_CANVAS: Record<ComposeSpec['aspectRatio'], { width: number; height: number }> = {
+  '9:16': { width: 1080, height: 1920 },
+  '4:5': { width: 1080, height: 1350 },
+  '1:1': { width: 1080, height: 1080 },
+  '16:9': { width: 1920, height: 1080 },
+};
+
+/** Resolves the 1080p-capped canvas WxH for a compose spec's aspect ratio. */
+export function resolveComposeCanvas(aspectRatio: ComposeSpec['aspectRatio']): { width: number; height: number } {
+  return COMPOSE_CANVAS[aspectRatio] ?? COMPOSE_CANVAS['9:16'];
+}
+
+/**
+ * Escapes a user-authored Text-overlay string for safe use as a `drawtext` `text=` value inside
+ * an ffmpeg filter_complex graph (T-13-11 — first user-authored-text-into-drawtext surface in
+ * this codebase, sibling risk to assCaptionBuilder.ts's escapeAssText for the ASS/caption path).
+ * Order matters: backslash MUST be escaped first, else escaping colons/quotes afterwards would
+ * double-escape the backslashes those steps introduce.
+ */
+export function escapeDrawtextText(raw: string): string {
+  return raw
+    .replace(/\\/g, '\\\\')
+    .replace(/:/g, '\\:')
+    .replace(/'/g, "\\'")
+    .replace(/%/g, '\\%')
+    .replace(/[\r\n]+/g, ' ');
+}
+
+export interface BuildComposeArgsInput {
+  spec: ComposeSpec;
+  /** Local temp-file paths for spec.clips, same order/length as spec.clips. */
+  clipPaths: string[];
+  /** Local temp-file paths for spec.audioClips, same order/length as spec.audioClips. */
+  audioPaths: string[];
+  /** Path to a generated .ass caption file, or null when spec.captionCues is empty. */
+  assPath: string | null;
+  fontsDir: string;
+  outPath: string;
+}
+
+/**
+ * Pure function: assembles the FULL ffmpeg argv array for the compose op (RESEARCH.md Pattern 1/2)
+ * — never a shell string (T-13-11). Concatenates mixed-resolution/mixed-media clips via a single
+ * filter_complex scale+pad+concat graph (NEVER the `-f concat` demuxer — Pitfall 2), chains
+ * per-overlay `drawtext` filters with `enable=between(t,start,end)` windows, optionally burns
+ * word-level captions via the generated .ass file, and mixes independently-timed audio clips over
+ * the concatenated clip audio via `adelay`/`amix`.
+ */
+export function buildComposeArgs(input: BuildComposeArgsInput): string[] {
+  const { spec, clipPaths, audioPaths, assPath, fontsDir, outPath } = input;
+  const { width, height } = resolveComposeCanvas(spec.aspectRatio);
+
+  const args: string[] = ['-y'];
+  const filterParts: string[] = [];
+
+  // Per-clip video/audio input args + normalize (trim/scale/pad) filter chains.
+  spec.clips.forEach((clip, i) => {
+    const clipPath = clipPaths[i];
+    const duration = Math.max(0, clip.trimEndSeconds - clip.trimStartSeconds);
+    if (clip.mediaType === 'image') {
+      // No native duration/audio track on a still image — loop it for the clip's trim duration
+      // and synthesize a silent audio stream so concat's a=1 (uniform audio-stream-per-input
+      // requirement) stays satisfied alongside the real video clips.
+      args.push('-loop', '1', '-t', String(duration), '-i', clipPath);
+      filterParts.push(
+        `[${i}:v]setpts=PTS-STARTPTS,scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1[v${i}]`,
+      );
+      filterParts.push(`anullsrc=channel_layout=stereo:sample_rate=44100:duration=${duration}[a${i}]`);
+    } else {
+      args.push('-i', clipPath);
+      filterParts.push(
+        `[${i}:v]trim=start=${clip.trimStartSeconds}:end=${clip.trimEndSeconds},setpts=PTS-STARTPTS,scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1[v${i}]`,
+      );
+      filterParts.push(
+        `[${i}:a]atrim=start=${clip.trimStartSeconds}:end=${clip.trimEndSeconds},asetpts=PTS-STARTPTS[a${i}]`,
+      );
+    }
+  });
+
+  // Independent audio clip inputs — indexed AFTER every clip input.
+  const audioInputBase = spec.clips.length;
+  spec.audioClips.forEach((audioClip, j) => {
+    args.push('-i', audioPaths[j]);
+    const inputIndex = audioInputBase + j;
+    const delayMs = Math.max(0, Math.round(audioClip.startOffsetSeconds * 1000));
+    filterParts.push(
+      `[${inputIndex}:a]atrim=start=${audioClip.trimStartSeconds}:end=${audioClip.trimEndSeconds},asetpts=PTS-STARTPTS,adelay=${delayMs}:all=1[aud${j}]`,
+    );
+  });
+
+  // Concat every clip's normalized video+audio pair into one base stream.
+  const concatInputs = spec.clips.map((_, i) => `[v${i}][a${i}]`).join('');
+  filterParts.push(`${concatInputs}concat=n=${spec.clips.length}:v=1:a=1[vconcat][aconcat]`);
+
+  // Chain one drawtext filter per Text overlay, in order, on top of the concatenated video.
+  let videoLabel = 'vconcat';
+  spec.textOverlays.forEach((overlay, i) => {
+    const nextLabel = `vtext${i}`;
+    const escapedText = escapeDrawtextText(overlay.text);
+    filterParts.push(
+      `[${videoLabel}]drawtext=fontfile=${fontsDir}/Inter-Bold.ttf:text='${escapedText}':x=(w*${overlay.xNorm}):y=(h*${overlay.yNorm}):fontsize=48:fontcolor=white:enable='between(t,${overlay.startSeconds},${overlay.endSeconds})'[${nextLabel}]`,
+    );
+    videoLabel = nextLabel;
+  });
+
+  // Burn word-level captions via the generated ASS file (13-05's assCaptionBuilder), if present.
+  if (assPath && spec.captionCues.length > 0) {
+    filterParts.push(`[${videoLabel}]ass=filename=${assPath}:fontsdir=${fontsDir}[vout]`);
+    videoLabel = 'vout';
+  }
+
+  // Mix independently-timed audio clips over the concatenated clip audio.
+  let audioLabel = 'aconcat';
+  if (spec.audioClips.length > 0) {
+    const amixInputs = ['[aconcat]', ...spec.audioClips.map((_, j) => `[aud${j}]`)].join('');
+    filterParts.push(
+      `${amixInputs}amix=inputs=${spec.audioClips.length + 1}:duration=first:dropout_transition=0[amixed]`,
+    );
+    audioLabel = 'amixed';
+  }
+
+  // The ENTIRE filter graph is one argv element — never interpolated into a shell command (T-13-11).
+  args.push('-filter_complex', filterParts.join(';'));
+  args.push('-map', `[${videoLabel}]`, '-map', `[${audioLabel}]`);
+  args.push('-c:v', 'libx264', '-c:a', 'aac', outPath);
+
+  return args;
 }
 
 /**

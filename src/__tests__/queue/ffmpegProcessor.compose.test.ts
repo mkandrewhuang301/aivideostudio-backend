@@ -9,6 +9,24 @@
 // scale/pad/concat pattern, NEVER the `-f concat` demuxer (that path is only correct for Phase
 // 9.3's existing same-source `concat` op, whose inputs are guaranteed uniform).
 
+// ffmpegProcessor.ts imports storage/r2.ts -> config.ts, which calls requireEnv() at module-eval
+// time — mock config first (same convention as ffmpegWorker.test.ts) so importing the pure
+// buildComposeArgs/escapeDrawtextText functions below doesn't require real env vars or R2 creds.
+jest.mock('../../config', () => ({
+  config: {
+    replicateWebhookSecret: 'whsec_test',
+    databaseUrl: 'mock://db',
+    redisUrl: 'redis://localhost',
+    r2AccountId: 'mock', r2AccessKeyId: 'mock', r2SecretAccessKey: 'mock',
+    r2BucketName: 'mock', r2PublicDomain: '',
+    firebaseProjectId: 'mock', firebaseClientEmail: 'mock@mock.iam.gserviceaccount.com',
+    firebasePrivateKey: 'mock-key', apnsAuthKey: 'mock-key', apnsKeyId: 'mock',
+    apnsTeamId: 'mock', apnsBundleId: 'mock', replicateApiToken: 'mock-token',
+    hiveApiKey: 'mock-hive-key', publicBaseUrl: 'https://mock.example.com',
+    port: 3000, nodeEnv: 'test',
+  },
+}));
+
 import type { ComposeSpec } from '../../queue/ffmpegWorker';
 import { buildComposeArgs, escapeDrawtextText } from '../../queue/ffmpegProcessor';
 
