@@ -220,6 +220,50 @@ export async function runFfmpegOp(data: FfmpegJobData): Promise<{ r2Key: string;
       const r2Key = `generations/${generationId}.mp4`;
       await uploadFileToR2(outPath, r2Key);
       return { r2Key, masterR2Key };
+    } else if (op === 'compose') {
+      // Phase 13 (Edit Studio) SC7 — real server-side export render. Reads EXCLUSIVELY from
+      // `data.compose` (the enqueue-time snapshot) — never re-queries any project_* table
+      // (RESEARCH.md Pitfall 4 / T-13-14): a user may keep editing the (still-editable-per-D-12)
+      // project while this job runs, and the export must reflect what they saw at export time,
+      // not a live/half-edited read.
+      const spec = data.compose;
+      if (!spec) throw new Error('ffmpeg compose op requires data.compose');
+
+      const clipPaths: string[] = [];
+      for (let i = 0; i < spec.clips.length; i++) {
+        const clip = spec.clips[i];
+        const ext = clip.r2Key.split('.').pop() || (clip.mediaType === 'image' ? 'jpg' : 'mp4');
+        const clipPath = path.join(tempDir, `clip${i}.${ext}`);
+        await downloadR2KeyToFile(clip.r2Key, clipPath);
+        clipPaths.push(clipPath);
+      }
+
+      const audioPaths: string[] = [];
+      for (let j = 0; j < spec.audioClips.length; j++) {
+        const audioClip = spec.audioClips[j];
+        const ext = audioClip.r2Key.split('.').pop() || 'm4a';
+        const audioPath = path.join(tempDir, `audio${j}.${ext}`);
+        await downloadR2KeyToFile(audioClip.r2Key, audioPath);
+        audioPaths.push(audioPath);
+      }
+
+      let assPath: string | null = null;
+      if (spec.captionCues.length > 0) {
+        const canvas = resolveComposeCanvas(spec.aspectRatio);
+        const assContents = buildAssFile(spec.captionCues, spec.captionStyle, canvas);
+        assPath = path.join(tempDir, 'captions.ass');
+        await writeFile(assPath, assContents, 'utf-8');
+      }
+
+      // Bundled TTF (13-02), resolved relative to process cwd (repo root at Railway runtime) —
+      // never depends on system fontconfig being present/configured (RESEARCH.md Pitfall 1).
+      const fontsDir = path.resolve('assets/fonts');
+      const args = buildComposeArgs({ spec, clipPaths, audioPaths, assPath, fontsDir, outPath });
+      await runFfmpeg(args);
+
+      const r2Key = `generations/${generationId}.mp4`;
+      await uploadFileToR2(outPath, r2Key);
+      return { r2Key };
     } else {
       const clipPaths: string[] = [];
       for (let i = 0; i < inputR2Keys.length; i++) {

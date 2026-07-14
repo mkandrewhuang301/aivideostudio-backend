@@ -103,6 +103,33 @@ describe('processFfmpegJob', () => {
     expect(markCompleted).toHaveBeenCalledWith(concatJobData.generationId, expect.any(String));
     expect(mergeGenerationParams).not.toHaveBeenCalled();
   });
+
+  it('compose success: routes through the SAME markCompleted/APNs completion path unchanged (Phase 13 SC7)', async () => {
+    (runFfmpegOp as jest.Mock).mockResolvedValue({ r2Key: `generations/${JOB_DATA.generationId}.mp4` });
+    const composeJobData = {
+      ...JOB_DATA,
+      op: 'compose' as const,
+      costCredits: 0, // D-10: export is free
+      audioR2Key: undefined,
+      inputR2Keys: [],
+      compose: {
+        aspectRatio: '9:16' as const,
+        clips: [],
+        textOverlays: [],
+        audioClips: [],
+        captionCues: [],
+        captionStyle: { fontSize: 64, color: '#FFFFFF', highlightColor: '#FFFF00', position: 'bottom' as const },
+      },
+    };
+
+    await processFfmpegJob(composeJobData);
+
+    expect(markCompleted).toHaveBeenCalledWith(composeJobData.generationId, expect.any(String));
+    expect(sendGenerationComplete).toHaveBeenCalledWith('token-abc', composeJobData.generationId, 'video');
+    // compose returns no masterR2Key (no single silent source) — same as concat's shape.
+    expect(mergeGenerationParams).not.toHaveBeenCalled();
+    expect(refundCredits).not.toHaveBeenCalled();
+  });
 });
 
 describe('handleFfmpegFinalFailure', () => {
