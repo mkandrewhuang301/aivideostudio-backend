@@ -7,7 +7,7 @@
 // binary or file I/O is exercised here, buildAssFile/escapeAssText/hexToAssColor are pure string
 // builders.
 
-import { buildAssFile, escapeAssText, hexToAssColor } from '../../services/assCaptionBuilder';
+import { buildAssFile, buildTextOverlayAss, escapeAssText, hexToAssColor } from '../../services/assCaptionBuilder';
 
 describe('escapeAssText', () => {
   it('strips braces and backslashes so no raw ASS control character survives', () => {
@@ -114,5 +114,101 @@ describe('buildAssFile', () => {
     const styleLine = ass.split('\n').find((l: string) => l.startsWith('Style: Caption,')) as string;
     expect(styleLine).toContain(hexToAssColor(style.highlightColor));
     expect(styleLine).toContain(hexToAssColor(style.color));
+  });
+});
+
+// T-13-19 Task G4: text-overlay .ass builder — replaces the old ffmpeg `drawtext` per-overlay
+// loop so rotation (\frz) and scale (\fs) actually reach the exported MP4.
+describe('buildTextOverlayAss', () => {
+  const canvas = { width: 1080, height: 1920 };
+
+  it('sets PlayResX/PlayResY to match the export canvas', () => {
+    const ass = buildTextOverlayAss([], canvas);
+    expect(ass).toContain('PlayResX: 1080');
+    expect(ass).toContain('PlayResY: 1920');
+  });
+
+  it('produces a valid empty [Events] section for an empty overlay list (no crash)', () => {
+    const ass = buildTextOverlayAss([], canvas);
+    expect(ass).toContain('[Events]');
+    expect(ass.split('\n').some((l: string) => l.startsWith('Dialogue:'))).toBe(false);
+  });
+
+  it('declares a Fontname:Inter TextOverlay style row (name-table family, not the file stem)', () => {
+    const ass = buildTextOverlayAss([], canvas);
+    const styleLine = ass.split('\n').find((l: string) => l.startsWith('Style: TextOverlay,')) as string;
+    expect(styleLine).toBeDefined();
+    expect(styleLine).toContain('TextOverlay,Inter,');
+  });
+
+  it('emits \\an5\\pos at the box CENTER (xNorm*PlayResX, yNorm*PlayResY), matching SwiftUI .position(...)', () => {
+    const ass = buildTextOverlayAss(
+      [{ text: 'Hi', xNorm: 0.5, yNorm: 0.25, startSeconds: 0, endSeconds: 1 }],
+      canvas,
+    );
+    const dialogueLine = ass.split('\n').find((l: string) => l.startsWith('Dialogue:')) as string;
+    expect(dialogueLine).toContain('\\an5\\pos(540,480)');
+  });
+
+  it('scales \\fs proportionally to canvas height via widthNorm (1 => ~48px on a 1920-tall canvas)', () => {
+    const base = buildTextOverlayAss(
+      [{ text: 'Hi', xNorm: 0.5, yNorm: 0.5, widthNorm: 1, startSeconds: 0, endSeconds: 1 }],
+      canvas,
+    );
+    const doubled = buildTextOverlayAss(
+      [{ text: 'Hi', xNorm: 0.5, yNorm: 0.5, widthNorm: 2, startSeconds: 0, endSeconds: 1 }],
+      canvas,
+    );
+    const baseLine = base.split('\n').find((l: string) => l.startsWith('Dialogue:')) as string;
+    const doubledLine = doubled.split('\n').find((l: string) => l.startsWith('Dialogue:')) as string;
+
+    expect(baseLine).toContain('\\fs48');
+    expect(doubledLine).toContain('\\fs96');
+  });
+
+  it('defaults widthNorm to 1 (scale=1) when omitted', () => {
+    const ass = buildTextOverlayAss([{ text: 'Hi', xNorm: 0.5, yNorm: 0.5, startSeconds: 0, endSeconds: 1 }], canvas);
+    const dialogueLine = ass.split('\n').find((l: string) => l.startsWith('Dialogue:')) as string;
+    expect(dialogueLine).toContain('\\fs48');
+  });
+
+  it('negates rotation for \\frz (ASS is counter-clockwise-positive, SwiftUI .rotationEffect is clockwise-positive)', () => {
+    const ass = buildTextOverlayAss(
+      [{ text: 'Hi', xNorm: 0.5, yNorm: 0.5, rotation: 30, startSeconds: 0, endSeconds: 1 }],
+      canvas,
+    );
+    const dialogueLine = ass.split('\n').find((l: string) => l.startsWith('Dialogue:')) as string;
+    expect(dialogueLine).toContain('\\frz-30');
+  });
+
+  it('defaults rotation to 0 (\\frz0) when omitted', () => {
+    const ass = buildTextOverlayAss([{ text: 'Hi', xNorm: 0.5, yNorm: 0.5, startSeconds: 0, endSeconds: 1 }], canvas);
+    const dialogueLine = ass.split('\n').find((l: string) => l.startsWith('Dialogue:')) as string;
+    expect(dialogueLine).toContain('\\frz0');
+  });
+
+  it('produces one Dialogue line per overlay, in order, with H:MM:SS.cc start/end timestamps', () => {
+    const ass = buildTextOverlayAss(
+      [
+        { text: 'First', xNorm: 0.5, yNorm: 0.5, startSeconds: 0, endSeconds: 1.5 },
+        { text: 'Second', xNorm: 0.5, yNorm: 0.5, startSeconds: 65.25, endSeconds: 67 },
+      ],
+      canvas,
+    );
+    const dialogueLines = ass.split('\n').filter((l: string) => l.startsWith('Dialogue:'));
+    expect(dialogueLines).toHaveLength(2);
+    expect(dialogueLines[0]).toContain('0:00:00.00,0:00:01.50');
+    expect(dialogueLines[1]).toContain('0:01:05.25,0:01:07.00');
+  });
+
+  it('passes every overlay string through escapeAssText before interpolation (T-13-05 injection guard reused)', () => {
+    const ass = buildTextOverlayAss(
+      [{ text: 'x{\\pos(0,0)}y', xNorm: 0.5, yNorm: 0.5, startSeconds: 0, endSeconds: 1 }],
+      canvas,
+    );
+    const dialogueLine = ass.split('\n').find((l: string) => l.startsWith('Dialogue:')) as string;
+    const withoutOverrideBlock = dialogueLine.replace(/\{[^}]*\}/, '');
+    expect(withoutOverrideBlock).not.toMatch(/[{}\\]/);
+    expect(dialogueLine).not.toContain('{\\pos');
   });
 });

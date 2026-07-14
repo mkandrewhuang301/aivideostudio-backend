@@ -53,6 +53,11 @@ export class ImportSourceNotFoundError extends Error {}
 // The route maps this to a 400, never lets an incomplete spec reach the ffmpeg queue.
 export class ExportValidationError extends Error {}
 
+// Thrown by splitClip/splitAudioClip when the requested split point isn't STRICTLY inside the
+// source asset's current trim range (T-13-19 Task G1/G2) — the route maps this to a 400, never a
+// silent no-op or a malformed zero-duration piece.
+export class SplitValidationError extends Error {}
+
 // Shared ownership resolution (T-13-15): every element (text/audio/caption) handler below
 // resolves the PARENT project scoped to user_id FIRST, before mutating any child row — never
 // a bare child-id update. Returns false for both "project doesn't exist" and "not owned by
@@ -356,6 +361,87 @@ async function setProjectThumbnailFromClip(
   await db.update(projects).set({ thumbnail_r2_key: thumbnailR2Key }).where(eq(projects.id, projectId));
 }
 
+// ─── Clip split (T-13-19 Task G1) ──────────────────────────────────────────────
+// Copy-then-insert, mirroring importClipByCopy: never shares one r2_key across two rows
+// (deleteClip's DELETE route deletes the R2 object, so each split piece must own an independent
+// copy). The caller (route) is responsible for the MAX_CLIPS_PER_PROJECT cap check BEFORE calling
+// this, matching the existing POST /:id/clips convention (cap-check-then-mutate at the route
+// layer). project_clips.trim_start_seconds/trim_end_seconds are INTEGER columns (existing schema
+// constraint, unchanged here) — callers must pass whole seconds.
+
+export interface SplitClipInput {
+  /** Where to cut, in the clip's own trim-seconds space. Must be strictly inside (trim_start, currentTrimEnd). */
+  originalTrimEnd: number;
+  newTrimStart: number;
+  newTrimEnd: number;
+  newSortOrder: number;
+}
+
+export async function splitClip(
+  projectId: string,
+  userId: string,
+  clipId: string,
+  input: SplitClipInput,
+): Promise<{ originalClip: ProjectClip; newClip: ProjectClip } | null> {
+  if (!(await isProjectOwned(projectId, userId))) return null;
+
+  const [clip] = await db
+    .select()
+    .from(projectClips)
+    .where(and(eq(projectClips.id, clipId), eq(projectClips.project_id, projectId)));
+  if (!clip) return null;
+
+  const currentTrimEnd = clip.trim_end_seconds ?? clip.original_duration_seconds;
+  if (currentTrimEnd == null) {
+    throw new SplitValidationError('Clip has no resolvable trim_end_seconds — set trim points before splitting');
+  }
+  if (input.originalTrimEnd <= clip.trim_start_seconds || input.originalTrimEnd >= currentTrimEnd) {
+    throw new SplitValidationError('Split point must be strictly inside the clip\'s current trim range');
+  }
+  if (input.newTrimStart >= input.newTrimEnd) {
+    throw new SplitValidationError('new_trim_start must be less than new_trim_end');
+  }
+
+  const ext = clip.r2_key.split('.').pop() ?? 'mp4';
+  const destKey = `projects/${projectId}/clips/${randomUUID()}.${ext}`;
+  await r2.send(
+    new CopyObjectCommand({
+      Bucket: R2_BUCKET,
+      CopySource: `${R2_BUCKET}/${clip.r2_key}`,
+      Key: destKey,
+    }),
+  );
+
+  // Resequence: every OTHER clip at/after the new piece's slot shifts down one — same contract
+  // updateClip(sortOrder:) already relies on (sort_order is a dense 0..N-1 ordering).
+  await db.execute(sql`
+    UPDATE project_clips SET sort_order = sort_order + 1
+    WHERE project_id = ${projectId}::uuid AND sort_order >= ${input.newSortOrder} AND id != ${clipId}::uuid
+  `);
+
+  const [newClip] = await db
+    .insert(projectClips)
+    .values({
+      project_id: projectId,
+      sort_order: input.newSortOrder,
+      r2_key: destKey,
+      media_type: clip.media_type,
+      source_type: clip.source_type,
+      original_duration_seconds: clip.original_duration_seconds,
+      trim_start_seconds: input.newTrimStart,
+      trim_end_seconds: input.newTrimEnd,
+    })
+    .returning();
+
+  const [updatedOriginal] = await db
+    .update(projectClips)
+    .set({ trim_end_seconds: input.originalTrimEnd })
+    .where(eq(projectClips.id, clipId))
+    .returning();
+
+  return { originalClip: updatedOriginal, newClip };
+}
+
 // ─── Text overlay CRUD (SC3) ───────────────────────────────────────────────────
 // Bounds validation (x_norm/y_norm ∈ [0,1], width_norm ∈ [0.5,3], T-13-44) happens at the ROUTE
 // layer BEFORE calling these — mirrors updateProject's validation split (route validates,
@@ -366,6 +452,7 @@ export interface AddTextOverlayInput {
   xNorm: number;
   yNorm: number;
   widthNorm?: number;
+  rotation?: number;
   startSeconds: number;
   endSeconds: number;
 }
@@ -374,6 +461,7 @@ export interface UpdateTextOverlayInput {
   xNorm?: number;
   yNorm?: number;
   widthNorm?: number;
+  rotation?: number;
   startSeconds?: number;
   endSeconds?: number;
 }
@@ -393,6 +481,7 @@ export async function addTextOverlay(
       x_norm: input.xNorm,
       y_norm: input.yNorm,
       width_norm: input.widthNorm ?? null,
+      rotation: input.rotation ?? 0,
       start_seconds: input.startSeconds,
       end_seconds: input.endSeconds,
     })
@@ -413,6 +502,7 @@ export async function updateTextOverlay(
   if (updates.xNorm !== undefined) setValues.x_norm = updates.xNorm;
   if (updates.yNorm !== undefined) setValues.y_norm = updates.yNorm;
   if (updates.widthNorm !== undefined) setValues.width_norm = updates.widthNorm;
+  if (updates.rotation !== undefined) setValues.rotation = updates.rotation;
   if (updates.startSeconds !== undefined) setValues.start_seconds = updates.startSeconds;
   if (updates.endSeconds !== undefined) setValues.end_seconds = updates.endSeconds;
 
@@ -517,6 +607,82 @@ export async function deleteAudioClip(projectId: string, userId: string, audioId
     console.error('[projectService] Best-effort delete of audio clip R2 object failed:', err);
   }
   return true;
+}
+
+// ─── Audio clip split (T-13-19 Task G2) ────────────────────────────────────────
+// Same copy-then-insert shape as splitClip. Unlike clips, audio pills aren't a dense
+// position-ordered sequence (start_offset_seconds — not sort_order — drives timeline position),
+// so the new piece is simply appended at the next sort_order (same convention addAudioClip uses),
+// no resequencing needed.
+
+export interface SplitAudioClipInput {
+  /** Where to cut, in the audio clip's own trim-seconds space. Must be strictly inside (trim_start, currentTrimEnd). */
+  originalTrimEnd: number;
+  newTrimStart: number;
+  newTrimEnd: number;
+  newStartOffsetSeconds: number;
+}
+
+export async function splitAudioClip(
+  projectId: string,
+  userId: string,
+  audioId: string,
+  input: SplitAudioClipInput,
+): Promise<{ originalAudioClip: ProjectAudioClip; newAudioClip: ProjectAudioClip } | null> {
+  if (!(await isProjectOwned(projectId, userId))) return null;
+
+  const [audio] = await db
+    .select()
+    .from(projectAudioClips)
+    .where(and(eq(projectAudioClips.id, audioId), eq(projectAudioClips.project_id, projectId)));
+  if (!audio) return null;
+
+  const currentTrimEnd = audio.trim_end_seconds;
+  if (currentTrimEnd == null) {
+    throw new SplitValidationError('Audio clip has no trim_end_seconds set — set trim points before splitting');
+  }
+  if (input.originalTrimEnd <= audio.trim_start_seconds || input.originalTrimEnd >= currentTrimEnd) {
+    throw new SplitValidationError('Split point must be strictly inside the audio clip\'s current trim range');
+  }
+  if (input.newTrimStart >= input.newTrimEnd) {
+    throw new SplitValidationError('new_trim_start must be less than new_trim_end');
+  }
+
+  const ext = audio.r2_key.split('.').pop() ?? 'm4a';
+  const destKey = `projects/${projectId}/audio/${randomUUID()}.${ext}`;
+  await r2.send(
+    new CopyObjectCommand({
+      Bucket: R2_BUCKET,
+      CopySource: `${R2_BUCKET}/${audio.r2_key}`,
+      Key: destKey,
+    }),
+  );
+
+  const nextOrderResult = await db.execute(sql`
+    SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_order FROM project_audio_clips WHERE project_id = ${projectId}::uuid
+  `);
+  const nextSortOrder = Number((nextOrderResult.rows?.[0] as { next_order?: number } | undefined)?.next_order ?? 0);
+
+  const [newAudioClip] = await db
+    .insert(projectAudioClips)
+    .values({
+      project_id: projectId,
+      r2_key: destKey,
+      source_type: audio.source_type,
+      start_offset_seconds: input.newStartOffsetSeconds,
+      trim_start_seconds: input.newTrimStart,
+      trim_end_seconds: input.newTrimEnd,
+      sort_order: nextSortOrder,
+    })
+    .returning();
+
+  const [updatedOriginal] = await db
+    .update(projectAudioClips)
+    .set({ trim_end_seconds: input.originalTrimEnd })
+    .where(eq(projectAudioClips.id, audioId))
+    .returning();
+
+  return { originalAudioClip: updatedOriginal, newAudioClip };
 }
 
 // ─── Caption cue/word CRUD (SC5, D-13) ─────────────────────────────────────────
@@ -867,6 +1033,10 @@ export async function buildComposeSnapshot(projectId: string, userId: string): P
       text: t.text,
       xNorm: t.x_norm ?? 0.5,
       yNorm: t.y_norm ?? 0.5,
+      // widthNorm/rotation previously dropped here (T-13-19 gap) — export silently ignored scale
+      // and there was no rotation field at all. Both now flow into the libass render path (G4).
+      widthNorm: t.width_norm ?? 1,
+      rotation: t.rotation ?? 0,
       startSeconds: t.start_seconds,
       endSeconds: t.end_seconds,
     })),

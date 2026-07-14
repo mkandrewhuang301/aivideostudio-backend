@@ -175,3 +175,79 @@ export function buildAssFile(cues: CaptionCue[], style: CaptionStyle, canvas: Ca
 
   return [...scriptInfoLines, ...styleLines, ...eventsHeaderLines, ...dialogueLines].join('\n') + '\n';
 }
+
+// ─── Text overlay .ass (T-13-19 Task G4) ───────────────────────────────────────
+// Replaces the old ffmpeg `drawtext` per-overlay loop (ffmpegProcessor.ts) — drawtext can't
+// rotate and ignores width_norm scale. This reuses the SAME escapeAssText/formatAssTimestamp/
+// Fontname:Inter machinery already proven for captions above, so every user-authored overlay
+// string passes through the identical T-13-05 injection guard.
+
+export interface TextOverlaySpec {
+  text: string;
+  /** 0..1 normalized position — box CENTER, matching SwiftUI's .position(...) semantics. */
+  xNorm: number;
+  yNorm: number;
+  /** Scale factor; 1 = default size. */
+  widthNorm?: number;
+  /** Degrees, CLOCKWISE-positive (SwiftUI .rotationEffect convention) — negated below for \frz. */
+  rotation?: number;
+  startSeconds: number;
+  endSeconds: number;
+}
+
+// Proportional to the output canvas height so scale=1 reads consistently across every aspect
+// ratio — unlike the old drawtext path's fixed `fontsize=48`, which only "looked right" on
+// 1080-tall canvases (4:5/1:1/16:9) and was visibly undersized on 1920-tall 9:16 exports (this
+// app's default/primary format). Calibrated so widthNorm=1 on a 9:16 (1920-tall) canvas renders
+// ~48px — matching the pre-libass default look on the format most users actually export.
+const TEXT_OVERLAY_BASE_FRAC = 48 / 1920;
+
+/**
+ * Builds a complete .ass subtitle file from Text overlays (SC3) — a SEPARATE libass pass from
+ * buildAssFile's word-level captions above (its own Style row, `TextOverlay`, chained through its
+ * own `ass=` filter in the ffmpeg graph). An empty `overlays` array still produces a structurally
+ * valid header-only file, same contract as buildAssFile — this must never throw.
+ */
+export function buildTextOverlayAss(overlays: TextOverlaySpec[], canvas: CaptionCanvas): string {
+  const scriptInfoLines = [
+    '[Script Info]',
+    'ScriptType: v4.00+',
+    `PlayResX: ${canvas.width}`,
+    `PlayResY: ${canvas.height}`,
+    '',
+  ];
+
+  const styleLines = [
+    '[V4+ Styles]',
+    'Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding',
+    // Fontname MUST be the name-table family "Inter" (not the file stem "Inter-Bold") — same
+    // gotcha documented above for the Caption style; the bold weight comes from the bundled TTF
+    // itself, not an ASS Bold-toggle. Per-line \pos fully overrides placement, so MarginL/R/V and
+    // the default Alignment here are effectively inert (kept at sane defaults regardless).
+    // BorderStyle=1 (outline, no box) + a semi-transparent BackColour used as the shadow color —
+    // mirrors the editor's on-video text-shadow look instead of the caption track's opaque pill.
+    'Style: TextOverlay,Inter,48,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,2,1,5,0,0,0,1',
+    '',
+  ];
+
+  const eventsHeaderLines = [
+    '[Events]',
+    'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text',
+  ];
+
+  const dialogueLines = overlays.map((overlay) => {
+    const x = Math.round(overlay.xNorm * canvas.width);
+    const y = Math.round(overlay.yNorm * canvas.height);
+    const fontSize = Math.max(1, Math.round(TEXT_OVERLAY_BASE_FRAC * canvas.height * (overlay.widthNorm ?? 1)));
+    // ASS \frz is COUNTER-clockwise-positive; SwiftUI .rotationEffect is CLOCKWISE-positive —
+    // negate, else the export would mirror the editor's rotation direction. \frz rotates about
+    // the \an5\pos origin (box center), same pivot .rotationEffect uses.
+    const angle = -(overlay.rotation ?? 0);
+    const start = formatAssTimestamp(overlay.startSeconds);
+    const end = formatAssTimestamp(overlay.endSeconds);
+    const text = escapeAssText(overlay.text);
+    return `Dialogue: 0,${start},${end},TextOverlay,,0,0,0,,{\\an5\\pos(${x},${y})\\fs${fontSize}\\frz${angle}}${text}`;
+  });
+
+  return [...scriptInfoLines, ...styleLines, ...eventsHeaderLines, ...dialogueLines].join('\n') + '\n';
+}

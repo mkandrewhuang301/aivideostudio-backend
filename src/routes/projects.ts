@@ -50,6 +50,9 @@ import {
   MAX_WORDS_PER_CUE,
   buildComposeSnapshot,
   ExportValidationError,
+  splitClip,
+  splitAudioClip,
+  SplitValidationError,
 } from '../services/projectService';
 
 export const projectsRouter = Router();
@@ -459,6 +462,75 @@ projectsRouter.delete('/:id/clips/:clipId', async (req: Request, res: Response) 
   }
 });
 
+// POST /api/projects/:id/clips/:clipId/split — cut a clip into two adjacent pieces at a local
+// trim-seconds split point (T-13-19 Task G1). Copy-then-insert (never shares one r2_key across
+// two rows, mirrors importClipByCopy) — CopyObjects the source clip's r2_key to a fresh key,
+// inserts the new second-half clip, resequences trailing clips, and shrinks the original's
+// trim_end_seconds to the split point, all scoped by the existing MAX_CLIPS_PER_PROJECT cap.
+projectsRouter.post('/:id/clips/:clipId/split', async (req: Request, res: Response) => {
+  if (!req.user?.dbUserId) {
+    res.status(401).json({ error: 'Not authenticated' });
+    return;
+  }
+  const projectId = req.params.id as string;
+  const clipId = req.params.clipId as string;
+  const { original_trim_end, new_trim_start, new_trim_end, new_sort_order } = req.body ?? {};
+
+  if (
+    typeof original_trim_end !== 'number' ||
+    typeof new_trim_start !== 'number' ||
+    typeof new_trim_end !== 'number' ||
+    typeof new_sort_order !== 'number'
+  ) {
+    res.status(400).json({ error: 'original_trim_end, new_trim_start, new_trim_end, new_sort_order are required numbers' });
+    return;
+  }
+  if (new_trim_start >= new_trim_end) {
+    res.status(400).json({ error: 'new_trim_start must be less than new_trim_end' });
+    return;
+  }
+
+  try {
+    const [ownedProject] = await db
+      .select({ id: projects.id })
+      .from(projects)
+      .where(and(eq(projects.id, projectId), eq(projects.user_id, req.user.dbUserId)));
+    if (!ownedProject) {
+      res.status(404).json({ error: 'Project not found' });
+      return;
+    }
+
+    const [{ count }] = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(projectClips)
+      .where(eq(projectClips.project_id, projectId));
+    if (Number(count) >= MAX_CLIPS_PER_PROJECT) {
+      res.status(400).json({ error: `Project already has the maximum of ${MAX_CLIPS_PER_PROJECT} clips` });
+      return;
+    }
+
+    const result = await splitClip(projectId, req.user.dbUserId, clipId, {
+      originalTrimEnd: original_trim_end,
+      newTrimStart: new_trim_start,
+      newTrimEnd: new_trim_end,
+      newSortOrder: new_sort_order,
+    });
+    if (!result) {
+      res.status(404).json({ error: 'Clip not found' });
+      return;
+    }
+
+    res.status(201).json({ clip: result.newClip, original_clip: result.originalClip });
+  } catch (err) {
+    if (err instanceof SplitValidationError) {
+      res.status(400).json({ error: err.message });
+      return;
+    }
+    console.error('[projects] Error splitting clip:', err);
+    res.status(500).json({ error: 'Failed to split clip' });
+  }
+});
+
 // POST /api/projects/:id/export — real free export (D-07/D-10/D-12/SC7): snapshots the full
 // project state at request time (Pitfall 4), creates a NEW free generation row so the client can
 // poll it exactly like any other generation, and enqueues the ffmpeg 'compose' job. The project
@@ -539,7 +611,7 @@ projectsRouter.post('/:id/text', async (req: Request, res: Response) => {
     return;
   }
   const projectId = req.params.id as string;
-  const { text, x_norm, y_norm, width_norm, start_seconds, end_seconds } = req.body ?? {};
+  const { text, x_norm, y_norm, width_norm, rotation, start_seconds, end_seconds } = req.body ?? {};
 
   if (typeof text !== 'string' || text.length === 0) {
     res.status(400).json({ error: 'text is required' });
@@ -558,6 +630,10 @@ projectsRouter.post('/:id/text', async (req: Request, res: Response) => {
   }
   if (width_norm !== undefined && (typeof width_norm !== 'number' || width_norm < 0.5 || width_norm > 3)) {
     res.status(400).json({ error: 'width_norm must be between 0.5 and 3' });
+    return;
+  }
+  if (rotation !== undefined && (typeof rotation !== 'number' || rotation < -360 || rotation > 360)) {
+    res.status(400).json({ error: 'rotation must be between -360 and 360' });
     return;
   }
   if (
@@ -594,6 +670,7 @@ projectsRouter.post('/:id/text', async (req: Request, res: Response) => {
       xNorm: x_norm,
       yNorm: y_norm,
       widthNorm: typeof width_norm === 'number' ? width_norm : undefined,
+      rotation: typeof rotation === 'number' ? rotation : undefined,
       startSeconds: start_seconds,
       endSeconds: end_seconds,
     });
@@ -614,7 +691,7 @@ projectsRouter.patch('/:id/text/:textId', async (req: Request, res: Response) =>
     res.status(401).json({ error: 'Not authenticated' });
     return;
   }
-  const { text, x_norm, y_norm, width_norm, start_seconds, end_seconds } = req.body ?? {};
+  const { text, x_norm, y_norm, width_norm, rotation, start_seconds, end_seconds } = req.body ?? {};
 
   if (text !== undefined && typeof text !== 'string') {
     res.status(400).json({ error: 'text must be a string' });
@@ -630,6 +707,10 @@ projectsRouter.patch('/:id/text/:textId', async (req: Request, res: Response) =>
   }
   if (width_norm !== undefined && (typeof width_norm !== 'number' || width_norm < 0.5 || width_norm > 3)) {
     res.status(400).json({ error: 'width_norm must be between 0.5 and 3' });
+    return;
+  }
+  if (rotation !== undefined && (typeof rotation !== 'number' || rotation < -360 || rotation > 360)) {
+    res.status(400).json({ error: 'rotation must be between -360 and 360' });
     return;
   }
   if (start_seconds !== undefined && end_seconds !== undefined) {
@@ -656,6 +737,7 @@ projectsRouter.patch('/:id/text/:textId', async (req: Request, res: Response) =>
       xNorm: typeof x_norm === 'number' ? x_norm : undefined,
       yNorm: typeof y_norm === 'number' ? y_norm : undefined,
       widthNorm: typeof width_norm === 'number' ? width_norm : undefined,
+      rotation: typeof rotation === 'number' ? rotation : undefined,
       startSeconds: typeof start_seconds === 'number' ? start_seconds : undefined,
       endSeconds: typeof end_seconds === 'number' ? end_seconds : undefined,
     });
@@ -859,6 +941,80 @@ projectsRouter.delete('/:id/audio/:audioId', async (req: Request, res: Response)
   } catch (err) {
     console.error('[projects] Error deleting audio clip:', err);
     res.status(500).json({ error: 'Failed to delete audio clip' });
+  }
+});
+
+// POST /api/projects/:id/audio/:audioId/split — cut an audio clip into two adjacent pieces at a
+// local trim-seconds split point (T-13-19 Task G2). Same copy-then-insert shape as the clip split
+// above; the second piece is appended at the next sort_order (audio timeline position is driven
+// by start_offset_seconds, not sort_order, so no resequencing is needed).
+projectsRouter.post('/:id/audio/:audioId/split', async (req: Request, res: Response) => {
+  if (!req.user?.dbUserId) {
+    res.status(401).json({ error: 'Not authenticated' });
+    return;
+  }
+  const projectId = req.params.id as string;
+  const audioId = req.params.audioId as string;
+  const { original_trim_end, new_trim_start, new_trim_end, new_start_offset_seconds } = req.body ?? {};
+
+  if (
+    typeof original_trim_end !== 'number' ||
+    typeof new_trim_start !== 'number' ||
+    typeof new_trim_end !== 'number' ||
+    typeof new_start_offset_seconds !== 'number'
+  ) {
+    res
+      .status(400)
+      .json({ error: 'original_trim_end, new_trim_start, new_trim_end, new_start_offset_seconds are required numbers' });
+    return;
+  }
+  if (new_trim_start >= new_trim_end) {
+    res.status(400).json({ error: 'new_trim_start must be less than new_trim_end' });
+    return;
+  }
+  if (new_start_offset_seconds < 0) {
+    res.status(400).json({ error: 'new_start_offset_seconds must be non-negative' });
+    return;
+  }
+
+  try {
+    const [ownedProject] = await db
+      .select({ id: projects.id })
+      .from(projects)
+      .where(and(eq(projects.id, projectId), eq(projects.user_id, req.user.dbUserId)));
+    if (!ownedProject) {
+      res.status(404).json({ error: 'Project not found' });
+      return;
+    }
+
+    const [{ count }] = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(projectAudioClips)
+      .where(eq(projectAudioClips.project_id, projectId));
+    if (Number(count) >= MAX_AUDIO_CLIPS_PER_PROJECT) {
+      res.status(400).json({ error: `Project already has the maximum of ${MAX_AUDIO_CLIPS_PER_PROJECT} audio clips` });
+      return;
+    }
+
+    const result = await splitAudioClip(projectId, req.user.dbUserId, audioId, {
+      originalTrimEnd: original_trim_end,
+      newTrimStart: new_trim_start,
+      newTrimEnd: new_trim_end,
+      newStartOffsetSeconds: new_start_offset_seconds,
+    });
+    if (!result) {
+      res.status(404).json({ error: 'Audio clip not found' });
+      return;
+    }
+
+    res.status(201).json({ audio_clip: result.newAudioClip, original_audio_clip: result.originalAudioClip });
+  } catch (err) {
+    if (err instanceof SplitValidationError) {
+      res.status(400).json({ error: err.message });
+      return;
+    }
+    console.error('[projects] Error splitting audio clip:', err);
+    res.status(500).json({ error: 'Failed to split audio clip' });
   }
 });
 

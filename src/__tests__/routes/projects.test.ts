@@ -415,6 +415,107 @@ describe('DELETE /api/projects/:id/clips/:clipId', () => {
   });
 });
 
+// ─── POST /api/projects/:id/clips/:clipId/split (T-13-19 Task G1) ─────────────
+
+describe('POST /api/projects/:id/clips/:clipId/split', () => {
+  it('happy path: CopyObjects the source r2_key, inserts the new clip, and shrinks the original trim_end', async () => {
+    dbMock.select
+      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }])) // route ownership check
+      .mockReturnValueOnce(makeChain([{ count: 1 }])) // cap check
+      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }])) // splitClip's isProjectOwned
+      .mockReturnValueOnce(makeChain([baseClipRow({ trim_start_seconds: 0, trim_end_seconds: 10 })])); // clip lookup
+    dbMock.execute.mockResolvedValueOnce({ rows: [] }); // resequence UPDATE
+    dbMock.insert.mockReturnValueOnce(
+      makeChain([
+        {
+          id: 'clip-2',
+          project_id: 'proj-1',
+          sort_order: 1,
+          r2_key: 'projects/proj-1/clips/new-uuid.mp4',
+          media_type: 'video',
+          source_type: 'upload',
+          original_duration_seconds: 10,
+          trim_start_seconds: 5,
+          trim_end_seconds: 10,
+          created_at: NOW,
+        },
+      ]),
+    );
+    dbMock.update.mockReturnValueOnce(
+      makeChain([{ id: 'clip-1', project_id: 'proj-1', sort_order: 0, trim_start_seconds: 0, trim_end_seconds: 5 }]),
+    );
+
+    const res = await request(app)
+      .post('/api/projects/proj-1/clips/clip-1/split')
+      .send({ original_trim_end: 5, new_trim_start: 5, new_trim_end: 10, new_sort_order: 1 });
+
+    expect(res.status).toBe(201);
+    expect(res.body.clip.id).toBe('clip-2');
+    expect(res.body.original_clip.trim_end_seconds).toBe(5);
+    const copyCall = r2Mock.send.mock.calls.find((c) => c[0] instanceof CopyObjectCommand);
+    expect(copyCall).toBeDefined();
+    expect(copyCall![0].input.Key).toMatch(/^projects\/proj-1\/clips\//);
+    expect(copyCall![0].input.CopySource).toBe('test-bucket/projects/proj-1/clips/a.mp4');
+  });
+
+  it('rejects with 400 when the split point is not strictly inside the clip trim range — no CopyObject sent', async () => {
+    dbMock.select
+      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }]))
+      .mockReturnValueOnce(makeChain([{ count: 1 }]))
+      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }]))
+      .mockReturnValueOnce(makeChain([baseClipRow({ trim_start_seconds: 0, trim_end_seconds: 10 })]));
+
+    const res = await request(app)
+      .post('/api/projects/proj-1/clips/clip-1/split')
+      .send({ original_trim_end: 10, new_trim_start: 10, new_trim_end: 15, new_sort_order: 1 });
+
+    expect(res.status).toBe(400);
+    const copyCalls = r2Mock.send.mock.calls.filter((c) => c[0] instanceof CopyObjectCommand);
+    expect(copyCalls).toHaveLength(0);
+  });
+
+  it('rejects with 400 when required numeric fields are missing, never touching the db', async () => {
+    const res = await request(app).post('/api/projects/proj-1/clips/clip-1/split').send({});
+
+    expect(res.status).toBe(400);
+    expect(dbMock.select).not.toHaveBeenCalled();
+  });
+
+  it('rejects with 400 when the project already holds the maximum clip count', async () => {
+    dbMock.select.mockReturnValueOnce(makeChain([{ id: 'proj-1' }])).mockReturnValueOnce(makeChain([{ count: 50 }]));
+
+    const res = await request(app)
+      .post('/api/projects/proj-1/clips/clip-1/split')
+      .send({ original_trim_end: 5, new_trim_start: 0, new_trim_end: 5, new_sort_order: 1 });
+
+    expect(res.status).toBe(400);
+  });
+
+  it('returns 404 when the project is not owned by the requester (IDOR)', async () => {
+    dbMock.select.mockReturnValueOnce(makeChain([]));
+
+    const res = await request(app)
+      .post('/api/projects/not-mine/clips/clip-1/split')
+      .send({ original_trim_end: 5, new_trim_start: 0, new_trim_end: 5, new_sort_order: 1 });
+
+    expect(res.status).toBe(404);
+  });
+
+  it('returns 404 when the clip does not exist', async () => {
+    dbMock.select
+      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }]))
+      .mockReturnValueOnce(makeChain([{ count: 1 }]))
+      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }]))
+      .mockReturnValueOnce(makeChain([]));
+
+    const res = await request(app)
+      .post('/api/projects/proj-1/clips/missing-clip/split')
+      .send({ original_trim_end: 5, new_trim_start: 0, new_trim_end: 5, new_sort_order: 1 });
+
+    expect(res.status).toBe(404);
+  });
+});
+
 // ─── POST /api/projects/:id/export ─────────────────────────────────────────────
 
 function baseClipRow(overrides: Record<string, unknown> = {}) {
@@ -555,6 +656,49 @@ describe('POST /api/projects/:id/text', () => {
     expect(dbMock.insert).not.toHaveBeenCalled();
   });
 
+  it('rejects an out-of-range rotation (400) with 400 and never touches the db (T-13-19 Task G3)', async () => {
+    const res = await request(app)
+      .post('/api/projects/proj-1/text')
+      .send({ text: 'Hi', x_norm: 0.5, y_norm: 0.5, rotation: 400, start_seconds: 0, end_seconds: 2 });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/rotation must be between -360 and 360/);
+    expect(dbMock.insert).not.toHaveBeenCalled();
+  });
+
+  it('accepts a rotation within -360..360 and threads it through to addTextOverlay', async () => {
+    dbMock.select
+      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }]))
+      .mockReturnValueOnce(makeChain([{ count: 0 }]))
+      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }]));
+    dbMock.insert.mockReturnValueOnce(
+      makeChain([
+        {
+          id: 'text-rot',
+          project_id: 'proj-1',
+          text: 'Hi',
+          x_norm: 0.5,
+          y_norm: 0.5,
+          width_norm: 1,
+          rotation: 45,
+          start_seconds: 0,
+          end_seconds: 2,
+          created_at: NOW,
+        },
+      ]),
+    );
+
+    const res = await request(app)
+      .post('/api/projects/proj-1/text')
+      .send({ text: 'Hi', x_norm: 0.5, y_norm: 0.5, rotation: 45, start_seconds: 0, end_seconds: 2 });
+
+    expect(res.status).toBe(201);
+    expect(res.body.text_overlay.rotation).toBe(45);
+    expect(dbMock.insert).toHaveBeenCalled();
+    const insertedValues = dbMock.insert.mock.results[0].value.values.mock.calls[0][0];
+    expect(insertedValues.rotation).toBe(45);
+  });
+
   it('rejects invalid start_seconds/end_seconds with 400', async () => {
     const res = await request(app)
       .post('/api/projects/proj-1/text')
@@ -681,6 +825,25 @@ describe('PATCH /api/projects/:id/text/:textId', () => {
 
     expect(res.status).toBe(400);
     expect(dbMock.update).not.toHaveBeenCalled();
+  });
+
+  it('rejects an out-of-range rotation with 400 (T-13-19 Task G3)', async () => {
+    const res = await request(app).patch('/api/projects/proj-1/text/text-1').send({ rotation: -400 });
+
+    expect(res.status).toBe(400);
+    expect(dbMock.update).not.toHaveBeenCalled();
+  });
+
+  it('updates rotation and returns 200', async () => {
+    dbMock.select.mockReturnValueOnce(makeChain([{ id: 'proj-1' }])); // isProjectOwned
+    dbMock.update.mockReturnValueOnce(
+      makeChain([{ id: 'text-1', project_id: 'proj-1', text: 'Hi', rotation: -30 }]),
+    );
+
+    const res = await request(app).patch('/api/projects/proj-1/text/text-1').send({ rotation: -30 });
+
+    expect(res.status).toBe(200);
+    expect(res.body.text_overlay.rotation).toBe(-30);
   });
 
   it('returns 404 for a mutation on a project owned by another user (IDOR)', async () => {
@@ -867,6 +1030,121 @@ describe('DELETE /api/projects/:id/audio/:audioId', () => {
     dbMock.select.mockReturnValueOnce(makeChain([]));
 
     const res = await request(app).delete('/api/projects/not-mine/audio/audio-1');
+
+    expect(res.status).toBe(404);
+  });
+});
+
+// ─── POST /api/projects/:id/audio/:audioId/split (T-13-19 Task G2) ────────────
+
+function baseAudioRow(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 'audio-1',
+    project_id: 'proj-1',
+    r2_key: 'projects/proj-1/audio/a.mp3',
+    source_type: 'upload',
+    start_offset_seconds: 0,
+    trim_start_seconds: 0,
+    trim_end_seconds: 10,
+    sort_order: 0,
+    created_at: NOW,
+    ...overrides,
+  };
+}
+
+describe('POST /api/projects/:id/audio/:audioId/split', () => {
+  it('happy path: CopyObjects the source r2_key, appends the new audio clip, and shrinks the original trim_end', async () => {
+    dbMock.select
+      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }])) // route ownership check
+      .mockReturnValueOnce(makeChain([{ count: 1 }])) // cap check
+      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }])) // splitAudioClip's isProjectOwned
+      .mockReturnValueOnce(makeChain([baseAudioRow()])); // audio clip lookup
+    dbMock.execute.mockResolvedValueOnce({ rows: [{ next_order: 1 }] }); // nextSortOrder
+    dbMock.insert.mockReturnValueOnce(
+      makeChain([
+        {
+          id: 'audio-2',
+          project_id: 'proj-1',
+          r2_key: 'projects/proj-1/audio/new-uuid.mp3',
+          source_type: 'upload',
+          start_offset_seconds: 5,
+          trim_start_seconds: 0,
+          trim_end_seconds: 5,
+          sort_order: 1,
+          created_at: NOW,
+        },
+      ]),
+    );
+    dbMock.update.mockReturnValueOnce(
+      makeChain([{ id: 'audio-1', project_id: 'proj-1', trim_start_seconds: 0, trim_end_seconds: 5 }]),
+    );
+
+    const res = await request(app)
+      .post('/api/projects/proj-1/audio/audio-1/split')
+      .send({ original_trim_end: 5, new_trim_start: 0, new_trim_end: 5, new_start_offset_seconds: 5 });
+
+    expect(res.status).toBe(201);
+    expect(res.body.audio_clip.id).toBe('audio-2');
+    expect(res.body.original_audio_clip.trim_end_seconds).toBe(5);
+    const copyCall = r2Mock.send.mock.calls.find((c) => c[0] instanceof CopyObjectCommand);
+    expect(copyCall).toBeDefined();
+    expect(copyCall![0].input.Key).toMatch(/^projects\/proj-1\/audio\//);
+    expect(copyCall![0].input.CopySource).toBe('test-bucket/projects/proj-1/audio/a.mp3');
+  });
+
+  it('rejects with 400 when the split point is not strictly inside the audio clip trim range', async () => {
+    dbMock.select
+      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }]))
+      .mockReturnValueOnce(makeChain([{ count: 1 }]))
+      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }]))
+      .mockReturnValueOnce(makeChain([baseAudioRow()]));
+
+    const res = await request(app)
+      .post('/api/projects/proj-1/audio/audio-1/split')
+      .send({ original_trim_end: 0, new_trim_start: 0, new_trim_end: 5, new_start_offset_seconds: 0 });
+
+    expect(res.status).toBe(400);
+    const copyCalls = r2Mock.send.mock.calls.filter((c) => c[0] instanceof CopyObjectCommand);
+    expect(copyCalls).toHaveLength(0);
+  });
+
+  it('rejects with 400 when required numeric fields are missing, never touching the db', async () => {
+    const res = await request(app).post('/api/projects/proj-1/audio/audio-1/split').send({});
+
+    expect(res.status).toBe(400);
+    expect(dbMock.select).not.toHaveBeenCalled();
+  });
+
+  it('rejects with 400 when the project already holds the maximum audio clip count', async () => {
+    dbMock.select.mockReturnValueOnce(makeChain([{ id: 'proj-1' }])).mockReturnValueOnce(makeChain([{ count: 10 }]));
+
+    const res = await request(app)
+      .post('/api/projects/proj-1/audio/audio-1/split')
+      .send({ original_trim_end: 5, new_trim_start: 0, new_trim_end: 5, new_start_offset_seconds: 5 });
+
+    expect(res.status).toBe(400);
+  });
+
+  it('returns 404 when the project is not owned by the requester (IDOR)', async () => {
+    dbMock.select.mockReturnValueOnce(makeChain([]));
+
+    const res = await request(app)
+      .post('/api/projects/not-mine/audio/audio-1/split')
+      .send({ original_trim_end: 5, new_trim_start: 0, new_trim_end: 5, new_start_offset_seconds: 5 });
+
+    expect(res.status).toBe(404);
+  });
+
+  it('returns 404 when the audio clip does not exist', async () => {
+    dbMock.select
+      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }]))
+      .mockReturnValueOnce(makeChain([{ count: 1 }]))
+      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }]))
+      .mockReturnValueOnce(makeChain([]));
+
+    const res = await request(app)
+      .post('/api/projects/proj-1/audio/missing-audio/split')
+      .send({ original_trim_end: 5, new_trim_start: 0, new_trim_end: 5, new_start_offset_seconds: 5 });
 
     expect(res.status).toBe(404);
   });

@@ -49,6 +49,10 @@ export interface ComposeTextSpec {
   text: string;
   xNorm: number;
   yNorm: number;
+  /** Scale factor (1 = default size). Threaded through to the libass render path (G4)'s \fs. */
+  widthNorm?: number;
+  /** Degrees, clockwise-positive (SwiftUI .rotationEffect convention — see schema.ts's rotation column doc). */
+  rotation?: number;
   startSeconds: number;
   endSeconds: number;
 }

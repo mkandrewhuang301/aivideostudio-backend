@@ -28,7 +28,7 @@ jest.mock('../../config', () => ({
 }));
 
 import type { ComposeSpec } from '../../queue/ffmpegWorker';
-import { buildComposeArgs, escapeDrawtextText } from '../../queue/ffmpegProcessor';
+import { buildComposeArgs } from '../../queue/ffmpegProcessor';
 
 function baseSpec(overrides: Partial<ComposeSpec> = {}): ComposeSpec {
   return {
@@ -58,6 +58,7 @@ describe('buildComposeArgs', () => {
       clipPaths: ['/tmp/clip0.mp4', '/tmp/clip1.mp4'],
       audioPaths: [],
       assPath: null,
+      textOverlayAssPath: null,
       fontsDir: '/app/assets/fonts',
       outPath: '/tmp/out.mp4',
     });
@@ -88,6 +89,7 @@ describe('buildComposeArgs', () => {
         clipPaths: ['/tmp/clip0.mp4'],
         audioPaths: [],
         assPath: null,
+        textOverlayAssPath: null,
         fontsDir: '/app/assets/fonts',
         outPath: '/tmp/out.mp4',
       });
@@ -95,7 +97,7 @@ describe('buildComposeArgs', () => {
     }
   });
 
-  it('produces one drawtext per text overlay with an enable=between(t,start,end) window and an Inter-Bold fontfile', () => {
+  it('includes a libass filter referencing textOverlayAssPath + fontsDir when textOverlays are present (G4 — replaces drawtext)', () => {
     const args = buildComposeArgs({
       spec: baseSpec({
         textOverlays: [
@@ -105,42 +107,53 @@ describe('buildComposeArgs', () => {
       clipPaths: ['/tmp/clip0.mp4', '/tmp/clip1.mp4'],
       audioPaths: [],
       assPath: null,
+      textOverlayAssPath: '/tmp/ffmpeg-gen-1/textOverlays.ass',
       fontsDir: '/app/assets/fonts',
       outPath: '/tmp/out.mp4',
     });
     const graph = filterComplexOf(args);
 
-    expect(graph).toContain('drawtext=');
-    expect(graph).toContain('fontfile=/app/assets/fonts/Inter-Bold.ttf');
-    expect(graph).toContain("enable='between(t,1,3)'");
+    expect(graph).toContain('ass=filename=/tmp/ffmpeg-gen-1/textOverlays.ass:fontsdir=/app/assets/fonts');
+    expect(graph).not.toContain('drawtext=');
   });
 
-  it('escapes drawtext overlay text containing : and \' so neither reaches the filter graph unescaped (T-13-11)', () => {
-    const rawText = "Hello: it's a test";
+  it('omits the text-overlay ass filter entirely when textOverlays is empty / textOverlayAssPath is null', () => {
     const args = buildComposeArgs({
-      spec: baseSpec({
-        textOverlays: [
-          { text: rawText, xNorm: 0.5, yNorm: 0.1, startSeconds: 0, endSeconds: 2 },
-        ],
-      }),
+      spec: baseSpec({ textOverlays: [] }),
       clipPaths: ['/tmp/clip0.mp4', '/tmp/clip1.mp4'],
       audioPaths: [],
       assPath: null,
+      textOverlayAssPath: null,
       fontsDir: '/app/assets/fonts',
       outPath: '/tmp/out.mp4',
     });
     const graph = filterComplexOf(args);
 
-    // The raw unescaped substring must never survive verbatim in the constructed filter graph.
-    expect(graph).not.toContain(`text='${rawText}'`);
-    expect(graph).toContain(escapeDrawtextText(rawText));
+    expect(graph).not.toContain('drawtext=');
+    // Only the caption ass filter could ever appear here, and captionCues is empty too — no ass filter at all.
+    expect(graph).not.toContain('ass=filename=');
   });
 
-  it('escapeDrawtextText escapes colons, single quotes, backslashes, and percent signs', () => {
-    expect(escapeDrawtextText('a:b')).toBe('a\\:b');
-    expect(escapeDrawtextText("a'b")).toBe("a\\'b");
-    expect(escapeDrawtextText('a\\b')).toBe('a\\\\b');
-    expect(escapeDrawtextText('a%b')).toBe('a\\%b');
+  it('chains the text-overlay ass filter BEFORE the caption ass filter when both are present', () => {
+    const args = buildComposeArgs({
+      spec: baseSpec({
+        textOverlays: [{ text: 'Hi', xNorm: 0.5, yNorm: 0.1, startSeconds: 0, endSeconds: 2 }],
+        captionCues: [{ startSeconds: 0, endSeconds: 1, words: [{ text: 'hi', startSeconds: 0, endSeconds: 1 }] }],
+      }),
+      clipPaths: ['/tmp/clip0.mp4', '/tmp/clip1.mp4'],
+      audioPaths: [],
+      assPath: '/tmp/ffmpeg-gen-1/captions.ass',
+      textOverlayAssPath: '/tmp/ffmpeg-gen-1/textOverlays.ass',
+      fontsDir: '/app/assets/fonts',
+      outPath: '/tmp/out.mp4',
+    });
+    const graph = filterComplexOf(args);
+
+    const textOverlayIdx = graph.indexOf('textOverlays.ass');
+    const captionIdx = graph.indexOf('captions.ass');
+    expect(textOverlayIdx).toBeGreaterThan(-1);
+    expect(captionIdx).toBeGreaterThan(-1);
+    expect(textOverlayIdx).toBeLessThan(captionIdx);
   });
 
   it('includes an ass filter referencing assPath + fontsDir when captionCues are present', () => {
@@ -153,6 +166,7 @@ describe('buildComposeArgs', () => {
       clipPaths: ['/tmp/clip0.mp4', '/tmp/clip1.mp4'],
       audioPaths: [],
       assPath: '/tmp/ffmpeg-gen-1/captions.ass',
+      textOverlayAssPath: null,
       fontsDir: '/app/assets/fonts',
       outPath: '/tmp/out.mp4',
     });
@@ -167,6 +181,7 @@ describe('buildComposeArgs', () => {
       clipPaths: ['/tmp/clip0.mp4', '/tmp/clip1.mp4'],
       audioPaths: [],
       assPath: null,
+      textOverlayAssPath: null,
       fontsDir: '/app/assets/fonts',
       outPath: '/tmp/out.mp4',
     });
@@ -185,6 +200,7 @@ describe('buildComposeArgs', () => {
       clipPaths: ['/tmp/clip0.mp4', '/tmp/clip1.mp4'],
       audioPaths: ['/tmp/audio0.m4a'],
       assPath: null,
+      textOverlayAssPath: null,
       fontsDir: '/app/assets/fonts',
       outPath: '/tmp/out.mp4',
     });
@@ -206,6 +222,7 @@ describe('buildComposeArgs', () => {
       clipPaths: ['/tmp/photo.jpg'],
       audioPaths: [],
       assPath: null,
+      textOverlayAssPath: null,
       fontsDir: '/app/assets/fonts',
       outPath: '/tmp/out.mp4',
     });
@@ -222,6 +239,7 @@ describe('buildComposeArgs', () => {
       clipPaths: ['/tmp/clip0.mp4', '/tmp/clip1.mp4'],
       audioPaths: [],
       assPath: null,
+      textOverlayAssPath: null,
       fontsDir: '/app/assets/fonts',
       outPath: '/tmp/final.mp4',
     });

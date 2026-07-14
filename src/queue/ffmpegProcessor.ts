@@ -19,7 +19,7 @@ import { Readable } from 'node:stream';
 import { Upload } from '@aws-sdk/lib-storage';
 import { r2, R2_BUCKET } from '../storage/r2';
 import { getGenerationPresignedUrl } from '../services/archivalService';
-import { buildAssFile } from '../services/assCaptionBuilder';
+import { buildAssFile, buildTextOverlayAss } from '../services/assCaptionBuilder';
 import type { FfmpegJobData, ComposeSpec } from './ffmpegWorker';
 
 const execFileAsync = promisify(execFile);
@@ -70,22 +70,6 @@ export function resolveComposeCanvas(aspectRatio: ComposeSpec['aspectRatio']): {
   return COMPOSE_CANVAS[aspectRatio] ?? COMPOSE_CANVAS['9:16'];
 }
 
-/**
- * Escapes a user-authored Text-overlay string for safe use as a `drawtext` `text=` value inside
- * an ffmpeg filter_complex graph (T-13-11 — first user-authored-text-into-drawtext surface in
- * this codebase, sibling risk to assCaptionBuilder.ts's escapeAssText for the ASS/caption path).
- * Order matters: backslash MUST be escaped first, else escaping colons/quotes afterwards would
- * double-escape the backslashes those steps introduce.
- */
-export function escapeDrawtextText(raw: string): string {
-  return raw
-    .replace(/\\/g, '\\\\')
-    .replace(/:/g, '\\:')
-    .replace(/'/g, "\\'")
-    .replace(/%/g, '\\%')
-    .replace(/[\r\n]+/g, ' ');
-}
-
 export interface BuildComposeArgsInput {
   spec: ComposeSpec;
   /** Local temp-file paths for spec.clips, same order/length as spec.clips. */
@@ -94,6 +78,8 @@ export interface BuildComposeArgsInput {
   audioPaths: string[];
   /** Path to a generated .ass caption file, or null when spec.captionCues is empty. */
   assPath: string | null;
+  /** Path to a generated Text-overlay .ass file (G4), or null when spec.textOverlays is empty. */
+  textOverlayAssPath: string | null;
   fontsDir: string;
   outPath: string;
 }
@@ -101,13 +87,15 @@ export interface BuildComposeArgsInput {
 /**
  * Pure function: assembles the FULL ffmpeg argv array for the compose op (RESEARCH.md Pattern 1/2)
  * — never a shell string (T-13-11). Concatenates mixed-resolution/mixed-media clips via a single
- * filter_complex scale+pad+concat graph (NEVER the `-f concat` demuxer — Pitfall 2), chains
- * per-overlay `drawtext` filters with `enable=between(t,start,end)` windows, optionally burns
- * word-level captions via the generated .ass file, and mixes independently-timed audio clips over
- * the concatenated clip audio via `adelay`/`amix`.
+ * filter_complex scale+pad+concat graph (NEVER the `-f concat` demuxer — Pitfall 2), chains a
+ * libass `ass=` pass for Text overlays (G4 — replaces the old per-overlay `drawtext` loop, which
+ * couldn't rotate and ignored scale), optionally burns word-level captions via a second `ass=`
+ * pass, and mixes independently-timed audio clips over the concatenated clip audio via
+ * `adelay`/`amix`. Text overlays are chained BEFORE captions, so captions render on top if the
+ * two ever visually overlap (matches the pre-existing caption-on-top precedence).
  */
 export function buildComposeArgs(input: BuildComposeArgsInput): string[] {
-  const { spec, clipPaths, audioPaths, assPath, fontsDir, outPath } = input;
+  const { spec, clipPaths, audioPaths, assPath, textOverlayAssPath, fontsDir, outPath } = input;
   const { width, height } = resolveComposeCanvas(spec.aspectRatio);
 
   const args: string[] = ['-y'];
@@ -152,16 +140,13 @@ export function buildComposeArgs(input: BuildComposeArgsInput): string[] {
   const concatInputs = spec.clips.map((_, i) => `[v${i}][a${i}]`).join('');
   filterParts.push(`${concatInputs}concat=n=${spec.clips.length}:v=1:a=1[vconcat][aconcat]`);
 
-  // Chain one drawtext filter per Text overlay, in order, on top of the concatenated video.
+  // Burn Text overlays via the generated ASS file (G4's buildTextOverlayAss) — native rotation
+  // (\frz) + scale (\fs), unlike the old drawtext loop this replaces.
   let videoLabel = 'vconcat';
-  spec.textOverlays.forEach((overlay, i) => {
-    const nextLabel = `vtext${i}`;
-    const escapedText = escapeDrawtextText(overlay.text);
-    filterParts.push(
-      `[${videoLabel}]drawtext=fontfile=${fontsDir}/Inter-Bold.ttf:text='${escapedText}':x=(w*${overlay.xNorm}):y=(h*${overlay.yNorm}):fontsize=48:fontcolor=white:enable='between(t,${overlay.startSeconds},${overlay.endSeconds})'[${nextLabel}]`,
-    );
-    videoLabel = nextLabel;
-  });
+  if (textOverlayAssPath && spec.textOverlays.length > 0) {
+    filterParts.push(`[${videoLabel}]ass=filename=${textOverlayAssPath}:fontsdir=${fontsDir}[vtext]`);
+    videoLabel = 'vtext';
+  }
 
   // Burn word-level captions via the generated ASS file (13-05's assCaptionBuilder), if present.
   if (assPath && spec.captionCues.length > 0) {
@@ -247,9 +232,17 @@ export async function runFfmpegOp(data: FfmpegJobData): Promise<{ r2Key: string;
         audioPaths.push(audioPath);
       }
 
+      const canvas = resolveComposeCanvas(spec.aspectRatio);
+
+      let textOverlayAssPath: string | null = null;
+      if (spec.textOverlays.length > 0) {
+        const textOverlayAssContents = buildTextOverlayAss(spec.textOverlays, canvas);
+        textOverlayAssPath = path.join(tempDir, 'textOverlays.ass');
+        await writeFile(textOverlayAssPath, textOverlayAssContents, 'utf-8');
+      }
+
       let assPath: string | null = null;
       if (spec.captionCues.length > 0) {
-        const canvas = resolveComposeCanvas(spec.aspectRatio);
         const assContents = buildAssFile(spec.captionCues, spec.captionStyle, canvas);
         assPath = path.join(tempDir, 'captions.ass');
         await writeFile(assPath, assContents, 'utf-8');
@@ -258,7 +251,7 @@ export async function runFfmpegOp(data: FfmpegJobData): Promise<{ r2Key: string;
       // Bundled TTF (13-02), resolved relative to process cwd (repo root at Railway runtime) —
       // never depends on system fontconfig being present/configured (RESEARCH.md Pitfall 1).
       const fontsDir = path.resolve('assets/fonts');
-      const args = buildComposeArgs({ spec, clipPaths, audioPaths, assPath, fontsDir, outPath });
+      const args = buildComposeArgs({ spec, clipPaths, audioPaths, assPath, textOverlayAssPath, fontsDir, outPath });
       await runFfmpeg(args);
 
       const r2Key = `generations/${generationId}.mp4`;

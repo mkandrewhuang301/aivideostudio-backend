@@ -267,6 +267,11 @@ export const projectTextOverlays = pgTable(
     x_norm: doublePrecision('x_norm'), // 0..1 normalized position
     y_norm: doublePrecision('y_norm'), // 0..1 normalized position
     width_norm: doublePrecision('width_norm'), // nullable
+    // Rotation degrees, CLOCKWISE-positive (matches SwiftUI .rotationEffect's convention, NOT
+    // ASS/libass's counter-clockwise-positive \frz — the export path (assCaptionBuilder.ts's
+    // buildTextOverlayAss, G4) negates this value when emitting \frz so the two stay visually
+    // consistent). Added 13-19 Task G3 alongside the libass text-overlay render path.
+    rotation: doublePrecision('rotation').notNull().default(0),
     start_seconds: doublePrecision('start_seconds').notNull(),
     end_seconds: doublePrecision('end_seconds').notNull(),
     created_at: timestamp('created_at', { withTimezone: true })
