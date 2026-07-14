@@ -12,6 +12,15 @@ jest.mock('../../services/archivalService', () => ({
   getUploadPresignedUrl: jest.fn().mockResolvedValue('https://r2.example.com/presigned-clip-url'),
 }));
 
+// Plan 13-20 B1/B3: probeDurationSeconds spawns a real ffprobe process — mocked at the module
+// boundary so route/service tests stay deterministic and offline. Defaults to null (no probed
+// duration) so tests that don't care about it behave like a probe failure; individual tests
+// override with mockResolvedValueOnce.
+const mockProbeDurationSeconds = jest.fn().mockResolvedValue(null);
+jest.mock('../../services/mediaProbe', () => ({
+  probeDurationSeconds: (...args: unknown[]) => mockProbeDurationSeconds(...args),
+}));
+
 // db/client must be mocked — neon() throws at module eval with a non-postgres URL
 jest.mock('../../db/client', () => ({
   db: {
@@ -208,6 +217,75 @@ describe('GET /api/projects/:id', () => {
     expect(res.body.project.audio_clips[0].url).toBe('https://r2.example.com/presigned-clip-url');
     expect(res.body.project.audio_clips[0].r2_key).toBeUndefined();
   });
+
+  it('B1.4 self-heal: backfills a null-duration video clip by probing its presigned url and persisting the result', async () => {
+    const setFn = jest.fn().mockReturnValue(makeChain([]));
+    dbMock.update.mockReturnValueOnce({ set: setFn });
+    mockProbeDurationSeconds.mockResolvedValueOnce(7.8);
+
+    dbMock.select
+      .mockReturnValueOnce(makeChain([baseProjectRow({ id: 'proj-1' })])) // project row
+      .mockReturnValueOnce(
+        makeChain([
+          { id: 'clip-heal', project_id: 'proj-1', sort_order: 0, r2_key: 'projects/proj-1/clips/a.mp4', media_type: 'video', source_type: 'upload', original_duration_seconds: null, trim_start_seconds: 0, trim_end_seconds: null, created_at: NOW },
+        ]),
+      ) // clips
+      .mockReturnValueOnce(makeChain([])) // text overlays
+      .mockReturnValueOnce(makeChain([])) // audio clips
+      .mockReturnValueOnce(makeChain([])); // caption cues
+
+    const res = await request(app).get('/api/projects/proj-1');
+
+    expect(res.status).toBe(200);
+    expect(mockProbeDurationSeconds).toHaveBeenCalledWith('https://r2.example.com/presigned-clip-url');
+    expect(res.body.project.clips[0].original_duration_seconds).toBe(7.8);
+    expect(dbMock.update).toHaveBeenCalled();
+    const setArg = setFn.mock.calls[0][0];
+    expect(setArg).toEqual({ original_duration_seconds: 7.8 });
+  });
+
+  it('B1.4 self-heal: an image clip with a null duration is backfilled to 3s without probing', async () => {
+    const setFn = jest.fn().mockReturnValue(makeChain([]));
+    dbMock.update.mockReturnValueOnce({ set: setFn });
+
+    dbMock.select
+      .mockReturnValueOnce(makeChain([baseProjectRow({ id: 'proj-1' })]))
+      .mockReturnValueOnce(
+        makeChain([
+          { id: 'clip-heal-img', project_id: 'proj-1', sort_order: 0, r2_key: 'projects/proj-1/clips/a.jpg', media_type: 'image', source_type: 'upload', original_duration_seconds: null, trim_start_seconds: 0, trim_end_seconds: null, created_at: NOW },
+        ]),
+      )
+      .mockReturnValueOnce(makeChain([]))
+      .mockReturnValueOnce(makeChain([]))
+      .mockReturnValueOnce(makeChain([]));
+
+    const res = await request(app).get('/api/projects/proj-1');
+
+    expect(res.status).toBe(200);
+    expect(mockProbeDurationSeconds).not.toHaveBeenCalled();
+    expect(res.body.project.clips[0].original_duration_seconds).toBe(3);
+  });
+
+  it('B1.4 self-heal: a probe failure still returns the project with a null duration (never 500s)', async () => {
+    mockProbeDurationSeconds.mockResolvedValueOnce(null);
+
+    dbMock.select
+      .mockReturnValueOnce(makeChain([baseProjectRow({ id: 'proj-1' })]))
+      .mockReturnValueOnce(
+        makeChain([
+          { id: 'clip-heal-fail', project_id: 'proj-1', sort_order: 0, r2_key: 'projects/proj-1/clips/a.mp4', media_type: 'video', source_type: 'upload', original_duration_seconds: null, trim_start_seconds: 0, trim_end_seconds: null, created_at: NOW },
+        ]),
+      )
+      .mockReturnValueOnce(makeChain([]))
+      .mockReturnValueOnce(makeChain([]))
+      .mockReturnValueOnce(makeChain([]));
+
+    const res = await request(app).get('/api/projects/proj-1');
+
+    expect(res.status).toBe(200);
+    expect(res.body.project.clips[0].original_duration_seconds).toBeNull();
+    expect(dbMock.update).not.toHaveBeenCalled();
+  });
 });
 
 // ─── PATCH /api/projects/:id ────────────────────────────────────────────────────
@@ -354,7 +432,7 @@ describe('POST /api/projects/:id/clips', () => {
     dbMock.execute.mockResolvedValueOnce({ rows: [{ next_order: 0 }] });
     dbMock.insert.mockReturnValueOnce(
       makeChain([
-        { id: 'clip-2', project_id: 'proj-1', sort_order: 0, r2_key: 'projects/proj-1/clips/upload-uuid.jpg', media_type: 'image', source_type: 'upload', original_duration_seconds: null, created_at: NOW },
+        { id: 'clip-2', project_id: 'proj-1', sort_order: 0, r2_key: 'projects/proj-1/clips/upload-uuid.jpg', media_type: 'image', source_type: 'upload', original_duration_seconds: 3, created_at: NOW },
       ]),
     );
 
@@ -368,6 +446,112 @@ describe('POST /api/projects/:id/clips', () => {
     expect(putCall![0].input.Key).toMatch(/^projects\/proj-1\/clips\//);
     const copyCalls = r2Mock.send.mock.calls.filter((c) => c[0] instanceof CopyObjectCommand);
     expect(copyCalls).toHaveLength(0);
+    // B1: image uploads skip the ffprobe call entirely and pass the fixed CapCut-style still duration.
+    expect(mockProbeDurationSeconds).not.toHaveBeenCalled();
+    const insertedValues = dbMock.insert.mock.results[0].value.values.mock.calls[0][0];
+    expect(insertedValues.original_duration_seconds).toBe(3);
+  });
+
+  it('B1: video upload path probes the just-uploaded temp file and passes the real duration through', async () => {
+    dbMock.select
+      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }])) // owned project
+      .mockReturnValueOnce(makeChain([{ count: 0 }])); // clip count
+    dbMock.execute.mockResolvedValueOnce({ rows: [{ next_order: 0 }] });
+    dbMock.insert.mockReturnValueOnce(
+      makeChain([
+        { id: 'clip-3', project_id: 'proj-1', sort_order: 0, r2_key: 'projects/proj-1/clips/upload-uuid.mp4', media_type: 'video', source_type: 'upload', original_duration_seconds: 6.24, created_at: NOW },
+      ]),
+    );
+    mockProbeDurationSeconds.mockResolvedValueOnce(6.24);
+
+    const res = await request(app)
+      .post('/api/projects/proj-1/clips')
+      .attach('file', Buffer.from('fake-mp4-bytes'), { filename: 'clip.mp4', contentType: 'video/mp4' });
+
+    expect(res.status).toBe(201);
+    expect(mockProbeDurationSeconds).toHaveBeenCalledTimes(1);
+    // Probed a local temp path (os.tmpdir()), never the raw R2 key or a URL.
+    expect(mockProbeDurationSeconds.mock.calls[0][0]).toMatch(/clip-probe-.*\.mp4$/);
+    const insertedValues = dbMock.insert.mock.results[0].value.values.mock.calls[0][0];
+    expect(insertedValues.original_duration_seconds).toBe(6.24);
+  });
+
+  it('B1: video upload path inserts a null duration (never fails the import) when the probe fails', async () => {
+    dbMock.select
+      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }]))
+      .mockReturnValueOnce(makeChain([{ count: 0 }]));
+    dbMock.execute.mockResolvedValueOnce({ rows: [{ next_order: 0 }] });
+    dbMock.insert.mockReturnValueOnce(
+      makeChain([
+        { id: 'clip-4', project_id: 'proj-1', sort_order: 0, r2_key: 'projects/proj-1/clips/upload-uuid2.mp4', media_type: 'video', source_type: 'upload', original_duration_seconds: null, created_at: NOW },
+      ]),
+    );
+    mockProbeDurationSeconds.mockResolvedValueOnce(null); // simulates a probe failure (mediaProbe never throws)
+
+    const res = await request(app)
+      .post('/api/projects/proj-1/clips')
+      .attach('file', Buffer.from('fake-mp4-bytes'), { filename: 'clip.mp4', contentType: 'video/mp4' });
+
+    expect(res.status).toBe(201);
+    const insertedValues = dbMock.insert.mock.results[0].value.values.mock.calls[0][0];
+    expect(insertedValues.original_duration_seconds).toBeNull();
+  });
+
+  it('B1: generation import probes a presigned URL of the newly copied clip and passes the real duration through', async () => {
+    dbMock.select
+      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }])) // owned project
+      .mockReturnValueOnce(makeChain([{ count: 0 }])) // clip count
+      .mockReturnValueOnce(
+        makeChain([
+          { id: 'gen-2', r2_key: 'generations/gen-2.mp4', status: 'completed', media_type: 'video', params: null, user_id: 'test-db-user-id' },
+        ]),
+      ) // route's own generation lookup
+      .mockReturnValueOnce(
+        makeChain([{ r2_key: 'generations/gen-2.mp4', status: 'completed' }]),
+      ); // importClipByCopy's internal ownership-scoped lookup
+    dbMock.execute.mockResolvedValueOnce({ rows: [{ next_order: 0 }] });
+    dbMock.insert.mockReturnValueOnce(
+      makeChain([
+        { id: 'clip-5', project_id: 'proj-1', sort_order: 0, r2_key: 'projects/proj-1/clips/new-uuid2.mp4', media_type: 'video', source_type: 'generation', original_duration_seconds: 9.5, created_at: NOW },
+      ]),
+    );
+    mockProbeDurationSeconds.mockResolvedValueOnce(9.5);
+
+    const res = await request(app)
+      .post('/api/projects/proj-1/clips')
+      .send({ source_type: 'generation', generation_id: 'gen-2' });
+
+    expect(res.status).toBe(201);
+    expect(mockProbeDurationSeconds).toHaveBeenCalledWith('https://r2.example.com/presigned-clip-url');
+    const insertedValues = dbMock.insert.mock.results[0].value.values.mock.calls[0][0];
+    expect(insertedValues.original_duration_seconds).toBe(9.5);
+  });
+
+  it('B1: generation import of an image passes the fixed 3s still duration without probing', async () => {
+    dbMock.select
+      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }]))
+      .mockReturnValueOnce(makeChain([{ count: 0 }]))
+      .mockReturnValueOnce(
+        makeChain([
+          { id: 'gen-3', r2_key: 'generations/gen-3.png', status: 'completed', media_type: 'image', params: null, user_id: 'test-db-user-id' },
+        ]),
+      )
+      .mockReturnValueOnce(makeChain([{ r2_key: 'generations/gen-3.png', status: 'completed' }]));
+    dbMock.execute.mockResolvedValueOnce({ rows: [{ next_order: 0 }] });
+    dbMock.insert.mockReturnValueOnce(
+      makeChain([
+        { id: 'clip-6', project_id: 'proj-1', sort_order: 0, r2_key: 'projects/proj-1/clips/new-uuid3.png', media_type: 'image', source_type: 'generation', original_duration_seconds: 3, created_at: NOW },
+      ]),
+    );
+
+    const res = await request(app)
+      .post('/api/projects/proj-1/clips')
+      .send({ source_type: 'generation', generation_id: 'gen-3' });
+
+    expect(res.status).toBe(201);
+    expect(mockProbeDurationSeconds).not.toHaveBeenCalled();
+    const insertedValues = dbMock.insert.mock.results[0].value.values.mock.calls[0][0];
+    expect(insertedValues.original_duration_seconds).toBe(3);
   });
 });
 

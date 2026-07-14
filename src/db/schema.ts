@@ -240,9 +240,9 @@ export const projectClips = pgTable(
     r2_key: text('r2_key').notNull(), // independent COPY per D-03
     media_type: text('media_type').notNull(), // 'video' | 'image'
     source_type: text('source_type').notNull(), // 'generation' | 'upload' — provenance only, NOT a live FK
-    original_duration_seconds: integer('original_duration_seconds'), // nullable
-    trim_start_seconds: integer('trim_start_seconds').notNull().default(0),
-    trim_end_seconds: integer('trim_end_seconds'), // nullable
+    original_duration_seconds: doublePrecision('original_duration_seconds'), // nullable — ffprobe returns fractional seconds
+    trim_start_seconds: doublePrecision('trim_start_seconds').notNull().default(0),
+    trim_end_seconds: doublePrecision('trim_end_seconds'), // nullable
     created_at: timestamp('created_at', { withTimezone: true })
       .notNull()
       .default(sql`now()`),

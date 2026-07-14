@@ -7,8 +7,12 @@
 import { Router, Request, Response } from 'express';
 import multer from 'multer';
 import { randomUUID } from 'crypto';
+import { writeFile, unlink } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { PutObjectCommand, CopyObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
 import { r2, R2_BUCKET } from '../storage/r2';
+import { probeDurationSeconds } from '../services/mediaProbe';
 import { db } from '../db/client';
 import {
   projects,
@@ -311,6 +315,25 @@ projectsRouter.post('/:id/clips', clipUpload.single('file'), async (req: Request
           ContentType: req.file.mimetype,
         }),
       );
+
+      // B1 (Plan 13-20): derive a real duration at import time — the root cause of the
+      // 0:00-total/black-preview bug was original_duration_seconds never being written. Images
+      // get a fixed CapCut-style still duration; videos are probed via ffprobe against a temp
+      // copy of the just-uploaded buffer. Probe failure must never fail the import — leaves
+      // durationSeconds undefined (persisted as null, self-healed later by getProjectWithState).
+      let durationSeconds: number | undefined;
+      if (mediaType === 'video') {
+        const tempPath = path.join(tmpdir(), `clip-probe-${randomUUID()}.${ext}`);
+        try {
+          await writeFile(tempPath, req.file.buffer);
+          durationSeconds = (await probeDurationSeconds(tempPath)) ?? undefined;
+        } finally {
+          await unlink(tempPath).catch(() => {});
+        }
+      } else {
+        durationSeconds = 3;
+      }
+
       const clip = await importClipByCopy({
         projectId,
         userId: req.user.dbUserId,
@@ -318,6 +341,7 @@ projectsRouter.post('/:id/clips', clipUpload.single('file'), async (req: Request
         uploadedR2Key: key,
         mimeType: req.file.mimetype,
         mediaType,
+        durationSeconds,
       });
       res.status(201).json({ clip });
       return;

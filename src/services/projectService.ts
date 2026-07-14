@@ -32,6 +32,7 @@ import type {
 import { eq, and, desc, lt, or, sql, inArray } from 'drizzle-orm';
 import { getUploadPresignedUrl } from './archivalService';
 import { extractVideoFrame } from './frameExtractor';
+import { probeDurationSeconds } from './mediaProbe';
 import type { ComposeSpec, ComposeCaptionCue, ComposeCaptionStyle } from '../queue/ffmpegWorker';
 
 // DoS guard (T-13-10): route layer enforces this cap before calling importClipByCopy.
@@ -176,7 +177,32 @@ export async function getProjectWithState(
   const clips: ProjectClipWithUrl[] = await Promise.all(
     clipRows.map(async (c) => {
       const { r2_key, ...rest } = c;
-      return { ...rest, url: await getUploadPresignedUrl(r2_key) };
+      const url = await getUploadPresignedUrl(r2_key);
+
+      // B1.4 self-heal (Plan 13-20): rows imported before the ffprobe-at-import fix (or whose
+      // probe failed at the time) carry a null duration — backfill it here so every existing
+      // project fixes itself with zero manual steps. Best-effort per clip; a probe failure still
+      // returns the project (with original_duration_seconds left null).
+      let original_duration_seconds = rest.original_duration_seconds;
+      if (original_duration_seconds == null) {
+        try {
+          if (c.media_type === 'image') {
+            original_duration_seconds = 3;
+          } else {
+            original_duration_seconds = await probeDurationSeconds(url);
+          }
+          if (original_duration_seconds != null) {
+            await db
+              .update(projectClips)
+              .set({ original_duration_seconds })
+              .where(eq(projectClips.id, c.id));
+          }
+        } catch (err) {
+          console.error('[projectService] Self-heal duration probe failed for clip', c.id, err);
+        }
+      }
+
+      return { ...rest, original_duration_seconds, url };
     }),
   );
   const audioClips: ProjectAudioClipWithUrl[] = await Promise.all(
@@ -283,7 +309,8 @@ export interface ImportClipParams {
 // issuing a server-side R2-to-R2 copy. For 'upload' sources the file was already written directly
 // to projects/{id}/clips/ by the route (a fresh upload has no prior owner to protect against).
 export async function importClipByCopy(input: ImportClipParams): Promise<ProjectClip> {
-  const { projectId, userId, sourceType, sourceId, uploadedR2Key, mediaType, durationSeconds, mimeType } = input;
+  const { projectId, userId, sourceType, sourceId, uploadedR2Key, mediaType, mimeType } = input;
+  let { durationSeconds } = input;
 
   let r2Key: string;
 
@@ -307,6 +334,19 @@ export async function importClipByCopy(input: ImportClipParams): Promise<Project
       }),
     );
     r2Key = destKey;
+
+    // B1 (Plan 13-20): derive a real duration at import time. Images get a fixed CapCut-style
+    // still duration; videos are probed against a fresh presigned GET of the just-copied R2
+    // object (same presign helper getProjectWithState uses for clip `url`s). Probe failure must
+    // never fail the import — durationSeconds stays whatever the caller passed (usually
+    // undefined), persisted as null, self-healed later by getProjectWithState.
+    if (mediaType === 'image') {
+      durationSeconds = 3;
+    } else {
+      const presignedUrl = await getUploadPresignedUrl(destKey);
+      const probed = await probeDurationSeconds(presignedUrl);
+      if (probed !== null) durationSeconds = probed;
+    }
   } else {
     if (!uploadedR2Key) throw new Error('uploadedR2Key is required for sourceType=upload');
     r2Key = uploadedR2Key;
