@@ -1023,7 +1023,10 @@ describe('POST /api/generations — presets', () => {
       expect.objectContaining({
         mediaType: 'image',
         model: 'openai/gpt-image-2-medium',
-        referenceImages: ['https://r2.example.com/signed/uploads/test-user-id/photo.jpg'],
+        referenceImages: [
+          'https://r2.example.com/signed/uploads/test-user-id/photo.jpg',
+          'https://pub-cec5aa79de50452fa7eac827a03d7e04.r2.dev/presets/hairstyle/styles/bob-v1.jpg',
+        ],
       }),
     );
   });
@@ -1324,7 +1327,7 @@ describe('POST /api/generations — presets', () => {
 
       const res = await request(app).post('/api/generations').send({
         preset_id: 'hairstyle',
-        style_id: 'bob',
+        style_id: 'perm',
         preset_input_upload_ids: ['upload-photo'],
       });
 
