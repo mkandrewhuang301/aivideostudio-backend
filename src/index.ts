@@ -20,6 +20,7 @@ import './queue/ffmpegWorker';
 import { banCheckMiddleware } from './middleware/banCheck';
 import { reportsRouter } from './routes/reports';
 import { uploadsRouter } from './routes/uploads';
+import { projectsRouter } from './routes/projects';
 import { privacyRouter } from './routes/privacy';
 import { termsRouter } from './routes/terms';
 import { ratesRouter } from './routes/rates';
@@ -76,6 +77,7 @@ app.use('/api/me', meRouter);
 app.use('/api/generations', generationsRouter);
 app.use('/api/reports', reportsRouter);
 app.use('/api/uploads', uploadsRouter);
+app.use('/api/projects', projectsRouter);
 
 app.use('/privacy', privacyRouter);
 app.use('/terms', termsRouter);
