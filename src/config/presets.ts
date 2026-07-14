@@ -701,7 +701,6 @@ export const SERVER_PRESETS: PresetDef[] = [
         { id: 'bantu-knots', label: 'Bantu Knots', gender_tag: 'feminine', thumb_url: 'https://pub-cec5aa79de50452fa7eac827a03d7e04.r2.dev/presets/hairstyle/styles/bantu-knots-v1.jpg' },
         { id: 'braids', label: 'Braids', gender_tag: 'feminine', thumb_url: 'https://pub-cec5aa79de50452fa7eac827a03d7e04.r2.dev/presets/hairstyle/styles/braids-v1.jpg' },
         { id: 'feed-in-braids', label: 'Feed-in Braids', gender_tag: 'feminine', thumb_url: 'https://pub-cec5aa79de50452fa7eac827a03d7e04.r2.dev/presets/hairstyle/styles/feed-in-braids-v1.jpg' },
-        { id: 'graduated-bob', label: 'Graduated Bob', gender_tag: 'feminine', thumb_url: 'https://pub-cec5aa79de50452fa7eac827a03d7e04.r2.dev/presets/hairstyle/styles/graduated-bob-v2.jpg' },
         { id: 'long-shag', label: 'Long Shag', gender_tag: 'feminine', thumb_url: 'https://pub-cec5aa79de50452fa7eac827a03d7e04.r2.dev/presets/hairstyle/styles/long-shag-v1.jpg' },
         { id: 'long-wavy', label: 'Long Wavy', gender_tag: 'feminine', thumb_url: 'https://pub-cec5aa79de50452fa7eac827a03d7e04.r2.dev/presets/hairstyle/styles/long-wavy-v1.jpg' },
         { id: 'messy-bun', label: 'Messy Bun', gender_tag: 'feminine', thumb_url: 'https://pub-cec5aa79de50452fa7eac827a03d7e04.r2.dev/presets/hairstyle/styles/messy-bun-v3.jpg' },
