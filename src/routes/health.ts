@@ -39,10 +39,21 @@ healthRouter.get('/', async (_req: Request, res: Response) => {
   // ffmpeg probe (SC1 / D-06) — non-blocking: kept OUT of the `checks` allOk aggregation below so
   // a missing binary in local dev never flips the overall /health HTTP status; Railway must show
   // `ok` after deploy (manually verified in 09.3-08) since the nixpacks ffmpeg worker needs it.
+  //
+  // Phase 13 / Pitfall 1 / A1: `ffmpegLibassFontconfig` additionally surfaces whether the deployed
+  // binary was built with --enable-libass AND --enable-libfontconfig (not just binary presence) —
+  // this is the specific unknown that gated Text overlay/Caption burn-in (SC3/SC5) until verified
+  // against the real Railway container (13-02's checkpoint). Non-blocking for the same reason as
+  // ffmpegStatus above.
   let ffmpegStatus: 'ok' | 'missing';
+  let ffmpegLibassFontconfig: 'ok' | 'missing' | 'unknown' = 'unknown';
   try {
-    execFileSync('ffmpeg', ['-version'], { stdio: 'pipe' });
+    const versionOutput = execFileSync('ffmpeg', ['-version'], { stdio: 'pipe' }).toString();
     ffmpegStatus = 'ok';
+    const configLine = versionOutput.split('\n').find((line) => line.startsWith('configuration:')) ?? '';
+    ffmpegLibassFontconfig = configLine.includes('--enable-libass') && configLine.includes('--enable-libfontconfig')
+      ? 'ok'
+      : 'missing';
   } catch {
     ffmpegStatus = 'missing';
     console.warn('[health] ffmpeg binary not found on PATH');
@@ -53,7 +64,7 @@ healthRouter.get('/', async (_req: Request, res: Response) => {
   const version = process.env.RAILWAY_GIT_COMMIT_SHA?.slice(0, 7) ?? 'unknown';
   res.status(allOk ? 200 : 503).json({
     status: allOk ? 'ok' : 'degraded',
-    checks: { ...checks, ffmpeg: ffmpegStatus },
+    checks: { ...checks, ffmpeg: ffmpegStatus, ffmpegLibassFontconfig },
     version,
   });
 });
