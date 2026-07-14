@@ -158,7 +158,8 @@ export async function getProjectWithState(
     ? await getUploadPresignedUrl(projectRow.thumbnail_r2_key)
     : null;
 
-  const { thumbnail_r2_key: _thumbKey, ...projectFields } = projectRow;
+  const projectFields: Record<string, unknown> = { ...projectRow };
+  delete projectFields.thumbnail_r2_key;
   return {
     ...projectFields,
     thumbnail_url: thumbnailUrl,
@@ -166,7 +167,7 @@ export async function getProjectWithState(
     text_overlays: textRows,
     audio_clips: audioClips,
     caption_cues: cueRows.map((c) => ({ ...c, words: wordsByCue[c.id] ?? [] })),
-  };
+  } as FullProjectState;
 }
 
 // Partial update — caller (route layer) is responsible for validating aspectRatio/captionStyle.position
