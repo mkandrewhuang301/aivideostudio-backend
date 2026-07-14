@@ -7,12 +7,19 @@
 import { Router, Request, Response } from 'express';
 import multer from 'multer';
 import { randomUUID } from 'crypto';
-import { PutObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
+import { PutObjectCommand, CopyObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
 import { r2, R2_BUCKET } from '../storage/r2';
 import { db } from '../db/client';
-import { projects, projectClips, generations } from '../db/schema';
+import {
+  projects,
+  projectClips,
+  projectTextOverlays,
+  projectAudioClips,
+  generations,
+} from '../db/schema';
 import { eq, and, sql } from 'drizzle-orm';
 import { getUploadPresignedUrl } from '../services/archivalService';
+import { PRESET_MUSIC } from '../config/presetMusic';
 import {
   createProject,
   listProjects,
@@ -23,6 +30,14 @@ import {
   smartUnpackOnImport,
   ImportSourceNotFoundError,
   MAX_CLIPS_PER_PROJECT,
+  addTextOverlay,
+  updateTextOverlay,
+  deleteTextOverlay,
+  MAX_TEXT_OVERLAYS_PER_PROJECT,
+  addAudioClip,
+  updateAudioClip,
+  deleteAudioClip,
+  MAX_AUDIO_CLIPS_PER_PROJECT,
 } from '../services/projectService';
 
 export const projectsRouter = Router();
@@ -50,6 +65,29 @@ const clipUpload = multer({
     cb(null, file.mimetype in ALLOWED_CLIP_MIMES);
   },
 });
+
+const ALLOWED_AUDIO_MIMES: Record<string, string> = {
+  'audio/mp4': 'm4a',
+  'audio/x-m4a': 'm4a',
+  'audio/mpeg': 'mp3',
+  'audio/wav': 'wav',
+  'audio/x-wav': 'wav',
+};
+
+const audioUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 50 * 1024 * 1024 }, // 50MB — audio clips are much smaller than video
+  fileFilter: (_req, file, cb) => {
+    cb(null, file.mimetype in ALLOWED_AUDIO_MIMES);
+  },
+});
+
+// multipart bodies send numeric fields as strings — coerce, tolerating absence/empty string.
+function parseOptionalNumber(v: unknown): number | undefined {
+  if (v === undefined || v === null || v === '') return undefined;
+  const n = typeof v === 'number' ? v : Number(v);
+  return Number.isFinite(n) ? n : undefined;
+}
 
 // POST /api/projects — create a new project (D-01/D-02)
 projectsRouter.post('/', async (req: Request, res: Response) => {
@@ -379,3 +417,339 @@ projectsRouter.delete('/:id/clips/:clipId', async (req: Request, res: Response) 
     res.status(500).json({ error: 'Failed to delete clip' });
   }
 });
+
+// ─── Text overlays (SC3) ────────────────────────────────────────────────────────
+// Bounds validation (T-13-44 — the authoritative server-side backstop the iOS plan's
+// threat register T-13-32 relies on): x_norm/y_norm ∈ [0,1], width_norm ∈ [0.5,3],
+// 0 <= start_seconds < end_seconds. Applied to any field present, on BOTH POST and PATCH.
+
+// POST /api/projects/:id/text — add a draggable Text overlay
+projectsRouter.post('/:id/text', async (req: Request, res: Response) => {
+  if (!req.user?.dbUserId) {
+    res.status(401).json({ error: 'Not authenticated' });
+    return;
+  }
+  const projectId = req.params.id as string;
+  const { text, x_norm, y_norm, width_norm, start_seconds, end_seconds } = req.body ?? {};
+
+  if (typeof text !== 'string' || text.length === 0) {
+    res.status(400).json({ error: 'text is required' });
+    return;
+  }
+  if (
+    typeof x_norm !== 'number' ||
+    x_norm < 0 ||
+    x_norm > 1 ||
+    typeof y_norm !== 'number' ||
+    y_norm < 0 ||
+    y_norm > 1
+  ) {
+    res.status(400).json({ error: 'x_norm/y_norm must be between 0 and 1' });
+    return;
+  }
+  if (width_norm !== undefined && (typeof width_norm !== 'number' || width_norm < 0.5 || width_norm > 3)) {
+    res.status(400).json({ error: 'width_norm must be between 0.5 and 3' });
+    return;
+  }
+  if (
+    typeof start_seconds !== 'number' ||
+    typeof end_seconds !== 'number' ||
+    start_seconds < 0 ||
+    start_seconds >= end_seconds
+  ) {
+    res.status(400).json({ error: 'Invalid start_seconds/end_seconds' });
+    return;
+  }
+
+  try {
+    const [ownedProject] = await db
+      .select({ id: projects.id })
+      .from(projects)
+      .where(and(eq(projects.id, projectId), eq(projects.user_id, req.user.dbUserId)));
+    if (!ownedProject) {
+      res.status(404).json({ error: 'Project not found' });
+      return;
+    }
+
+    const [{ count }] = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(projectTextOverlays)
+      .where(eq(projectTextOverlays.project_id, projectId));
+    if (Number(count) >= MAX_TEXT_OVERLAYS_PER_PROJECT) {
+      res.status(400).json({ error: `Project already has the maximum of ${MAX_TEXT_OVERLAYS_PER_PROJECT} text overlays` });
+      return;
+    }
+
+    const overlay = await addTextOverlay(projectId, req.user.dbUserId, {
+      text,
+      xNorm: x_norm,
+      yNorm: y_norm,
+      widthNorm: typeof width_norm === 'number' ? width_norm : undefined,
+      startSeconds: start_seconds,
+      endSeconds: end_seconds,
+    });
+    if (!overlay) {
+      res.status(404).json({ error: 'Project not found' });
+      return;
+    }
+    res.status(201).json({ text_overlay: overlay });
+  } catch (err) {
+    console.error('[projects] Error adding text overlay:', err);
+    res.status(500).json({ error: 'Failed to add text overlay' });
+  }
+});
+
+// PATCH /api/projects/:id/text/:textId — move/retime/resize a Text overlay
+projectsRouter.patch('/:id/text/:textId', async (req: Request, res: Response) => {
+  if (!req.user?.dbUserId) {
+    res.status(401).json({ error: 'Not authenticated' });
+    return;
+  }
+  const { text, x_norm, y_norm, width_norm, start_seconds, end_seconds } = req.body ?? {};
+
+  if (text !== undefined && typeof text !== 'string') {
+    res.status(400).json({ error: 'text must be a string' });
+    return;
+  }
+  if (x_norm !== undefined && (typeof x_norm !== 'number' || x_norm < 0 || x_norm > 1)) {
+    res.status(400).json({ error: 'x_norm/y_norm must be between 0 and 1' });
+    return;
+  }
+  if (y_norm !== undefined && (typeof y_norm !== 'number' || y_norm < 0 || y_norm > 1)) {
+    res.status(400).json({ error: 'x_norm/y_norm must be between 0 and 1' });
+    return;
+  }
+  if (width_norm !== undefined && (typeof width_norm !== 'number' || width_norm < 0.5 || width_norm > 3)) {
+    res.status(400).json({ error: 'width_norm must be between 0.5 and 3' });
+    return;
+  }
+  if (start_seconds !== undefined && end_seconds !== undefined) {
+    if (
+      typeof start_seconds !== 'number' ||
+      typeof end_seconds !== 'number' ||
+      start_seconds < 0 ||
+      start_seconds >= end_seconds
+    ) {
+      res.status(400).json({ error: 'Invalid start_seconds/end_seconds' });
+      return;
+    }
+  } else if (start_seconds !== undefined && (typeof start_seconds !== 'number' || start_seconds < 0)) {
+    res.status(400).json({ error: 'Invalid start_seconds/end_seconds' });
+    return;
+  } else if (end_seconds !== undefined && (typeof end_seconds !== 'number' || end_seconds <= 0)) {
+    res.status(400).json({ error: 'Invalid start_seconds/end_seconds' });
+    return;
+  }
+
+  try {
+    const overlay = await updateTextOverlay(req.params.id as string, req.user.dbUserId, req.params.textId as string, {
+      text: typeof text === 'string' ? text : undefined,
+      xNorm: typeof x_norm === 'number' ? x_norm : undefined,
+      yNorm: typeof y_norm === 'number' ? y_norm : undefined,
+      widthNorm: typeof width_norm === 'number' ? width_norm : undefined,
+      startSeconds: typeof start_seconds === 'number' ? start_seconds : undefined,
+      endSeconds: typeof end_seconds === 'number' ? end_seconds : undefined,
+    });
+    if (!overlay) {
+      res.status(404).json({ error: 'Text overlay not found' });
+      return;
+    }
+    res.status(200).json({ text_overlay: overlay });
+  } catch (err) {
+    console.error('[projects] Error updating text overlay:', err);
+    res.status(500).json({ error: 'Failed to update text overlay' });
+  }
+});
+
+// DELETE /api/projects/:id/text/:textId
+projectsRouter.delete('/:id/text/:textId', async (req: Request, res: Response) => {
+  if (!req.user?.dbUserId) {
+    res.status(401).json({ error: 'Not authenticated' });
+    return;
+  }
+  try {
+    const ok = await deleteTextOverlay(req.params.id as string, req.user.dbUserId, req.params.textId as string);
+    if (!ok) {
+      res.status(404).json({ error: 'Text overlay not found' });
+      return;
+    }
+    res.status(204).send();
+  } catch (err) {
+    console.error('[projects] Error deleting text overlay:', err);
+    res.status(500).json({ error: 'Failed to delete text overlay' });
+  }
+});
+
+// ─── Audio clips (SC4 — multi-clip Audio track) ────────────────────────────────
+
+// POST /api/projects/:id/audio — add an audio clip, either a fresh upload OR a preset-music copy
+projectsRouter.post('/:id/audio', audioUpload.single('file'), async (req: Request, res: Response) => {
+  if (!req.user?.dbUserId) {
+    res.status(401).json({ error: 'Not authenticated' });
+    return;
+  }
+  const projectId = req.params.id as string;
+  try {
+    const [ownedProject] = await db
+      .select({ id: projects.id })
+      .from(projects)
+      .where(and(eq(projects.id, projectId), eq(projects.user_id, req.user.dbUserId)));
+    if (!ownedProject) {
+      res.status(404).json({ error: 'Project not found' });
+      return;
+    }
+
+    const [{ count }] = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(projectAudioClips)
+      .where(eq(projectAudioClips.project_id, projectId));
+    if (Number(count) >= MAX_AUDIO_CLIPS_PER_PROJECT) {
+      res.status(400).json({ error: `Project already has the maximum of ${MAX_AUDIO_CLIPS_PER_PROJECT} audio clips` });
+      return;
+    }
+
+    const startOffsetSeconds = parseOptionalNumber(req.body?.start_offset_seconds);
+    const trimStartSeconds = parseOptionalNumber(req.body?.trim_start_seconds);
+    const trimEndSeconds = parseOptionalNumber(req.body?.trim_end_seconds);
+
+    let r2Key: string;
+    let sourceType: 'upload' | 'preset';
+
+    if (req.file) {
+      const ext = ALLOWED_AUDIO_MIMES[req.file.mimetype];
+      if (!ext) {
+        res.status(400).json({ error: 'Unsupported audio file type' });
+        return;
+      }
+      r2Key = `projects/${projectId}/audio/${randomUUID()}.${ext}`;
+      await r2.send(
+        new PutObjectCommand({
+          Bucket: R2_BUCKET,
+          Key: r2Key,
+          Body: req.file.buffer,
+          ContentType: req.file.mimetype,
+        }),
+      );
+      sourceType = 'upload';
+    } else if (req.body?.source_type === 'preset' && typeof req.body?.preset_music_id === 'string') {
+      const track = PRESET_MUSIC.find((t) => t.id === req.body.preset_music_id);
+      if (!track) {
+        res.status(400).json({ error: 'Unknown preset_music_id' });
+        return;
+      }
+      r2Key = `projects/${projectId}/audio/${randomUUID()}.m4a`;
+      await r2.send(
+        new CopyObjectCommand({
+          Bucket: R2_BUCKET,
+          CopySource: `${R2_BUCKET}/${track.r2Key}`,
+          Key: r2Key,
+        }),
+      );
+      sourceType = 'preset';
+    } else {
+      res.status(400).json({ error: 'Provide a file upload, or { source_type: "preset", preset_music_id }' });
+      return;
+    }
+
+    const audioClip = await addAudioClip(projectId, req.user.dbUserId, {
+      r2Key,
+      sourceType,
+      startOffsetSeconds,
+      trimStartSeconds,
+      trimEndSeconds,
+    });
+    if (!audioClip) {
+      res.status(404).json({ error: 'Project not found' });
+      return;
+    }
+    res.status(201).json({ audio_clip: audioClip });
+  } catch (err) {
+    console.error('[projects] Error adding audio clip:', err);
+    res.status(500).json({ error: 'Failed to add audio clip' });
+  }
+});
+
+// PATCH /api/projects/:id/audio/:audioId — reposition/retrim an audio clip
+projectsRouter.patch('/:id/audio/:audioId', async (req: Request, res: Response) => {
+  if (!req.user?.dbUserId) {
+    res.status(401).json({ error: 'Not authenticated' });
+    return;
+  }
+  const { start_offset_seconds, trim_start_seconds, trim_end_seconds, sort_order } = req.body ?? {};
+
+  const updates: {
+    startOffsetSeconds?: number;
+    trimStartSeconds?: number;
+    trimEndSeconds?: number;
+    sortOrder?: number;
+  } = {};
+  if (start_offset_seconds !== undefined) {
+    if (typeof start_offset_seconds !== 'number' || start_offset_seconds < 0) {
+      res.status(400).json({ error: 'start_offset_seconds must be a non-negative number' });
+      return;
+    }
+    updates.startOffsetSeconds = start_offset_seconds;
+  }
+  if (trim_start_seconds !== undefined) {
+    if (typeof trim_start_seconds !== 'number' || trim_start_seconds < 0) {
+      res.status(400).json({ error: 'trim_start_seconds must be a non-negative number' });
+      return;
+    }
+    updates.trimStartSeconds = trim_start_seconds;
+  }
+  if (trim_end_seconds !== undefined) {
+    if (typeof trim_end_seconds !== 'number' || trim_end_seconds < 0) {
+      res.status(400).json({ error: 'trim_end_seconds must be a non-negative number' });
+      return;
+    }
+    updates.trimEndSeconds = trim_end_seconds;
+  }
+  if (sort_order !== undefined) {
+    if (typeof sort_order !== 'number') {
+      res.status(400).json({ error: 'sort_order must be a number' });
+      return;
+    }
+    updates.sortOrder = sort_order;
+  }
+  if (Object.keys(updates).length === 0) {
+    res.status(400).json({ error: 'No valid fields to update' });
+    return;
+  }
+
+  try {
+    const audioClip = await updateAudioClip(
+      req.params.id as string,
+      req.user.dbUserId,
+      req.params.audioId as string,
+      updates,
+    );
+    if (!audioClip) {
+      res.status(404).json({ error: 'Audio clip not found' });
+      return;
+    }
+    res.status(200).json({ audio_clip: audioClip });
+  } catch (err) {
+    console.error('[projects] Error updating audio clip:', err);
+    res.status(500).json({ error: 'Failed to update audio clip' });
+  }
+});
+
+// DELETE /api/projects/:id/audio/:audioId — remove an audio clip row + its R2 object
+projectsRouter.delete('/:id/audio/:audioId', async (req: Request, res: Response) => {
+  if (!req.user?.dbUserId) {
+    res.status(401).json({ error: 'Not authenticated' });
+    return;
+  }
+  try {
+    const ok = await deleteAudioClip(req.params.id as string, req.user.dbUserId, req.params.audioId as string);
+    if (!ok) {
+      res.status(404).json({ error: 'Audio clip not found' });
+      return;
+    }
+    res.status(204).send();
+  } catch (err) {
+    console.error('[projects] Error deleting audio clip:', err);
+    res.status(500).json({ error: 'Failed to delete audio clip' });
+  }
+});
+

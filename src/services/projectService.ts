@@ -34,10 +34,25 @@ import { getUploadPresignedUrl } from './archivalService';
 
 // DoS guard (T-13-10): route layer enforces this cap before calling importClipByCopy.
 export const MAX_CLIPS_PER_PROJECT = 50;
+// DoS guards (T-13-16) for the element tracks added in Plan 04.
+export const MAX_TEXT_OVERLAYS_PER_PROJECT = 30;
+export const MAX_AUDIO_CLIPS_PER_PROJECT = 10;
 
 // Thrown by importClipByCopy when the source generation doesn't exist, isn't owned by the
 // requesting user, or isn't completed yet — the route maps this to a 404, never a 500.
 export class ImportSourceNotFoundError extends Error {}
+
+// Shared ownership resolution (T-13-15): every element (text/audio/caption) handler below
+// resolves the PARENT project scoped to user_id FIRST, before mutating any child row — never
+// a bare child-id update. Returns false for both "project doesn't exist" and "not owned by
+// this user" — the route layer maps false/null to a 404, indistinguishable from either case.
+async function isProjectOwned(projectId: string, userId: string): Promise<boolean> {
+  const [row] = await db
+    .select({ id: projects.id })
+    .from(projects)
+    .where(and(eq(projects.id, projectId), eq(projects.user_id, userId)));
+  return !!row;
+}
 
 // ─── Project CRUD ──────────────────────────────────────────────────────────────
 
@@ -299,6 +314,169 @@ export async function importClipByCopy(input: ImportClipParams): Promise<Project
     .returning();
 
   return clip;
+}
+
+// ─── Text overlay CRUD (SC3) ───────────────────────────────────────────────────
+// Bounds validation (x_norm/y_norm ∈ [0,1], width_norm ∈ [0.5,3], T-13-44) happens at the ROUTE
+// layer BEFORE calling these — mirrors updateProject's validation split (route validates,
+// service assumes pre-validated input and focuses on ownership + persistence).
+
+export interface AddTextOverlayInput {
+  text: string;
+  xNorm: number;
+  yNorm: number;
+  widthNorm?: number;
+  startSeconds: number;
+  endSeconds: number;
+}
+export interface UpdateTextOverlayInput {
+  text?: string;
+  xNorm?: number;
+  yNorm?: number;
+  widthNorm?: number;
+  startSeconds?: number;
+  endSeconds?: number;
+}
+
+export async function addTextOverlay(
+  projectId: string,
+  userId: string,
+  input: AddTextOverlayInput,
+): Promise<ProjectTextOverlay | null> {
+  if (!(await isProjectOwned(projectId, userId))) return null;
+
+  const [row] = await db
+    .insert(projectTextOverlays)
+    .values({
+      project_id: projectId,
+      text: input.text,
+      x_norm: input.xNorm,
+      y_norm: input.yNorm,
+      width_norm: input.widthNorm ?? null,
+      start_seconds: input.startSeconds,
+      end_seconds: input.endSeconds,
+    })
+    .returning();
+  return row;
+}
+
+export async function updateTextOverlay(
+  projectId: string,
+  userId: string,
+  textId: string,
+  updates: UpdateTextOverlayInput,
+): Promise<ProjectTextOverlay | null> {
+  if (!(await isProjectOwned(projectId, userId))) return null;
+
+  const setValues: Record<string, unknown> = {};
+  if (updates.text !== undefined) setValues.text = updates.text;
+  if (updates.xNorm !== undefined) setValues.x_norm = updates.xNorm;
+  if (updates.yNorm !== undefined) setValues.y_norm = updates.yNorm;
+  if (updates.widthNorm !== undefined) setValues.width_norm = updates.widthNorm;
+  if (updates.startSeconds !== undefined) setValues.start_seconds = updates.startSeconds;
+  if (updates.endSeconds !== undefined) setValues.end_seconds = updates.endSeconds;
+
+  const [row] = await db
+    .update(projectTextOverlays)
+    .set(setValues)
+    .where(and(eq(projectTextOverlays.id, textId), eq(projectTextOverlays.project_id, projectId)))
+    .returning();
+  return row ?? null;
+}
+
+export async function deleteTextOverlay(projectId: string, userId: string, textId: string): Promise<boolean> {
+  if (!(await isProjectOwned(projectId, userId))) return false;
+
+  const [row] = await db
+    .delete(projectTextOverlays)
+    .where(and(eq(projectTextOverlays.id, textId), eq(projectTextOverlays.project_id, projectId)))
+    .returning({ id: projectTextOverlays.id });
+  return !!row;
+}
+
+// ─── Audio clip CRUD (SC4 — multi-clip Audio track, UI-SPEC Resolved Q1) ───────
+
+export interface AddAudioClipInput {
+  r2Key: string;
+  sourceType: 'upload' | 'preset';
+  startOffsetSeconds?: number;
+  trimStartSeconds?: number;
+  trimEndSeconds?: number;
+}
+export interface UpdateAudioClipInput {
+  startOffsetSeconds?: number;
+  trimStartSeconds?: number;
+  trimEndSeconds?: number;
+  sortOrder?: number;
+}
+
+export async function addAudioClip(
+  projectId: string,
+  userId: string,
+  input: AddAudioClipInput,
+): Promise<ProjectAudioClip | null> {
+  if (!(await isProjectOwned(projectId, userId))) return null;
+
+  const nextOrderResult = await db.execute(sql`
+    SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_order FROM project_audio_clips WHERE project_id = ${projectId}::uuid
+  `);
+  const nextSortOrder = Number((nextOrderResult.rows?.[0] as { next_order?: number } | undefined)?.next_order ?? 0);
+
+  const [row] = await db
+    .insert(projectAudioClips)
+    .values({
+      project_id: projectId,
+      r2_key: input.r2Key,
+      source_type: input.sourceType,
+      start_offset_seconds: input.startOffsetSeconds ?? 0,
+      trim_start_seconds: input.trimStartSeconds ?? 0,
+      trim_end_seconds: input.trimEndSeconds ?? null,
+      sort_order: nextSortOrder,
+    })
+    .returning();
+  return row;
+}
+
+export async function updateAudioClip(
+  projectId: string,
+  userId: string,
+  audioId: string,
+  updates: UpdateAudioClipInput,
+): Promise<ProjectAudioClip | null> {
+  if (!(await isProjectOwned(projectId, userId))) return null;
+
+  const setValues: Record<string, unknown> = {};
+  if (updates.startOffsetSeconds !== undefined) setValues.start_offset_seconds = updates.startOffsetSeconds;
+  if (updates.trimStartSeconds !== undefined) setValues.trim_start_seconds = updates.trimStartSeconds;
+  if (updates.trimEndSeconds !== undefined) setValues.trim_end_seconds = updates.trimEndSeconds;
+  if (updates.sortOrder !== undefined) setValues.sort_order = updates.sortOrder;
+
+  const [row] = await db
+    .update(projectAudioClips)
+    .set(setValues)
+    .where(and(eq(projectAudioClips.id, audioId), eq(projectAudioClips.project_id, projectId)))
+    .returning();
+  return row ?? null;
+}
+
+// Deletes the row AND its R2 object (best-effort on the R2 side, matching deleteProject's
+// established pattern — a stray orphaned R2 object is a minor storage cost, not a correctness bug).
+export async function deleteAudioClip(projectId: string, userId: string, audioId: string): Promise<boolean> {
+  if (!(await isProjectOwned(projectId, userId))) return false;
+
+  const [row] = await db
+    .select({ r2_key: projectAudioClips.r2_key })
+    .from(projectAudioClips)
+    .where(and(eq(projectAudioClips.id, audioId), eq(projectAudioClips.project_id, projectId)));
+  if (!row) return false;
+
+  await db.delete(projectAudioClips).where(eq(projectAudioClips.id, audioId));
+  try {
+    await r2.send(new DeleteObjectCommand({ Bucket: R2_BUCKET, Key: row.r2_key }));
+  } catch (err) {
+    console.error('[projectService] Best-effort delete of audio clip R2 object failed:', err);
+  }
+  return true;
 }
 
 // ─── Smart unpack on import (D-15/D-16, generalized per Claude's Discretion) ───
