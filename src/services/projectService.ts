@@ -31,6 +31,7 @@ import type {
 } from '../db/schema';
 import { eq, and, desc, lt, or, sql, inArray } from 'drizzle-orm';
 import { getUploadPresignedUrl } from './archivalService';
+import { extractVideoFrame } from './frameExtractor';
 import type { ComposeSpec, ComposeCaptionCue, ComposeCaptionStyle } from '../queue/ffmpegWorker';
 
 // DoS guard (T-13-10): route layer enforces this cap before calling importClipByCopy.
@@ -323,7 +324,36 @@ export async function importClipByCopy(input: ImportClipParams): Promise<Project
     })
     .returning();
 
+  // First clip ever added to this project (nextSortOrder === 0) becomes its cover thumbnail —
+  // best-effort, never blocks the clip-import response. Video clips get a real extracted frame
+  // (reuses AI Influencer Pro's frameExtractor.ts, same execFile-fixed-argv ffmpeg pattern);
+  // image clips are already a still, so their own r2Key is the thumbnail directly. Does not
+  // re-derive on every subsequent clip add/delete — the project's cover is set once, like a
+  // static poster, not a live "current first clip" mirror. Skipped under Jest (NODE_ENV=test) —
+  // this is a fire-and-forget background task that would otherwise issue a real network fetch()
+  // per test run against mocked db/r2 clients.
+  if (nextSortOrder === 0 && process.env.NODE_ENV !== 'test') {
+    void setProjectThumbnailFromClip(projectId, r2Key, mediaType).catch((err) => {
+      console.error('[projectService] setProjectThumbnailFromClip failed (non-blocking):', err);
+    });
+  }
+
   return clip;
+}
+
+async function setProjectThumbnailFromClip(
+  projectId: string,
+  clipR2Key: string,
+  mediaType: 'video' | 'image',
+): Promise<void> {
+  let thumbnailR2Key: string;
+  if (mediaType === 'image') {
+    thumbnailR2Key = clipR2Key;
+  } else {
+    const clipUrl = await getUploadPresignedUrl(clipR2Key);
+    thumbnailR2Key = await extractVideoFrame(clipUrl, `project-thumb-${randomUUID()}`);
+  }
+  await db.update(projects).set({ thumbnail_r2_key: thumbnailR2Key }).where(eq(projects.id, projectId));
 }
 
 // ─── Text overlay CRUD (SC3) ───────────────────────────────────────────────────
