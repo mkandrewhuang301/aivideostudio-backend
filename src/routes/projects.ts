@@ -21,6 +21,8 @@ import {
 import { eq, and, sql } from 'drizzle-orm';
 import { getUploadPresignedUrl } from '../services/archivalService';
 import { PRESET_MUSIC } from '../config/presetMusic';
+import { ffmpegQueue } from '../queue/ffmpegWorker';
+import { createGeneration } from '../services/generationService';
 import {
   createProject,
   listProjects,
@@ -45,6 +47,8 @@ import {
   deleteAllCaptions,
   MAX_CAPTION_CUES_PER_PROJECT,
   MAX_WORDS_PER_CUE,
+  buildComposeSnapshot,
+  ExportValidationError,
 } from '../services/projectService';
 
 export const projectsRouter = Router();
@@ -451,6 +455,74 @@ projectsRouter.delete('/:id/clips/:clipId', async (req: Request, res: Response) 
   } catch (err) {
     console.error('[projects] Error deleting clip:', err);
     res.status(500).json({ error: 'Failed to delete clip' });
+  }
+});
+
+// POST /api/projects/:id/export — real free export (D-07/D-10/D-12/SC7): snapshots the full
+// project state at request time (Pitfall 4), creates a NEW free generation row so the client can
+// poll it exactly like any other generation, and enqueues the ffmpeg 'compose' job. The project
+// row itself is NEVER updated here — exporting does not lock/consume the project (D-12).
+projectsRouter.post('/:id/export', async (req: Request, res: Response) => {
+  if (!req.user?.dbUserId) {
+    res.status(401).json({ error: 'Not authenticated' });
+    return;
+  }
+  const projectId = req.params.id as string;
+  try {
+    const [ownedProject] = await db
+      .select({ id: projects.id })
+      .from(projects)
+      .where(and(eq(projects.id, projectId), eq(projects.user_id, req.user.dbUserId)));
+    if (!ownedProject) {
+      res.status(404).json({ error: 'Project not found' });
+      return;
+    }
+
+    const [{ count }] = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(projectClips)
+      .where(eq(projectClips.project_id, projectId));
+    if (Number(count) === 0) {
+      res.status(400).json({ error: 'Project has no clips to export' });
+      return;
+    }
+
+    const spec = await buildComposeSnapshot(projectId, req.user.dbUserId);
+    if (!spec) {
+      res.status(404).json({ error: 'Project not found' });
+      return;
+    }
+
+    // Free (D-10, costCredits: 0) — no credit deduction for exports. A normal generations row so
+    // the client's existing GenerationManager poll loop (GET /api/generations/:id) works unchanged.
+    const { id: generationId } = await createGeneration({
+      user_id: req.user.dbUserId,
+      model: 'edit-studio-compose',
+      status: 'processing',
+      prompt: null,
+      params: { export_of_project_id: projectId },
+      cost_credits: 0,
+      media_type: 'video',
+    });
+
+    await ffmpegQueue.add('compose-job', {
+      generationId,
+      userId: req.user.dbUserId,
+      costCredits: 0,
+      op: 'compose',
+      mediaType: 'video',
+      inputR2Keys: [],
+      compose: spec,
+    });
+
+    res.status(202).json({ generation_id: generationId });
+  } catch (err) {
+    if (err instanceof ExportValidationError) {
+      res.status(400).json({ error: err.message });
+      return;
+    }
+    console.error('[projects] Error exporting project:', err);
+    res.status(500).json({ error: 'Failed to export project' });
   }
 });
 

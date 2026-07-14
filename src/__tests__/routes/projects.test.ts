@@ -23,6 +23,16 @@ jest.mock('../../db/client', () => ({
   },
 }));
 
+const mockFfmpegQueueAdd = jest.fn();
+jest.mock('../../queue/ffmpegWorker', () => ({
+  ffmpegQueue: { add: mockFfmpegQueueAdd },
+}));
+
+const mockCreateGeneration = jest.fn();
+jest.mock('../../services/generationService', () => ({
+  createGeneration: (...args: unknown[]) => mockCreateGeneration(...args),
+}));
+
 import express, { NextFunction, Request, Response } from 'express';
 import request from 'supertest';
 import { CopyObjectCommand, PutObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
@@ -392,6 +402,122 @@ describe('DELETE /api/projects/:id/clips/:clipId', () => {
     const deleteCall = r2Mock.send.mock.calls.find((c) => c[0] instanceof DeleteObjectCommand);
     expect(deleteCall).toBeDefined();
     expect(deleteCall![0].input.Key).toBe('projects/proj-1/clips/c1.mp4');
+  });
+});
+
+// ─── POST /api/projects/:id/export ─────────────────────────────────────────────
+
+function baseClipRow(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 'clip-1',
+    project_id: 'proj-1',
+    sort_order: 0,
+    r2_key: 'projects/proj-1/clips/a.mp4',
+    media_type: 'video',
+    source_type: 'upload',
+    original_duration_seconds: 10,
+    trim_start_seconds: 0,
+    trim_end_seconds: 5,
+    created_at: NOW,
+    ...overrides,
+  };
+}
+
+describe('POST /api/projects/:id/export', () => {
+  it('returns 401 when unauthenticated', async () => {
+    const res = await request(unauthApp).post('/api/projects/proj-1/export').send({});
+    expect(res.status).toBe(401);
+  });
+
+  it('returns 404 when the project is not owned by the requester (IDOR)', async () => {
+    dbMock.select.mockReturnValueOnce(makeChain([])); // ownership lookup empty
+
+    const res = await request(app).post('/api/projects/proj-1/export').send({});
+
+    expect(res.status).toBe(404);
+    expect(mockCreateGeneration).not.toHaveBeenCalled();
+    expect(mockFfmpegQueueAdd).not.toHaveBeenCalled();
+  });
+
+  it('rejects with 400 when the project has zero clips, never creating a generation', async () => {
+    dbMock.select
+      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }])) // owned project
+      .mockReturnValueOnce(makeChain([{ count: 0 }])); // clip count
+
+    const res = await request(app).post('/api/projects/proj-1/export').send({});
+
+    expect(res.status).toBe(400);
+    expect(mockCreateGeneration).not.toHaveBeenCalled();
+  });
+
+  it('happy path: snapshots project state, creates a free generation, enqueues compose, and NEVER updates the project row', async () => {
+    dbMock.select
+      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }])) // owned project (route-level check)
+      .mockReturnValueOnce(makeChain([{ count: 1 }])) // clip count
+      .mockReturnValueOnce(makeChain([baseProjectRow({ id: 'proj-1' })])) // buildComposeSnapshot's project row
+      .mockReturnValueOnce(makeChain([baseClipRow()])) // clips
+      .mockReturnValueOnce(makeChain([])) // text overlays
+      .mockReturnValueOnce(makeChain([])) // audio clips
+      .mockReturnValueOnce(makeChain([])); // caption cues (empty => no word query)
+    mockCreateGeneration.mockResolvedValueOnce({ id: 'gen-export-1' });
+
+    const res = await request(app).post('/api/projects/proj-1/export').send({});
+
+    expect(res.status).toBe(202);
+    expect(res.body.generation_id).toBe('gen-export-1');
+
+    expect(mockCreateGeneration).toHaveBeenCalledWith(
+      expect.objectContaining({
+        user_id: 'test-db-user-id',
+        status: 'processing',
+        cost_credits: 0,
+        media_type: 'video',
+        params: expect.objectContaining({ export_of_project_id: 'proj-1' }),
+      }),
+    );
+
+    expect(mockFfmpegQueueAdd).toHaveBeenCalledWith(
+      'compose-job',
+      expect.objectContaining({
+        generationId: 'gen-export-1',
+        op: 'compose',
+        costCredits: 0,
+        mediaType: 'video',
+        compose: expect.objectContaining({
+          aspectRatio: '9:16',
+          clips: [
+            expect.objectContaining({
+              r2Key: 'projects/proj-1/clips/a.mp4',
+              mediaType: 'video',
+              trimStartSeconds: 0,
+              trimEndSeconds: 5,
+            }),
+          ],
+        }),
+      }),
+    );
+
+    // D-12: export never locks/consumes the project — no db.update call anywhere in this flow.
+    expect(dbMock.update).not.toHaveBeenCalled();
+  });
+
+  it('rejects with 400 when a clip has no resolvable trim_end_seconds (ExportValidationError)', async () => {
+    dbMock.select
+      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }])) // owned project
+      .mockReturnValueOnce(makeChain([{ count: 1 }])) // clip count
+      .mockReturnValueOnce(makeChain([baseProjectRow({ id: 'proj-1' })])) // project row
+      .mockReturnValueOnce(
+        makeChain([baseClipRow({ trim_end_seconds: null, original_duration_seconds: null })]),
+      ) // clips — no resolvable duration
+      .mockReturnValueOnce(makeChain([])) // text overlays
+      .mockReturnValueOnce(makeChain([])) // audio clips
+      .mockReturnValueOnce(makeChain([])); // caption cues
+
+    const res = await request(app).post('/api/projects/proj-1/export').send({});
+
+    expect(res.status).toBe(400);
+    expect(mockCreateGeneration).not.toHaveBeenCalled();
+    expect(mockFfmpegQueueAdd).not.toHaveBeenCalled();
   });
 });
 

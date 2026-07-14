@@ -31,6 +31,7 @@ import type {
 } from '../db/schema';
 import { eq, and, desc, lt, or, sql, inArray } from 'drizzle-orm';
 import { getUploadPresignedUrl } from './archivalService';
+import type { ComposeSpec, ComposeCaptionCue, ComposeCaptionStyle } from '../queue/ffmpegWorker';
 
 // DoS guard (T-13-10): route layer enforces this cap before calling importClipByCopy.
 export const MAX_CLIPS_PER_PROJECT = 50;
@@ -43,6 +44,13 @@ export const MAX_WORDS_PER_CUE = 40;
 // Thrown by importClipByCopy when the source generation doesn't exist, isn't owned by the
 // requesting user, or isn't completed yet — the route maps this to a 404, never a 500.
 export class ImportSourceNotFoundError extends Error {}
+
+// Thrown by buildComposeSnapshot when a clip or audio clip has no resolvable trim_end_seconds
+// (neither an explicit trim nor, for clips, a fallback original_duration_seconds) — the compose
+// worker's filter_complex graph requires a concrete numeric duration per input (RESEARCH.md
+// Pattern 1's ComposeClipSpec/ComposeAudioSpec both declare trimEndSeconds as non-optional).
+// The route maps this to a 400, never lets an incomplete spec reach the ffmpeg queue.
+export class ExportValidationError extends Error {}
 
 // Shared ownership resolution (T-13-15): every element (text/audio/caption) handler below
 // resolves the PARENT project scoped to user_id FIRST, before mutating any child row — never
@@ -720,4 +728,120 @@ export async function smartUnpackOnImport(
   }
 
   return { unpacked: true };
+}
+
+// ─── Export snapshot (SC7, D-10/D-12) ──────────────────────────────────────────
+// Builds the FULL ComposeSpec from the project's CURRENT rows at export-REQUEST time
+// (RESEARCH.md Pitfall 4) — the caller (POST /:id/export) passes the returned spec straight into
+// the ffmpegQueue job payload; the compose worker NEVER re-reads project_* tables mid-render, so
+// further edits to the (still-editable-per-D-12) project during/after export cannot corrupt an
+// in-flight render. Uses RAW r2_key values (the worker downloads them directly via its own
+// presigned-URL resolution) — deliberately NOT getUploadPresignedUrl, unlike getProjectWithState.
+
+const DEFAULT_CAPTION_STYLE: ComposeCaptionStyle = {
+  fontSize: 64,
+  color: '#FFFFFF',
+  highlightColor: '#8C59FF',
+  position: 'bottom',
+};
+
+// IDOR guard: userId scoped in the project row lookup — returns null for a not-found/not-owned
+// project (mirrors getProjectWithState). Throws ExportValidationError if any clip/audio clip
+// lacks a resolvable trim_end_seconds — never silently coerces to 0, which would render a
+// degenerate (zero-duration) export.
+export async function buildComposeSnapshot(projectId: string, userId: string): Promise<ComposeSpec | null> {
+  const [projectRow] = await db
+    .select()
+    .from(projects)
+    .where(and(eq(projects.id, projectId), eq(projects.user_id, userId)));
+  if (!projectRow) return null;
+
+  const [clipRows, textRows, audioRows, cueRows] = await Promise.all([
+    db.select().from(projectClips).where(eq(projectClips.project_id, projectId)).orderBy(projectClips.sort_order),
+    db
+      .select()
+      .from(projectTextOverlays)
+      .where(eq(projectTextOverlays.project_id, projectId))
+      .orderBy(projectTextOverlays.start_seconds),
+    db
+      .select()
+      .from(projectAudioClips)
+      .where(eq(projectAudioClips.project_id, projectId))
+      .orderBy(projectAudioClips.sort_order),
+    db
+      .select()
+      .from(projectCaptionCues)
+      .where(eq(projectCaptionCues.project_id, projectId))
+      .orderBy(projectCaptionCues.sort_order),
+  ]);
+
+  const cueIds = cueRows.map((c) => c.id);
+  const wordRows =
+    cueIds.length > 0
+      ? await db
+          .select()
+          .from(projectCaptionWords)
+          .where(inArray(projectCaptionWords.cue_id, cueIds))
+          .orderBy(projectCaptionWords.sort_order)
+      : [];
+  const wordsByCue: Record<string, ProjectCaptionWord[]> = {};
+  for (const w of wordRows) {
+    (wordsByCue[w.cue_id] ??= []).push(w);
+  }
+
+  const clips = clipRows.map((c) => {
+    const trimEndSeconds = c.trim_end_seconds ?? c.original_duration_seconds;
+    if (trimEndSeconds == null) {
+      throw new ExportValidationError(
+        `Clip ${c.id} has no trim_end_seconds set — set trim points on every clip before exporting`,
+      );
+    }
+    return {
+      r2Key: c.r2_key,
+      mediaType: c.media_type as 'video' | 'image',
+      trimStartSeconds: c.trim_start_seconds,
+      trimEndSeconds,
+    };
+  });
+
+  const audioClips = audioRows.map((a) => {
+    if (a.trim_end_seconds == null) {
+      throw new ExportValidationError(
+        `Audio clip ${a.id} has no trim_end_seconds set — set trim points on every audio clip before exporting`,
+      );
+    }
+    return {
+      r2Key: a.r2_key,
+      startOffsetSeconds: a.start_offset_seconds,
+      trimStartSeconds: a.trim_start_seconds,
+      trimEndSeconds: a.trim_end_seconds,
+    };
+  });
+
+  const captionCues: ComposeCaptionCue[] = cueRows.map((cue) => ({
+    startSeconds: cue.start_seconds,
+    endSeconds: cue.end_seconds,
+    words: (wordsByCue[cue.id] ?? []).map((w) => ({
+      text: w.text,
+      startSeconds: w.start_seconds,
+      endSeconds: w.end_seconds,
+    })),
+  }));
+
+  const captionStyle = (projectRow.caption_style as ComposeCaptionStyle | null) ?? DEFAULT_CAPTION_STYLE;
+
+  return {
+    aspectRatio: projectRow.aspect_ratio as ComposeSpec['aspectRatio'],
+    clips,
+    textOverlays: textRows.map((t) => ({
+      text: t.text,
+      xNorm: t.x_norm ?? 0.5,
+      yNorm: t.y_norm ?? 0.5,
+      startSeconds: t.start_seconds,
+      endSeconds: t.end_seconds,
+    })),
+    audioClips,
+    captionCues,
+    captionStyle,
+  };
 }
