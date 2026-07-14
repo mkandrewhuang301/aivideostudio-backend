@@ -15,6 +15,7 @@ import {
   projectClips,
   projectTextOverlays,
   projectAudioClips,
+  projectCaptionCues,
   generations,
 } from '../db/schema';
 import { eq, and, sql } from 'drizzle-orm';
@@ -38,6 +39,12 @@ import {
   updateAudioClip,
   deleteAudioClip,
   MAX_AUDIO_CLIPS_PER_PROJECT,
+  addCaptionCue,
+  updateCaptionCue,
+  deleteCaptionCue,
+  deleteAllCaptions,
+  MAX_CAPTION_CUES_PER_PROJECT,
+  MAX_WORDS_PER_CUE,
 } from '../services/projectService';
 
 export const projectsRouter = Router();
@@ -87,6 +94,35 @@ function parseOptionalNumber(v: unknown): number | undefined {
   if (v === undefined || v === null || v === '') return undefined;
   const n = typeof v === 'number' ? v : Number(v);
   return Number.isFinite(n) ? n : undefined;
+}
+
+interface CaptionWordBody {
+  text: string;
+  start_seconds: number;
+  end_seconds: number;
+}
+
+// Shared word-array validation for POST/PATCH /:id/captions (SC5).
+function validateCaptionWords(words: unknown): { error: string } | null {
+  if (!Array.isArray(words)) return { error: 'words must be an array' };
+  if (words.length > MAX_WORDS_PER_CUE) {
+    return { error: `A caption cue can have at most ${MAX_WORDS_PER_CUE} words` };
+  }
+  for (const w of words) {
+    const word = w as Partial<CaptionWordBody> | null;
+    if (
+      typeof word !== 'object' ||
+      word === null ||
+      typeof word.text !== 'string' ||
+      typeof word.start_seconds !== 'number' ||
+      typeof word.end_seconds !== 'number' ||
+      word.start_seconds < 0 ||
+      word.start_seconds >= word.end_seconds
+    ) {
+      return { error: 'Each word requires { text, start_seconds, end_seconds } with start_seconds < end_seconds' };
+    }
+  }
+  return null;
 }
 
 // POST /api/projects — create a new project (D-01/D-02)
@@ -750,6 +786,170 @@ projectsRouter.delete('/:id/audio/:audioId', async (req: Request, res: Response)
   } catch (err) {
     console.error('[projects] Error deleting audio clip:', err);
     res.status(500).json({ error: 'Failed to delete audio clip' });
+  }
+});
+
+// ─── Caption cues/words (SC5, D-13) ─────────────────────────────────────────────
+
+// POST /api/projects/:id/captions — add a caption cue (+ its words)
+projectsRouter.post('/:id/captions', async (req: Request, res: Response) => {
+  if (!req.user?.dbUserId) {
+    res.status(401).json({ error: 'Not authenticated' });
+    return;
+  }
+  const projectId = req.params.id as string;
+  const { start_seconds, end_seconds, words } = req.body ?? {};
+
+  if (
+    typeof start_seconds !== 'number' ||
+    typeof end_seconds !== 'number' ||
+    start_seconds < 0 ||
+    start_seconds >= end_seconds
+  ) {
+    res.status(400).json({ error: 'Invalid start_seconds/end_seconds' });
+    return;
+  }
+  if (words !== undefined) {
+    const wordsError = validateCaptionWords(words);
+    if (wordsError) {
+      res.status(400).json(wordsError);
+      return;
+    }
+  }
+
+  try {
+    const [ownedProject] = await db
+      .select({ id: projects.id })
+      .from(projects)
+      .where(and(eq(projects.id, projectId), eq(projects.user_id, req.user.dbUserId)));
+    if (!ownedProject) {
+      res.status(404).json({ error: 'Project not found' });
+      return;
+    }
+
+    const [{ count }] = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(projectCaptionCues)
+      .where(eq(projectCaptionCues.project_id, projectId));
+    if (Number(count) >= MAX_CAPTION_CUES_PER_PROJECT) {
+      res.status(400).json({ error: `Project already has the maximum of ${MAX_CAPTION_CUES_PER_PROJECT} caption cues` });
+      return;
+    }
+
+    const cue = await addCaptionCue(projectId, req.user.dbUserId, {
+      startSeconds: start_seconds,
+      endSeconds: end_seconds,
+      words: Array.isArray(words)
+        ? (words as CaptionWordBody[]).map((w) => ({
+            text: w.text,
+            startSeconds: w.start_seconds,
+            endSeconds: w.end_seconds,
+          }))
+        : undefined,
+    });
+    if (!cue) {
+      res.status(404).json({ error: 'Project not found' });
+      return;
+    }
+    res.status(201).json({ caption_cue: cue });
+  } catch (err) {
+    console.error('[projects] Error adding caption cue:', err);
+    res.status(500).json({ error: 'Failed to add caption cue' });
+  }
+});
+
+// PATCH /api/projects/:id/captions/:cueId — retime a cue and/or replace its word list
+projectsRouter.patch('/:id/captions/:cueId', async (req: Request, res: Response) => {
+  if (!req.user?.dbUserId) {
+    res.status(401).json({ error: 'Not authenticated' });
+    return;
+  }
+  const { start_seconds, end_seconds, words } = req.body ?? {};
+
+  if (start_seconds !== undefined && end_seconds !== undefined) {
+    if (
+      typeof start_seconds !== 'number' ||
+      typeof end_seconds !== 'number' ||
+      start_seconds < 0 ||
+      start_seconds >= end_seconds
+    ) {
+      res.status(400).json({ error: 'Invalid start_seconds/end_seconds' });
+      return;
+    }
+  } else if (start_seconds !== undefined && typeof start_seconds !== 'number') {
+    res.status(400).json({ error: 'Invalid start_seconds/end_seconds' });
+    return;
+  } else if (end_seconds !== undefined && typeof end_seconds !== 'number') {
+    res.status(400).json({ error: 'Invalid start_seconds/end_seconds' });
+    return;
+  }
+  if (words !== undefined) {
+    const wordsError = validateCaptionWords(words);
+    if (wordsError) {
+      res.status(400).json(wordsError);
+      return;
+    }
+  }
+
+  try {
+    const cue = await updateCaptionCue(req.params.id as string, req.user.dbUserId, req.params.cueId as string, {
+      startSeconds: typeof start_seconds === 'number' ? start_seconds : undefined,
+      endSeconds: typeof end_seconds === 'number' ? end_seconds : undefined,
+      words: Array.isArray(words)
+        ? (words as CaptionWordBody[]).map((w) => ({
+            text: w.text,
+            startSeconds: w.start_seconds,
+            endSeconds: w.end_seconds,
+          }))
+        : undefined,
+    });
+    if (!cue) {
+      res.status(404).json({ error: 'Caption cue not found' });
+      return;
+    }
+    res.status(200).json({ caption_cue: cue });
+  } catch (err) {
+    console.error('[projects] Error updating caption cue:', err);
+    res.status(500).json({ error: 'Failed to update caption cue' });
+  }
+});
+
+// DELETE /api/projects/:id/captions — bulk clear the ENTIRE Captions track (D-13). Registered
+// as a distinct path shape from the single-cue delete below — no :cueId in the path.
+projectsRouter.delete('/:id/captions', async (req: Request, res: Response) => {
+  if (!req.user?.dbUserId) {
+    res.status(401).json({ error: 'Not authenticated' });
+    return;
+  }
+  try {
+    const ok = await deleteAllCaptions(req.params.id as string, req.user.dbUserId);
+    if (!ok) {
+      res.status(404).json({ error: 'Project not found' });
+      return;
+    }
+    res.status(204).send();
+  } catch (err) {
+    console.error('[projects] Error deleting all captions:', err);
+    res.status(500).json({ error: 'Failed to delete all captions' });
+  }
+});
+
+// DELETE /api/projects/:id/captions/:cueId — delete a single cue (+ its words)
+projectsRouter.delete('/:id/captions/:cueId', async (req: Request, res: Response) => {
+  if (!req.user?.dbUserId) {
+    res.status(401).json({ error: 'Not authenticated' });
+    return;
+  }
+  try {
+    const ok = await deleteCaptionCue(req.params.id as string, req.user.dbUserId, req.params.cueId as string);
+    if (!ok) {
+      res.status(404).json({ error: 'Caption cue not found' });
+      return;
+    }
+    res.status(204).send();
+  } catch (err) {
+    console.error('[projects] Error deleting caption cue:', err);
+    res.status(500).json({ error: 'Failed to delete caption cue' });
   }
 });
 

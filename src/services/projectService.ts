@@ -37,6 +37,8 @@ export const MAX_CLIPS_PER_PROJECT = 50;
 // DoS guards (T-13-16) for the element tracks added in Plan 04.
 export const MAX_TEXT_OVERLAYS_PER_PROJECT = 30;
 export const MAX_AUDIO_CLIPS_PER_PROJECT = 10;
+export const MAX_CAPTION_CUES_PER_PROJECT = 200;
+export const MAX_WORDS_PER_CUE = 40;
 
 // Thrown by importClipByCopy when the source generation doesn't exist, isn't owned by the
 // requesting user, or isn't completed yet — the route maps this to a 404, never a 500.
@@ -476,6 +478,156 @@ export async function deleteAudioClip(projectId: string, userId: string, audioId
   } catch (err) {
     console.error('[projectService] Best-effort delete of audio clip R2 object failed:', err);
   }
+  return true;
+}
+
+// ─── Caption cue/word CRUD (SC5, D-13) ─────────────────────────────────────────
+// A "cue" is a displayed line/phrase; each cue owns N words shaped {text, start, end} — the
+// exact shape Phase 14's AI Autoexplainer smart-unpack (D-15/D-16) already writes into directly.
+
+export interface CaptionWordInput {
+  text: string;
+  startSeconds: number;
+  endSeconds: number;
+}
+export interface AddCaptionCueInput {
+  startSeconds: number;
+  endSeconds: number;
+  words?: CaptionWordInput[];
+}
+export interface UpdateCaptionCueInput {
+  startSeconds?: number;
+  endSeconds?: number;
+  words?: CaptionWordInput[]; // presence REPLACES the cue's entire word list (tap-to-edit path)
+}
+
+export async function addCaptionCue(
+  projectId: string,
+  userId: string,
+  input: AddCaptionCueInput,
+): Promise<ProjectCaptionCueWithWords | null> {
+  if (!(await isProjectOwned(projectId, userId))) return null;
+
+  const nextOrderResult = await db.execute(sql`
+    SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_order FROM project_caption_cues WHERE project_id = ${projectId}::uuid
+  `);
+  const nextSortOrder = Number((nextOrderResult.rows?.[0] as { next_order?: number } | undefined)?.next_order ?? 0);
+
+  const [cueRow] = await db
+    .insert(projectCaptionCues)
+    .values({
+      project_id: projectId,
+      sort_order: nextSortOrder,
+      start_seconds: input.startSeconds,
+      end_seconds: input.endSeconds,
+    })
+    .returning();
+
+  let words: ProjectCaptionWord[] = [];
+  if (cueRow && input.words && input.words.length > 0) {
+    words = await db
+      .insert(projectCaptionWords)
+      .values(
+        input.words.map((w, i) => ({
+          cue_id: cueRow.id,
+          text: w.text,
+          start_seconds: w.startSeconds,
+          end_seconds: w.endSeconds,
+          sort_order: i,
+        })),
+      )
+      .returning();
+  }
+
+  return { ...cueRow, words };
+}
+
+// Retimes the cue and/or replaces its word list — replaces (delete-then-insert), never a
+// per-word PATCH, matching the tap-to-edit interaction model from 13-UI-SPEC.md.
+export async function updateCaptionCue(
+  projectId: string,
+  userId: string,
+  cueId: string,
+  updates: UpdateCaptionCueInput,
+): Promise<ProjectCaptionCueWithWords | null> {
+  if (!(await isProjectOwned(projectId, userId))) return null;
+
+  const [existing] = await db
+    .select()
+    .from(projectCaptionCues)
+    .where(and(eq(projectCaptionCues.id, cueId), eq(projectCaptionCues.project_id, projectId)));
+  if (!existing) return null;
+
+  let cueRow: ProjectCaptionCue = existing;
+  const setValues: Record<string, unknown> = {};
+  if (updates.startSeconds !== undefined) setValues.start_seconds = updates.startSeconds;
+  if (updates.endSeconds !== undefined) setValues.end_seconds = updates.endSeconds;
+  if (Object.keys(setValues).length > 0) {
+    const [updated] = await db
+      .update(projectCaptionCues)
+      .set(setValues)
+      .where(eq(projectCaptionCues.id, cueId))
+      .returning();
+    if (updated) cueRow = updated;
+  }
+
+  let words: ProjectCaptionWord[];
+  if (updates.words !== undefined) {
+    await db.delete(projectCaptionWords).where(eq(projectCaptionWords.cue_id, cueId));
+    words =
+      updates.words.length > 0
+        ? await db
+            .insert(projectCaptionWords)
+            .values(
+              updates.words.map((w, i) => ({
+                cue_id: cueId,
+                text: w.text,
+                start_seconds: w.startSeconds,
+                end_seconds: w.endSeconds,
+                sort_order: i,
+              })),
+            )
+            .returning()
+        : [];
+  } else {
+    words = await db
+      .select()
+      .from(projectCaptionWords)
+      .where(eq(projectCaptionWords.cue_id, cueId))
+      .orderBy(projectCaptionWords.sort_order);
+  }
+
+  return { ...cueRow, words };
+}
+
+export async function deleteCaptionCue(projectId: string, userId: string, cueId: string): Promise<boolean> {
+  if (!(await isProjectOwned(projectId, userId))) return false;
+
+  const [existing] = await db
+    .select({ id: projectCaptionCues.id })
+    .from(projectCaptionCues)
+    .where(and(eq(projectCaptionCues.id, cueId), eq(projectCaptionCues.project_id, projectId)));
+  if (!existing) return false;
+
+  await db.delete(projectCaptionWords).where(eq(projectCaptionWords.cue_id, cueId));
+  await db.delete(projectCaptionCues).where(eq(projectCaptionCues.id, cueId));
+  return true;
+}
+
+// Bulk clear (D-13) — one call wipes every caption cue + word for the project, not per-line.
+export async function deleteAllCaptions(projectId: string, userId: string): Promise<boolean> {
+  if (!(await isProjectOwned(projectId, userId))) return false;
+
+  const cueRows = await db
+    .select({ id: projectCaptionCues.id })
+    .from(projectCaptionCues)
+    .where(eq(projectCaptionCues.project_id, projectId));
+  const cueIds = cueRows.map((c) => c.id);
+
+  if (cueIds.length > 0) {
+    await db.delete(projectCaptionWords).where(inArray(projectCaptionWords.cue_id, cueIds));
+  }
+  await db.delete(projectCaptionCues).where(eq(projectCaptionCues.project_id, projectId));
   return true;
 }
 
