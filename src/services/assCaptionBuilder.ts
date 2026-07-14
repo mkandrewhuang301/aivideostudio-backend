@@ -143,7 +143,16 @@ export function buildAssFile(cues: CaptionCue[], style: CaptionStyle, canvas: Ca
   const styleLines = [
     '[V4+ Styles]',
     'Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding',
-    `Style: Caption,Inter-Bold,${style.fontSize},${primaryColour},${secondaryColour},${outlineColour},${backColour},0,0,0,0,100,100,0,0,3,0,0,${alignment},10,10,10,1`,
+    // Fontname MUST be the font's actual name-table Family name ("Inter", nameID 1) — NOT the
+    // PostScript/file-stem name "Inter-Bold" (nameID 6). Verified live against the deployed
+    // Railway container (13-02 checkpoint smoke test): libass's `fontsdir=` resolves a Style's
+    // Fontname by matching the family/full name records inside the scanned TTFs, not the
+    // filename. "Inter-Bold" matches neither "Inter" (family) nor "Inter Bold" (full name) and
+    // silently falls back to an unrelated system substitute font; "Inter" resolves correctly to
+    // our bundled assets/fonts/Inter-Bold.ttf (confirmed: `fontselect: (Inter, 400, 0) ->
+    // Inter-Bold, 0, Inter-Bold`). Bold weight (400 base + Bold=0 below is the ASS bold-toggle,
+    // unrelated to font selection) comes from this being the only style in the bundled font file.
+    `Style: Caption,Inter,${style.fontSize},${primaryColour},${secondaryColour},${outlineColour},${backColour},0,0,0,0,100,100,0,0,3,0,0,${alignment},10,10,10,1`,
     '',
   ];
 
