@@ -395,6 +395,505 @@ describe('DELETE /api/projects/:id/clips/:clipId', () => {
   });
 });
 
+// ─── POST /api/projects/:id/text ────────────────────────────────────────────────
+
+describe('POST /api/projects/:id/text', () => {
+  it('rejects an out-of-range x_norm (1.5) with 400 and never touches the db (T-13-44)', async () => {
+    const res = await request(app)
+      .post('/api/projects/proj-1/text')
+      .send({ text: 'Hi', x_norm: 1.5, y_norm: 0.5, start_seconds: 0, end_seconds: 2 });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/x_norm\/y_norm must be between 0 and 1/);
+    expect(dbMock.select).not.toHaveBeenCalled();
+    expect(dbMock.insert).not.toHaveBeenCalled();
+  });
+
+  it('rejects an out-of-range width_norm (5) with 400 and never touches the db', async () => {
+    const res = await request(app)
+      .post('/api/projects/proj-1/text')
+      .send({ text: 'Hi', x_norm: 0.5, y_norm: 0.5, width_norm: 5, start_seconds: 0, end_seconds: 2 });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/width_norm must be between 0.5 and 3/);
+    expect(dbMock.insert).not.toHaveBeenCalled();
+  });
+
+  it('rejects invalid start_seconds/end_seconds with 400', async () => {
+    const res = await request(app)
+      .post('/api/projects/proj-1/text')
+      .send({ text: 'Hi', x_norm: 0.5, y_norm: 0.5, start_seconds: 5, end_seconds: 2 });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Invalid start_seconds\/end_seconds/);
+  });
+
+  it('accepts boundary values (x_norm 0/1, width_norm 0.5/3) with 201', async () => {
+    const boundaryCases = [
+      { x_norm: 0, y_norm: 0.5 },
+      { x_norm: 1, y_norm: 0.5 },
+      { x_norm: 0.5, y_norm: 0.5, width_norm: 0.5 },
+      { x_norm: 0.5, y_norm: 0.5, width_norm: 3 },
+    ];
+    for (let i = 0; i < boundaryCases.length; i++) {
+      dbMock.select
+        .mockReturnValueOnce(makeChain([{ id: 'proj-1' }])) // route ownership check
+        .mockReturnValueOnce(makeChain([{ count: 0 }])) // cap check
+        .mockReturnValueOnce(makeChain([{ id: 'proj-1' }])); // addTextOverlay's internal ownership check
+      dbMock.insert.mockReturnValueOnce(
+        makeChain([
+          {
+            id: `text-${i}`,
+            project_id: 'proj-1',
+            text: 'Hi',
+            x_norm: 0,
+            y_norm: 0,
+            width_norm: null,
+            start_seconds: 0,
+            end_seconds: 2,
+            created_at: NOW,
+          },
+        ]),
+      );
+
+      const res = await request(app)
+        .post('/api/projects/proj-1/text')
+        .send({ text: 'Hi', start_seconds: 0, end_seconds: 2, ...boundaryCases[i] });
+
+      expect(res.status).toBe(201);
+    }
+  });
+
+  it('happy path: 201 with the created text overlay', async () => {
+    dbMock.select
+      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }]))
+      .mockReturnValueOnce(makeChain([{ count: 0 }]))
+      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }]));
+    dbMock.insert.mockReturnValueOnce(
+      makeChain([
+        {
+          id: 'text-1',
+          project_id: 'proj-1',
+          text: 'Hello',
+          x_norm: 0.5,
+          y_norm: 0.5,
+          width_norm: 1,
+          start_seconds: 0,
+          end_seconds: 3,
+          created_at: NOW,
+        },
+      ]),
+    );
+
+    const res = await request(app)
+      .post('/api/projects/proj-1/text')
+      .send({ text: 'Hello', x_norm: 0.5, y_norm: 0.5, width_norm: 1, start_seconds: 0, end_seconds: 3 });
+
+    expect(res.status).toBe(201);
+    expect(res.body.text_overlay.id).toBe('text-1');
+  });
+
+  it('rejects with 400 when the project already holds the maximum text overlay count', async () => {
+    dbMock.select
+      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }]))
+      .mockReturnValueOnce(makeChain([{ count: 30 }]));
+
+    const res = await request(app)
+      .post('/api/projects/proj-1/text')
+      .send({ text: 'Hi', x_norm: 0.5, y_norm: 0.5, start_seconds: 0, end_seconds: 2 });
+
+    expect(res.status).toBe(400);
+    expect(dbMock.insert).not.toHaveBeenCalled();
+  });
+
+  it('returns 404 when the project is not owned by the requester (IDOR)', async () => {
+    dbMock.select.mockReturnValueOnce(makeChain([])); // ownership check empty
+
+    const res = await request(app)
+      .post('/api/projects/not-mine/text')
+      .send({ text: 'Hi', x_norm: 0.5, y_norm: 0.5, start_seconds: 0, end_seconds: 2 });
+
+    expect(res.status).toBe(404);
+  });
+});
+
+// ─── PATCH /api/projects/:id/text/:textId ──────────────────────────────────────
+
+describe('PATCH /api/projects/:id/text/:textId', () => {
+  it('updates a text overlay and returns 200', async () => {
+    dbMock.select.mockReturnValueOnce(makeChain([{ id: 'proj-1' }])); // isProjectOwned
+    dbMock.update.mockReturnValueOnce(
+      makeChain([{ id: 'text-1', project_id: 'proj-1', text: 'Edited', x_norm: 0.5, y_norm: 0.5 }]),
+    );
+
+    const res = await request(app).patch('/api/projects/proj-1/text/text-1').send({ text: 'Edited' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.text_overlay.text).toBe('Edited');
+  });
+
+  it('rejects an out-of-range x_norm with 400 and never touches the db', async () => {
+    const res = await request(app).patch('/api/projects/proj-1/text/text-1').send({ x_norm: -0.1 });
+
+    expect(res.status).toBe(400);
+    expect(dbMock.select).not.toHaveBeenCalled();
+    expect(dbMock.update).not.toHaveBeenCalled();
+  });
+
+  it('rejects an out-of-range width_norm with 400', async () => {
+    const res = await request(app).patch('/api/projects/proj-1/text/text-1').send({ width_norm: 0.1 });
+
+    expect(res.status).toBe(400);
+    expect(dbMock.update).not.toHaveBeenCalled();
+  });
+
+  it('returns 404 for a mutation on a project owned by another user (IDOR)', async () => {
+    dbMock.select.mockReturnValueOnce(makeChain([])); // isProjectOwned returns false
+
+    const res = await request(app).patch('/api/projects/not-mine/text/text-1').send({ text: 'Hijacked' });
+
+    expect(res.status).toBe(404);
+  });
+});
+
+// ─── DELETE /api/projects/:id/text/:textId ─────────────────────────────────────
+
+describe('DELETE /api/projects/:id/text/:textId', () => {
+  it('returns 204 on success', async () => {
+    dbMock.select.mockReturnValueOnce(makeChain([{ id: 'proj-1' }])); // isProjectOwned
+    dbMock.delete.mockReturnValueOnce(makeChain([{ id: 'text-1' }]));
+
+    const res = await request(app).delete('/api/projects/proj-1/text/text-1');
+
+    expect(res.status).toBe(204);
+  });
+
+  it('returns 404 when not owned', async () => {
+    dbMock.select.mockReturnValueOnce(makeChain([]));
+
+    const res = await request(app).delete('/api/projects/not-mine/text/text-1');
+
+    expect(res.status).toBe(404);
+  });
+});
+
+// ─── POST /api/projects/:id/audio ──────────────────────────────────────────────
+
+describe('POST /api/projects/:id/audio', () => {
+  it('upload path: writes to R2 via PutObjectCommand and inserts an audio clip row', async () => {
+    dbMock.select
+      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }])) // owned
+      .mockReturnValueOnce(makeChain([{ count: 0 }])) // cap check
+      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }])); // addAudioClip's ownership check
+    dbMock.execute.mockResolvedValueOnce({ rows: [{ next_order: 0 }] });
+    dbMock.insert.mockReturnValueOnce(
+      makeChain([
+        {
+          id: 'audio-1',
+          project_id: 'proj-1',
+          r2_key: 'projects/proj-1/audio/new.mp3',
+          source_type: 'upload',
+          start_offset_seconds: 0,
+          trim_start_seconds: 0,
+          trim_end_seconds: null,
+          sort_order: 0,
+          created_at: NOW,
+        },
+      ]),
+    );
+
+    const res = await request(app)
+      .post('/api/projects/proj-1/audio')
+      .attach('file', Buffer.from('fake-mp3'), { filename: 'a.mp3', contentType: 'audio/mpeg' });
+
+    expect(res.status).toBe(201);
+    const putCall = r2Mock.send.mock.calls.find((c) => c[0] instanceof PutObjectCommand);
+    expect(putCall).toBeDefined();
+    expect(putCall![0].input.Key).toMatch(/^projects\/proj-1\/audio\//);
+  });
+
+  it('preset-music path: copies the preset track via CopyObjectCommand', async () => {
+    dbMock.select
+      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }]))
+      .mockReturnValueOnce(makeChain([{ count: 0 }]))
+      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }]));
+    dbMock.execute.mockResolvedValueOnce({ rows: [{ next_order: 0 }] });
+    dbMock.insert.mockReturnValueOnce(
+      makeChain([
+        {
+          id: 'audio-2',
+          project_id: 'proj-1',
+          r2_key: 'projects/proj-1/audio/new.m4a',
+          source_type: 'preset',
+          start_offset_seconds: 5,
+          trim_start_seconds: 0,
+          trim_end_seconds: null,
+          sort_order: 0,
+          created_at: NOW,
+        },
+      ]),
+    );
+
+    const res = await request(app)
+      .post('/api/projects/proj-1/audio')
+      .send({ source_type: 'preset', preset_music_id: 'carefree', start_offset_seconds: 5 });
+
+    expect(res.status).toBe(201);
+    const copyCall = r2Mock.send.mock.calls.find((c) => c[0] instanceof CopyObjectCommand);
+    expect(copyCall).toBeDefined();
+    expect(copyCall![0].input.CopySource).toBe('test-bucket/preset-music/carefree.m4a');
+    expect(copyCall![0].input.Key).toMatch(/^projects\/proj-1\/audio\/.*\.m4a$/);
+  });
+
+  it('rejects an unknown preset_music_id with 400', async () => {
+    dbMock.select
+      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }]))
+      .mockReturnValueOnce(makeChain([{ count: 0 }]));
+
+    const res = await request(app)
+      .post('/api/projects/proj-1/audio')
+      .send({ source_type: 'preset', preset_music_id: 'nonexistent-track' });
+
+    expect(res.status).toBe(400);
+    const copyCalls = r2Mock.send.mock.calls.filter((c) => c[0] instanceof CopyObjectCommand);
+    expect(copyCalls).toHaveLength(0);
+  });
+
+  it('rejects with 400 when the project already holds the maximum audio clip count', async () => {
+    dbMock.select
+      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }]))
+      .mockReturnValueOnce(makeChain([{ count: 10 }]));
+
+    const res = await request(app)
+      .post('/api/projects/proj-1/audio')
+      .send({ source_type: 'preset', preset_music_id: 'carefree' });
+
+    expect(res.status).toBe(400);
+  });
+
+  it('returns 404 when the project is not owned by the requester (IDOR)', async () => {
+    dbMock.select.mockReturnValueOnce(makeChain([]));
+
+    const res = await request(app)
+      .post('/api/projects/not-mine/audio')
+      .send({ source_type: 'preset', preset_music_id: 'carefree' });
+
+    expect(res.status).toBe(404);
+  });
+});
+
+// ─── PATCH /api/projects/:id/audio/:audioId ────────────────────────────────────
+
+describe('PATCH /api/projects/:id/audio/:audioId', () => {
+  it('updates an audio clip and returns 200', async () => {
+    dbMock.select.mockReturnValueOnce(makeChain([{ id: 'proj-1' }])); // isProjectOwned
+    dbMock.update.mockReturnValueOnce(
+      makeChain([{ id: 'audio-1', project_id: 'proj-1', start_offset_seconds: 3, trim_start_seconds: 1 }]),
+    );
+
+    const res = await request(app)
+      .patch('/api/projects/proj-1/audio/audio-1')
+      .send({ start_offset_seconds: 3, trim_start_seconds: 1 });
+
+    expect(res.status).toBe(200);
+    expect(res.body.audio_clip.start_offset_seconds).toBe(3);
+  });
+
+  it('returns 404 when the project is not owned by the requester (IDOR)', async () => {
+    dbMock.select.mockReturnValueOnce(makeChain([]));
+
+    const res = await request(app)
+      .patch('/api/projects/not-mine/audio/audio-1')
+      .send({ start_offset_seconds: 3 });
+
+    expect(res.status).toBe(404);
+  });
+});
+
+// ─── DELETE /api/projects/:id/audio/:audioId ───────────────────────────────────
+
+describe('DELETE /api/projects/:id/audio/:audioId', () => {
+  it('returns 204 and deletes the R2 object', async () => {
+    dbMock.select
+      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }])) // isProjectOwned
+      .mockReturnValueOnce(makeChain([{ r2_key: 'projects/proj-1/audio/a1.mp3' }])); // r2_key lookup
+    dbMock.delete.mockReturnValueOnce(makeChain(undefined));
+
+    const res = await request(app).delete('/api/projects/proj-1/audio/audio-1');
+
+    expect(res.status).toBe(204);
+    const deleteCall = r2Mock.send.mock.calls.find((c) => c[0] instanceof DeleteObjectCommand);
+    expect(deleteCall).toBeDefined();
+    expect(deleteCall![0].input.Key).toBe('projects/proj-1/audio/a1.mp3');
+  });
+
+  it('returns 404 when the project is not owned by the requester (IDOR)', async () => {
+    dbMock.select.mockReturnValueOnce(makeChain([]));
+
+    const res = await request(app).delete('/api/projects/not-mine/audio/audio-1');
+
+    expect(res.status).toBe(404);
+  });
+});
+
+// ─── POST /api/projects/:id/captions ───────────────────────────────────────────
+
+describe('POST /api/projects/:id/captions', () => {
+  it('happy path: creates a cue with its words and returns 201', async () => {
+    dbMock.select
+      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }])) // owned
+      .mockReturnValueOnce(makeChain([{ count: 0 }])) // cap check
+      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }])); // addCaptionCue's ownership check
+    dbMock.execute.mockResolvedValueOnce({ rows: [{ next_order: 0 }] });
+    dbMock.insert
+      .mockReturnValueOnce(
+        makeChain([{ id: 'cue-1', project_id: 'proj-1', sort_order: 0, start_seconds: 0, end_seconds: 1.2, created_at: NOW }]),
+      ) // cue insert
+      .mockReturnValueOnce(
+        makeChain([
+          { id: 'word-1', cue_id: 'cue-1', text: 'hi', start_seconds: 0, end_seconds: 0.6, sort_order: 0 },
+          { id: 'word-2', cue_id: 'cue-1', text: 'there', start_seconds: 0.6, end_seconds: 1.2, sort_order: 1 },
+        ]),
+      ); // words insert
+
+    const res = await request(app)
+      .post('/api/projects/proj-1/captions')
+      .send({
+        start_seconds: 0,
+        end_seconds: 1.2,
+        words: [
+          { text: 'hi', start_seconds: 0, end_seconds: 0.6 },
+          { text: 'there', start_seconds: 0.6, end_seconds: 1.2 },
+        ],
+      });
+
+    expect(res.status).toBe(201);
+    expect(res.body.caption_cue.id).toBe('cue-1');
+    expect(res.body.caption_cue.words).toHaveLength(2);
+  });
+
+  it('rejects invalid start_seconds/end_seconds with 400', async () => {
+    const res = await request(app).post('/api/projects/proj-1/captions').send({ start_seconds: 5, end_seconds: 1 });
+
+    expect(res.status).toBe(400);
+    expect(dbMock.select).not.toHaveBeenCalled();
+  });
+
+  it('rejects a malformed word entry with 400', async () => {
+    const res = await request(app)
+      .post('/api/projects/proj-1/captions')
+      .send({ start_seconds: 0, end_seconds: 1, words: [{ text: 'hi', start_seconds: 1, end_seconds: 0.5 }] });
+
+    expect(res.status).toBe(400);
+  });
+
+  it('returns 404 when the project is not owned by the requester (IDOR)', async () => {
+    dbMock.select.mockReturnValueOnce(makeChain([]));
+
+    const res = await request(app).post('/api/projects/not-mine/captions').send({ start_seconds: 0, end_seconds: 1 });
+
+    expect(res.status).toBe(404);
+  });
+});
+
+// ─── PATCH /api/projects/:id/captions/:cueId ───────────────────────────────────
+
+describe('PATCH /api/projects/:id/captions/:cueId', () => {
+  it('retimes a cue and replaces its word list, returns 200', async () => {
+    dbMock.select
+      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }])) // isProjectOwned
+      .mockReturnValueOnce(
+        makeChain([{ id: 'cue-1', project_id: 'proj-1', sort_order: 0, start_seconds: 0, end_seconds: 1.2, created_at: NOW }]),
+      ); // existing cue lookup
+    dbMock.update.mockReturnValueOnce(
+      makeChain([{ id: 'cue-1', project_id: 'proj-1', sort_order: 0, start_seconds: 0.5, end_seconds: 2, created_at: NOW }]),
+    );
+    dbMock.delete.mockReturnValueOnce(makeChain(undefined)); // delete old words
+    dbMock.insert.mockReturnValueOnce(
+      makeChain([{ id: 'word-3', cue_id: 'cue-1', text: 'new', start_seconds: 0.5, end_seconds: 2, sort_order: 0 }]),
+    ); // new words
+
+    const res = await request(app)
+      .patch('/api/projects/proj-1/captions/cue-1')
+      .send({ start_seconds: 0.5, end_seconds: 2, words: [{ text: 'new', start_seconds: 0.5, end_seconds: 2 }] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.caption_cue.start_seconds).toBe(0.5);
+    expect(res.body.caption_cue.words).toEqual([
+      expect.objectContaining({ text: 'new' }),
+    ]);
+  });
+
+  it('returns 404 when the cue does not exist', async () => {
+    dbMock.select
+      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }])) // isProjectOwned
+      .mockReturnValueOnce(makeChain([])); // existing cue lookup empty
+
+    const res = await request(app).patch('/api/projects/proj-1/captions/nope').send({ start_seconds: 0, end_seconds: 1 });
+
+    expect(res.status).toBe(404);
+  });
+
+  it('returns 404 when the project is not owned by the requester (IDOR)', async () => {
+    dbMock.select.mockReturnValueOnce(makeChain([]));
+
+    const res = await request(app).patch('/api/projects/not-mine/captions/cue-1').send({ start_seconds: 0, end_seconds: 1 });
+
+    expect(res.status).toBe(404);
+  });
+});
+
+// ─── DELETE /api/projects/:id/captions/:cueId (single) ─────────────────────────
+
+describe('DELETE /api/projects/:id/captions/:cueId', () => {
+  it('returns 204 on success', async () => {
+    dbMock.select
+      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }])) // isProjectOwned
+      .mockReturnValueOnce(makeChain([{ id: 'cue-1' }])); // existing cue lookup
+    dbMock.delete.mockReturnValue(makeChain(undefined));
+
+    const res = await request(app).delete('/api/projects/proj-1/captions/cue-1');
+
+    expect(res.status).toBe(204);
+  });
+
+  it('returns 404 when not found', async () => {
+    dbMock.select
+      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }]))
+      .mockReturnValueOnce(makeChain([]));
+
+    const res = await request(app).delete('/api/projects/proj-1/captions/nope');
+
+    expect(res.status).toBe(404);
+  });
+});
+
+// ─── DELETE /api/projects/:id/captions (bulk — D-13) ───────────────────────────
+
+describe('DELETE /api/projects/:id/captions (bulk Delete All Captions)', () => {
+  it('clears ALL caption cues + words for the project in one call, not per-line (D-13)', async () => {
+    dbMock.select
+      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }])) // isProjectOwned
+      .mockReturnValueOnce(makeChain([{ id: 'cue-1' }, { id: 'cue-2' }, { id: 'cue-3' }])); // all cue ids
+    dbMock.delete.mockReturnValue(makeChain(undefined));
+
+    const res = await request(app).delete('/api/projects/proj-1/captions');
+
+    expect(res.status).toBe(204);
+    // exactly 2 delete calls total regardless of cue count (bulk words delete + bulk cues
+    // delete) — proves this is a single bulk operation, never a per-cue loop
+    expect(dbMock.delete).toHaveBeenCalledTimes(2);
+  });
+
+  it('returns 404 when the project is not owned by the requester (IDOR)', async () => {
+    dbMock.select.mockReturnValueOnce(makeChain([]));
+
+    const res = await request(app).delete('/api/projects/not-mine/captions');
+
+    expect(res.status).toBe(404);
+  });
+});
+
 // ─── smartUnpackOnImport (D-15/D-16) — direct service-level unit tests ─────────
 
 describe('smartUnpackOnImport', () => {
