@@ -23,6 +23,7 @@ import { getUploadPresignedUrl } from '../services/archivalService';
 import { PRESET_MUSIC } from '../config/presetMusic';
 import { ffmpegQueue } from '../queue/ffmpegWorker';
 import { createGeneration } from '../services/generationService';
+import { transcribeToWordCues, TranscriptionError } from '../services/captionTranscriptionService';
 import {
   createProject,
   listProjects,
@@ -1022,6 +1023,66 @@ projectsRouter.delete('/:id/captions/:cueId', async (req: Request, res: Response
   } catch (err) {
     console.error('[projects] Error deleting caption cue:', err);
     res.status(500).json({ error: 'Failed to delete caption cue' });
+  }
+});
+
+// POST /api/projects/:id/clips/:clipId/captions/auto-generate — SC5 auto-captions: transcribes
+// the clip's audio (Whisper word-level) and persists each resulting cue via addCaptionCue. This
+// is the synchronous path behind the UI's "Auto-generate from this clip's audio" /
+// "Transcribing…" state (mirrors the Magic Editor synchronous OpenAI precedent, 09.2-08) — a
+// transcription failure surfaces as a clean 502, never a silent empty result.
+projectsRouter.post('/:id/clips/:clipId/captions/auto-generate', async (req: Request, res: Response) => {
+  if (!req.user?.dbUserId) {
+    res.status(401).json({ error: 'Not authenticated' });
+    return;
+  }
+  const projectId = req.params.id as string;
+  const clipId = req.params.clipId as string;
+  try {
+    const [ownedProject] = await db
+      .select({ id: projects.id })
+      .from(projects)
+      .where(and(eq(projects.id, projectId), eq(projects.user_id, req.user.dbUserId)));
+    if (!ownedProject) {
+      res.status(404).json({ error: 'Project not found' });
+      return;
+    }
+
+    const [clip] = await db
+      .select({ r2_key: projectClips.r2_key })
+      .from(projectClips)
+      .where(and(eq(projectClips.id, clipId), eq(projectClips.project_id, projectId)));
+    if (!clip) {
+      res.status(404).json({ error: 'Clip not found' });
+      return;
+    }
+
+    let cueDrafts;
+    try {
+      cueDrafts = await transcribeToWordCues(clip.r2_key);
+    } catch (transcribeErr) {
+      if (transcribeErr instanceof TranscriptionError) {
+        console.error('[projects] Transcription failed:', transcribeErr);
+        res.status(502).json({ error: 'Transcription failed' });
+        return;
+      }
+      throw transcribeErr;
+    }
+
+    const cues = [];
+    for (const draft of cueDrafts) {
+      const cue = await addCaptionCue(projectId, req.user.dbUserId, {
+        startSeconds: draft.startSeconds,
+        endSeconds: draft.endSeconds,
+        words: draft.words.map((w) => ({ text: w.text, startSeconds: w.startSeconds, endSeconds: w.endSeconds })),
+      });
+      if (cue) cues.push(cue);
+    }
+
+    res.status(200).json({ cues });
+  } catch (err) {
+    console.error('[projects] Error auto-generating captions:', err);
+    res.status(500).json({ error: 'Failed to auto-generate captions' });
   }
 });
 

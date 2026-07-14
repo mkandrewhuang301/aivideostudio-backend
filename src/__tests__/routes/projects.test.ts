@@ -33,11 +33,21 @@ jest.mock('../../services/generationService', () => ({
   createGeneration: (...args: unknown[]) => mockCreateGeneration(...args),
 }));
 
+const mockTranscribeToWordCues = jest.fn();
+jest.mock('../../services/captionTranscriptionService', () => {
+  class TranscriptionError extends Error {}
+  return {
+    transcribeToWordCues: (...args: unknown[]) => mockTranscribeToWordCues(...args),
+    TranscriptionError,
+  };
+});
+
 import express, { NextFunction, Request, Response } from 'express';
 import request from 'supertest';
 import { CopyObjectCommand, PutObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
 import { projectsRouter } from '../../routes/projects';
 import { smartUnpackOnImport } from '../../services/projectService';
+import { TranscriptionError } from '../../services/captionTranscriptionService';
 import { r2 } from '../../storage/r2';
 import { db } from '../../db/client';
 
@@ -1017,6 +1027,84 @@ describe('DELETE /api/projects/:id/captions (bulk Delete All Captions)', () => {
     const res = await request(app).delete('/api/projects/not-mine/captions');
 
     expect(res.status).toBe(404);
+  });
+});
+
+// ─── POST /api/projects/:id/clips/:clipId/captions/auto-generate (SC5) ────────
+
+describe('POST /api/projects/:id/clips/:clipId/captions/auto-generate', () => {
+  it('returns 401 when unauthenticated', async () => {
+    const res = await request(unauthApp).post('/api/projects/proj-1/clips/clip-1/captions/auto-generate');
+    expect(res.status).toBe(401);
+  });
+
+  it('returns 404 when the project is not owned by the requester (IDOR)', async () => {
+    dbMock.select.mockReturnValueOnce(makeChain([])); // ownership lookup empty
+
+    const res = await request(app).post('/api/projects/not-mine/clips/clip-1/captions/auto-generate');
+
+    expect(res.status).toBe(404);
+    expect(mockTranscribeToWordCues).not.toHaveBeenCalled();
+  });
+
+  it('returns 404 when the clip does not exist on the project', async () => {
+    dbMock.select
+      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }])) // owned project
+      .mockReturnValueOnce(makeChain([])); // clip lookup empty
+
+    const res = await request(app).post('/api/projects/proj-1/clips/nope/captions/auto-generate');
+
+    expect(res.status).toBe(404);
+    expect(mockTranscribeToWordCues).not.toHaveBeenCalled();
+  });
+
+  it('happy path: transcribes the clip and persists each returned cue via addCaptionCue, 200', async () => {
+    dbMock.select
+      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }])) // owned project
+      .mockReturnValueOnce(makeChain([{ r2_key: 'projects/proj-1/clips/a.mp4' }])) // clip lookup
+      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }])); // addCaptionCue's internal isProjectOwned
+    mockTranscribeToWordCues.mockResolvedValueOnce([
+      {
+        startSeconds: 0,
+        endSeconds: 1.2,
+        words: [
+          { text: 'hi', startSeconds: 0, endSeconds: 0.6 },
+          { text: 'there', startSeconds: 0.6, endSeconds: 1.2 },
+        ],
+      },
+    ]);
+    dbMock.execute.mockResolvedValueOnce({ rows: [{ next_order: 0 }] });
+    dbMock.insert
+      .mockReturnValueOnce(
+        makeChain([{ id: 'cue-1', project_id: 'proj-1', sort_order: 0, start_seconds: 0, end_seconds: 1.2, created_at: NOW }]),
+      ) // cue insert
+      .mockReturnValueOnce(
+        makeChain([
+          { id: 'word-1', cue_id: 'cue-1', text: 'hi', start_seconds: 0, end_seconds: 0.6, sort_order: 0 },
+          { id: 'word-2', cue_id: 'cue-1', text: 'there', start_seconds: 0.6, end_seconds: 1.2, sort_order: 1 },
+        ]),
+      ); // words insert
+
+    const res = await request(app).post('/api/projects/proj-1/clips/clip-1/captions/auto-generate');
+
+    expect(res.status).toBe(200);
+    expect(mockTranscribeToWordCues).toHaveBeenCalledWith('projects/proj-1/clips/a.mp4');
+    expect(res.body.cues).toHaveLength(1);
+    expect(res.body.cues[0].id).toBe('cue-1');
+    expect(res.body.cues[0].words).toHaveLength(2);
+  });
+
+  it('returns 502 when transcription fails, and never calls addCaptionCue', async () => {
+    dbMock.select
+      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }])) // owned project
+      .mockReturnValueOnce(makeChain([{ r2_key: 'projects/proj-1/clips/a.mp4' }])); // clip lookup
+    mockTranscribeToWordCues.mockRejectedValueOnce(new TranscriptionError('OpenAI transcription failed (500): boom'));
+
+    const res = await request(app).post('/api/projects/proj-1/clips/clip-1/captions/auto-generate');
+
+    expect(res.status).toBe(502);
+    expect(res.body.error).toBe('Transcription failed');
+    expect(dbMock.insert).not.toHaveBeenCalled();
   });
 });
 
