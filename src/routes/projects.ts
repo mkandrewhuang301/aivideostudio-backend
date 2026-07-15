@@ -61,6 +61,7 @@ import {
   restoreClip,
   restoreAudioClip,
   setProjectCover,
+  setProjectCoverFromUpload,
 } from '../services/projectService';
 
 export const projectsRouter = Router();
@@ -103,6 +104,23 @@ const audioUpload = multer({
   limits: { fileSize: 50 * 1024 * 1024 }, // 50MB — audio clips are much smaller than video
   fileFilter: (_req, file, cb) => {
     cb(null, file.mimetype in ALLOWED_AUDIO_MIMES);
+  },
+});
+
+// Plan 13-24 K-B1: cover image upload (composited JPEG/PNG/etc from the cover editor).
+const ALLOWED_COVER_MIMES: Record<string, string> = {
+  'image/jpeg': 'jpg',
+  'image/png': 'png',
+  'image/webp': 'webp',
+  'image/heic': 'heic',
+  'image/heif': 'heic',
+};
+
+const coverUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB — still cover frames, not video
+  fileFilter: (_req, file, cb) => {
+    cb(null, file.mimetype in ALLOWED_COVER_MIMES);
   },
 });
 
@@ -279,14 +297,46 @@ projectsRouter.delete('/:id', async (req: Request, res: Response) => {
   }
 });
 
-// POST /api/projects/:id/cover — set a custom project cover from a scrubbed frame (Plan 13-21 B3).
-// Video clip → extractVideoFrame at at_seconds (clamped server-side into the clip's real
-// duration); image clip → CopyObject. Always returns a fresh presigned thumbnail_url.
-projectsRouter.post('/:id/cover', async (req: Request, res: Response) => {
+// POST /api/projects/:id/cover — set a custom project cover.
+// Plan 13-21 B3 JSON branch: {clip_id, at_seconds} → extract frame / CopyObject.
+// Plan 13-24 K-B1 multipart branch: file field → store under projects/{id}/cover/.
+// Both return a fresh presigned thumbnail_url.
+projectsRouter.post('/:id/cover', coverUpload.single('file'), async (req: Request, res: Response) => {
   if (!req.user?.dbUserId) {
     res.status(401).json({ error: 'Not authenticated' });
     return;
   }
+
+  // Multipart branch (K-B1): client-composited cover image.
+  if (req.file) {
+    try {
+      const ext = ALLOWED_COVER_MIMES[req.file.mimetype];
+      const result = await setProjectCoverFromUpload(
+        req.params.id as string,
+        req.user.dbUserId,
+        req.file.buffer,
+        req.file.mimetype,
+        ext,
+      );
+      if (!result) {
+        res.status(404).json({ error: 'Project not found' });
+        return;
+      }
+      res.status(200).json({ thumbnail_url: result.thumbnailUrl });
+    } catch (err) {
+      console.error('[projects] Error uploading project cover:', err);
+      res.status(500).json({ error: 'Failed to set project cover' });
+    }
+    return;
+  }
+
+  // Multipart request that arrived without an accepted file → bad/missing mime.
+  if (req.is('multipart/form-data')) {
+    res.status(400).json({ error: 'No file provided or unsupported file type' });
+    return;
+  }
+
+  // JSON branch (Plan 13-21 B3) — unchanged.
   const { clip_id, at_seconds } = req.body ?? {};
   if (typeof clip_id !== 'string' || clip_id.length === 0) {
     res.status(400).json({ error: 'clip_id is required' });

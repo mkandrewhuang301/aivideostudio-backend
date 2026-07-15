@@ -8,7 +8,7 @@
 // generated at query time via archivalService.getUploadPresignedUrl (1h TTL).
 
 import { randomUUID } from 'crypto';
-import { CopyObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
+import { CopyObjectCommand, DeleteObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 import { r2, R2_BUCKET } from '../storage/r2';
 import { db } from '../db/client';
 import {
@@ -426,6 +426,50 @@ export async function setProjectCover(
     const clipUrl = await getUploadPresignedUrl(clip.r2_key);
     newThumbnailKey = await extractVideoFrame(clipUrl, `project-cover-${randomUUID()}`, clampedSeconds);
   }
+
+  const oldThumbnailKey = projectRow.thumbnail_r2_key;
+  await db
+    .update(projects)
+    .set({ thumbnail_r2_key: newThumbnailKey, updated_at: new Date() })
+    .where(eq(projects.id, projectId));
+
+  if (oldThumbnailKey && oldThumbnailKey !== newThumbnailKey) {
+    try {
+      await r2.send(new DeleteObjectCommand({ Bucket: R2_BUCKET, Key: oldThumbnailKey }));
+    } catch (err) {
+      console.error('[projectService] Best-effort delete of old cover thumbnail failed:', err);
+    }
+  }
+
+  const thumbnailUrl = await getUploadPresignedUrl(newThumbnailKey);
+  return { thumbnailUrl };
+}
+
+// Plan 13-24 K-B1: accept a client-composited cover image (multipart upload). Stores under
+// projects/{id}/cover/ so cover art is independently owned from clip media. Same IDOR null→404
+// contract and best-effort old-thumbnail cleanup as setProjectCover.
+export async function setProjectCoverFromUpload(
+  projectId: string,
+  userId: string,
+  buffer: Buffer,
+  contentType: string,
+  ext: string,
+): Promise<{ thumbnailUrl: string } | null> {
+  const [projectRow] = await db
+    .select()
+    .from(projects)
+    .where(and(eq(projects.id, projectId), eq(projects.user_id, userId)));
+  if (!projectRow) return null;
+
+  const newThumbnailKey = `projects/${projectId}/cover/${randomUUID()}.${ext}`;
+  await r2.send(
+    new PutObjectCommand({
+      Bucket: R2_BUCKET,
+      Key: newThumbnailKey,
+      Body: buffer,
+      ContentType: contentType,
+    }),
+  );
 
   const oldThumbnailKey = projectRow.thumbnail_r2_key;
   await db

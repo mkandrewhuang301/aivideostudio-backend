@@ -553,6 +553,68 @@ describe('POST /api/projects/:id/cover', () => {
 
     expect(dbMock.select).not.toHaveBeenCalled();
   });
+
+  // Plan 13-24 K-B1 — multipart cover upload branch
+  it('K-B1 multipart: uploads image to projects/{id}/cover/, updates thumbnail_r2_key, returns presigned url', async () => {
+    dbMock.select.mockReturnValueOnce(
+      makeChain([baseProjectRow({ id: 'proj-1', thumbnail_r2_key: 'generations/old-cover.png' })]),
+    );
+    dbMock.update.mockReturnValueOnce(makeChain(undefined));
+
+    const res = await request(app)
+      .post('/api/projects/proj-1/cover')
+      .attach('file', Buffer.from('fake-cover-jpg'), { filename: 'cover.jpg', contentType: 'image/jpeg' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.thumbnail_url).toBe('https://r2.example.com/presigned-clip-url');
+    const putCall = r2Mock.send.mock.calls.find((c) => c[0] instanceof PutObjectCommand);
+    expect(putCall).toBeDefined();
+    expect(putCall![0].input.Key).toMatch(/^projects\/proj-1\/cover\/.+\.jpg$/);
+    expect(putCall![0].input.ContentType).toBe('image/jpeg');
+    const deleteCall = r2Mock.send.mock.calls.find(
+      (c) => c[0] instanceof DeleteObjectCommand && c[0].input.Key === 'generations/old-cover.png',
+    );
+    expect(deleteCall).toBeDefined();
+    expect(mockExtractVideoFrame).not.toHaveBeenCalled();
+  });
+
+  it('K-B1 multipart: returns 404 for a project owned by another user (IDOR)', async () => {
+    dbMock.select.mockReturnValueOnce(makeChain([]));
+
+    const res = await request(app)
+      .post('/api/projects/not-mine/cover')
+      .attach('file', Buffer.from('fake-jpg'), { filename: 'cover.jpg', contentType: 'image/jpeg' });
+
+    expect(res.status).toBe(404);
+    const putCalls = r2Mock.send.mock.calls.filter((c) => c[0] instanceof PutObjectCommand);
+    expect(putCalls).toHaveLength(0);
+  });
+
+  it('K-B1 multipart: rejects unsupported mime with 400', async () => {
+    const res = await request(app)
+      .post('/api/projects/proj-1/cover')
+      .attach('file', Buffer.from('fake-pdf'), { filename: 'cover.pdf', contentType: 'application/pdf' });
+
+    expect(res.status).toBe(400);
+    expect(dbMock.select).not.toHaveBeenCalled();
+  });
+
+  it('K-B1: JSON clip_id branch still works alongside the multipart middleware', async () => {
+    dbMock.select
+      .mockReturnValueOnce(makeChain([baseProjectRow({ id: 'proj-1', thumbnail_r2_key: null })]))
+      .mockReturnValueOnce(
+        makeChain([
+          { id: 'clip-1', project_id: 'proj-1', r2_key: 'projects/proj-1/clips/a.mp4', media_type: 'video', original_duration_seconds: 10, deleted_at: null },
+        ]),
+      );
+    dbMock.update.mockReturnValueOnce(makeChain(undefined));
+
+    const res = await request(app).post('/api/projects/proj-1/cover').send({ clip_id: 'clip-1', at_seconds: 2 });
+
+    expect(res.status).toBe(200);
+    expect(res.body.thumbnail_url).toBe('https://r2.example.com/presigned-clip-url');
+    expect(mockExtractVideoFrame).toHaveBeenCalled();
+  });
 });
 
 // ─── POST /api/projects/:id/clips ───────────────────────────────────────────────
