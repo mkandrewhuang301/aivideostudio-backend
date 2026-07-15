@@ -842,6 +842,144 @@ describe('PATCH /api/projects/:id/clips/:clipId', () => {
 
     expect(res.status).toBe(404);
   });
+
+  // Plan 13-25 L6: sort_order PATCH uses move-semantics resequence (dense 0..n-1).
+  function clipRowForResequence(id: string, sort_order: number) {
+    return {
+      id,
+      project_id: 'proj-1',
+      sort_order,
+      r2_key: `projects/proj-1/clips/${id}.mp4`,
+      media_type: 'video',
+      source_type: 'upload',
+      original_duration_seconds: 10,
+      trim_start_seconds: 0,
+      trim_end_seconds: null,
+      created_at: NOW,
+    };
+  }
+
+  function expectResequenceUpdates(
+    liveClips: Array<{ id: string; sort_order: number }>,
+    movedClipId: string,
+    requestedSortOrder: number,
+  ) {
+    const fromIndex = liveClips.findIndex((c) => c.id === movedClipId);
+    let toIndex = liveClips.findIndex((c) => c.sort_order === requestedSortOrder);
+    if (toIndex < 0) toIndex = liveClips.length;
+    const working = [...liveClips];
+    const [moved] = working.splice(fromIndex, 1);
+    const insertAt = Math.min(toIndex, working.length);
+    working.splice(insertAt, 0, moved);
+    return working.map((c, i) => ({ id: c.id, sort_order: i }));
+  }
+
+  function mockClipResequence(
+    liveClips: ReturnType<typeof clipRowForResequence>[],
+    movedClipId: string,
+    requestedSortOrder: number,
+  ) {
+    dbMock.select.mockReturnValueOnce(makeChain([{ id: 'proj-1' }])); // ownership
+    dbMock.select.mockReturnValueOnce(makeChain(liveClips)); // resequence select (non-deleted only)
+    const finalOrder = expectResequenceUpdates(liveClips, movedClipId, requestedSortOrder);
+    for (const { id, sort_order } of finalOrder) {
+      const row = liveClips.find((c) => c.id === id)!;
+      dbMock.update.mockReturnValueOnce(makeChain([{ ...row, sort_order }]));
+    }
+    return finalOrder;
+  }
+
+  it('L6: move first→last resequences all clips to dense 0..n-1', async () => {
+    const live = [
+      clipRowForResequence('clip-0', 0),
+      clipRowForResequence('clip-1', 1),
+      clipRowForResequence('clip-2', 2),
+    ];
+    const finalOrder = mockClipResequence(live, 'clip-0', 2);
+
+    const res = await request(app)
+      .patch('/api/projects/proj-1/clips/clip-0')
+      .send({ sort_order: 2 });
+
+    expect(res.status).toBe(200);
+    expect(res.body.clip.id).toBe('clip-0');
+    expect(res.body.clip.sort_order).toBe(2);
+    expect(finalOrder).toEqual([
+      { id: 'clip-1', sort_order: 0 },
+      { id: 'clip-2', sort_order: 1 },
+      { id: 'clip-0', sort_order: 2 },
+    ]);
+    expect(dbMock.update).toHaveBeenCalledTimes(3);
+  });
+
+  it('L6: move last→first resequences all clips to dense 0..n-1', async () => {
+    const live = [
+      clipRowForResequence('clip-0', 0),
+      clipRowForResequence('clip-1', 1),
+      clipRowForResequence('clip-2', 2),
+    ];
+    const finalOrder = mockClipResequence(live, 'clip-2', 0);
+
+    const res = await request(app)
+      .patch('/api/projects/proj-1/clips/clip-2')
+      .send({ sort_order: 0 });
+
+    expect(res.status).toBe(200);
+    expect(res.body.clip.sort_order).toBe(0);
+    expect(finalOrder).toEqual([
+      { id: 'clip-2', sort_order: 0 },
+      { id: 'clip-0', sort_order: 1 },
+      { id: 'clip-1', sort_order: 2 },
+    ]);
+  });
+
+  it('L6: move middle→middle resequences to dense order', async () => {
+    const live = [
+      clipRowForResequence('clip-0', 0),
+      clipRowForResequence('clip-1', 1),
+      clipRowForResequence('clip-2', 2),
+    ];
+    const finalOrder = mockClipResequence(live, 'clip-1', 2);
+
+    const res = await request(app)
+      .patch('/api/projects/proj-1/clips/clip-1')
+      .send({ sort_order: 2 });
+
+    expect(res.status).toBe(200);
+    expect(res.body.clip.sort_order).toBe(2);
+    expect(finalOrder).toEqual([
+      { id: 'clip-0', sort_order: 0 },
+      { id: 'clip-2', sort_order: 1 },
+      { id: 'clip-1', sort_order: 2 },
+    ]);
+  });
+
+  it('L6: single-clip sort_order is a no-op resequence', async () => {
+    const live = [clipRowForResequence('clip-only', 0)];
+    mockClipResequence(live, 'clip-only', 0);
+
+    const res = await request(app)
+      .patch('/api/projects/proj-1/clips/clip-only')
+      .send({ sort_order: 0 });
+
+    expect(res.status).toBe(200);
+    expect(res.body.clip.sort_order).toBe(0);
+    expect(dbMock.update).toHaveBeenCalledTimes(1);
+  });
+
+  it('L6: soft-deleted clips are excluded from resequence select', async () => {
+    // Only non-deleted rows returned by the resequence query — deleted clip keeps its old sort_order.
+    const live = [clipRowForResequence('clip-0', 0), clipRowForResequence('clip-1', 1)];
+    mockClipResequence(live, 'clip-0', 1);
+
+    const res = await request(app)
+      .patch('/api/projects/proj-1/clips/clip-0')
+      .send({ sort_order: 1 });
+
+    expect(res.status).toBe(200);
+    expect(dbMock.select).toHaveBeenCalledTimes(2);
+    expect(dbMock.update).toHaveBeenCalledTimes(2);
+  });
 });
 
 // ─── DELETE /api/projects/:id/clips/:clipId ────────────────────────────────────

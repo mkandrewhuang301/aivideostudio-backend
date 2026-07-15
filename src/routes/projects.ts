@@ -63,6 +63,7 @@ import {
   setProjectCover,
   setProjectCoverFromUpload,
 } from '../services/projectService';
+import { resequenceAudioClipSortOrder, resequenceClipSortOrder } from '../services/clipResequence';
 
 export const projectsRouter = Router();
 
@@ -500,12 +501,13 @@ projectsRouter.patch('/:id/clips/:clipId', async (req: Request, res: Response) =
     }
 
     const setValues: Record<string, unknown> = {};
+    let requestedSortOrder: number | undefined;
     if (sort_order !== undefined) {
       if (typeof sort_order !== 'number') {
         res.status(400).json({ error: 'sort_order must be a number' });
         return;
       }
-      setValues.sort_order = sort_order;
+      requestedSortOrder = sort_order;
     }
     if (trim_start_seconds !== undefined) {
       if (typeof trim_start_seconds !== 'number') {
@@ -521,8 +523,34 @@ projectsRouter.patch('/:id/clips/:clipId', async (req: Request, res: Response) =
       }
       setValues.trim_end_seconds = trim_end_seconds;
     }
-    if (Object.keys(setValues).length === 0) {
+    if (Object.keys(setValues).length === 0 && requestedSortOrder === undefined) {
       res.status(400).json({ error: 'No valid fields to update' });
+      return;
+    }
+
+    // Plan 13-25 L6: sort_order uses move-semantics resequence (dense 0..n-1), not a naive SET.
+    if (requestedSortOrder !== undefined) {
+      const resequenced = await resequenceClipSortOrder(projectId, clipId, requestedSortOrder);
+      if (!resequenced) {
+        res.status(404).json({ error: 'Clip not found' });
+        return;
+      }
+      if (Object.keys(setValues).length > 0) {
+        const [clip] = await db
+          .update(projectClips)
+          .set(setValues)
+          .where(
+            and(eq(projectClips.id, clipId), eq(projectClips.project_id, projectId), isNull(projectClips.deleted_at)),
+          )
+          .returning();
+        if (!clip) {
+          res.status(404).json({ error: 'Clip not found' });
+          return;
+        }
+        res.status(200).json({ clip });
+        return;
+      }
+      res.status(200).json({ clip: resequenced });
       return;
     }
 
@@ -1006,54 +1034,80 @@ projectsRouter.patch('/:id/audio/:audioId', async (req: Request, res: Response) 
     res.status(401).json({ error: 'Not authenticated' });
     return;
   }
+  const projectId = req.params.id as string;
+  const audioId = req.params.audioId as string;
   const { start_offset_seconds, trim_start_seconds, trim_end_seconds, sort_order } = req.body ?? {};
 
-  const updates: {
+  const trimUpdates: {
     startOffsetSeconds?: number;
     trimStartSeconds?: number;
     trimEndSeconds?: number;
-    sortOrder?: number;
   } = {};
+  let requestedSortOrder: number | undefined;
   if (start_offset_seconds !== undefined) {
     if (typeof start_offset_seconds !== 'number' || start_offset_seconds < 0) {
       res.status(400).json({ error: 'start_offset_seconds must be a non-negative number' });
       return;
     }
-    updates.startOffsetSeconds = start_offset_seconds;
+    trimUpdates.startOffsetSeconds = start_offset_seconds;
   }
   if (trim_start_seconds !== undefined) {
     if (typeof trim_start_seconds !== 'number' || trim_start_seconds < 0) {
       res.status(400).json({ error: 'trim_start_seconds must be a non-negative number' });
       return;
     }
-    updates.trimStartSeconds = trim_start_seconds;
+    trimUpdates.trimStartSeconds = trim_start_seconds;
   }
   if (trim_end_seconds !== undefined) {
     if (typeof trim_end_seconds !== 'number' || trim_end_seconds < 0) {
       res.status(400).json({ error: 'trim_end_seconds must be a non-negative number' });
       return;
     }
-    updates.trimEndSeconds = trim_end_seconds;
+    trimUpdates.trimEndSeconds = trim_end_seconds;
   }
   if (sort_order !== undefined) {
     if (typeof sort_order !== 'number') {
       res.status(400).json({ error: 'sort_order must be a number' });
       return;
     }
-    updates.sortOrder = sort_order;
+    requestedSortOrder = sort_order;
   }
-  if (Object.keys(updates).length === 0) {
+  if (Object.keys(trimUpdates).length === 0 && requestedSortOrder === undefined) {
     res.status(400).json({ error: 'No valid fields to update' });
     return;
   }
 
   try {
-    const audioClip = await updateAudioClip(
-      req.params.id as string,
-      req.user.dbUserId,
-      req.params.audioId as string,
-      updates,
-    );
+    // Plan 13-25 L6: sort_order uses move-semantics resequence (dense 0..n-1), not a naive SET.
+    if (requestedSortOrder !== undefined) {
+      const [ownedProject] = await db
+        .select({ id: projects.id })
+        .from(projects)
+        .where(and(eq(projects.id, projectId), eq(projects.user_id, req.user.dbUserId)));
+      if (!ownedProject) {
+        res.status(404).json({ error: 'Project not found' });
+        return;
+      }
+
+      const resequenced = await resequenceAudioClipSortOrder(projectId, audioId, requestedSortOrder);
+      if (!resequenced) {
+        res.status(404).json({ error: 'Audio clip not found' });
+        return;
+      }
+      if (Object.keys(trimUpdates).length > 0) {
+        const audioClip = await updateAudioClip(projectId, req.user.dbUserId, audioId, trimUpdates);
+        if (!audioClip) {
+          res.status(404).json({ error: 'Audio clip not found' });
+          return;
+        }
+        res.status(200).json({ audio_clip: audioClip });
+        return;
+      }
+      res.status(200).json({ audio_clip: resequenced });
+      return;
+    }
+
+    const audioClip = await updateAudioClip(projectId, req.user.dbUserId, audioId, trimUpdates);
     if (!audioClip) {
       res.status(404).json({ error: 'Audio clip not found' });
       return;
