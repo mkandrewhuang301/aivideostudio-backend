@@ -14,6 +14,7 @@ import { refundCredits } from '../services/creditService';
 import { archiveToR2 } from '../services/archivalService';
 import { scanForCsam } from '../services/hiveService';
 import { ReplicateProvider } from '../services/providers/ReplicateProvider';
+import { FalProvider } from '../services/providers/FalProvider';
 import { config } from '../config';
 
 const QUEUE_NAME = 'generation-reaper';
@@ -26,13 +27,23 @@ const connectionOptions = {
 
 export const reaperQueue = new Queue(QUEUE_NAME, { connection: connectionOptions });
 
-const provider = new ReplicateProvider();
+const replicateProvider = new ReplicateProvider();
+const falProvider = new FalProvider();
+
+// 2026-07-15: Kling v3 Motion Control's stalled-job reconciliation must call FalProvider, not
+// ReplicateProvider — its provider_prediction_id is a Fal composite id (endpointId::requestId),
+// which ReplicateProvider.getStatus() would send straight to Replicate's API and 404 on.
+// Every other model still reconciles via Replicate, unchanged.
+function providerFor(model: string) {
+  return model === 'kwaivgi/kling-v3-motion-control' ? falProvider : replicateProvider;
+}
 
 interface ReapableRow {
   id: string;
   user_id: string;
   cost_credits: number;
   replicate_prediction_id: string | null;
+  model: string;
 }
 
 export async function reapOrphanedJobs(): Promise<void> {
@@ -53,7 +64,7 @@ export async function reapOrphanedJobs(): Promise<void> {
 
 export async function reapStalledJobs(): Promise<void> {
   const result = await db.execute(sql`
-    SELECT id, user_id, cost_credits, replicate_prediction_id
+    SELECT id, user_id, cost_credits, replicate_prediction_id, model
     FROM generations
     WHERE status = 'processing' AND created_at < now() - interval '30 minutes'
   `);
@@ -66,7 +77,7 @@ export async function reapStalledJobs(): Promise<void> {
     }
 
     try {
-      const prediction = await provider.getStatus(row.replicate_prediction_id);
+      const prediction = await providerFor(row.model).getStatus(row.replicate_prediction_id);
 
       if (prediction.status === 'succeeded' && prediction.outputUrl) {
         const r2Key = await archiveToR2(prediction.outputUrl, row.id);

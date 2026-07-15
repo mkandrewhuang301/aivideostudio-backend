@@ -188,9 +188,9 @@ describe('cents-rule cost functions (verified, not re-broken)', () => {
     expect(SUPPORTED_CHARACTER_REPLACE_MODELS).toContain('wan-video/wan-2.2-animate-replace');
   });
 
-  it('computeCharacterReplaceProCost(5s) == Kling std (7/sec, NOT pro — the pipeline itself is "Pro") + Wan 2.7 flat (3) == 38 credits', () => {
+  it('computeCharacterReplaceProCost(5s) == Kling std via Fal (12.6c/sec, NOT pro — the pipeline itself is "Pro") + Wan 2.7 flat (3) == 66 credits', () => {
     expect(computeCharacterReplaceProCost(5)).toBe(computeKlingMotionControlCost(5, 'std') + 3);
-    expect(computeCharacterReplaceProCost(5)).toBe(38);
+    expect(computeCharacterReplaceProCost(5)).toBe(66);
   });
 
   it('computeCharacterReplaceProCost always costs more than Standard tier at the same duration', () => {

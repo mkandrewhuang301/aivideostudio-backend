@@ -1327,13 +1327,18 @@ describe('POST /api/generations — presets', () => {
 
       const res = await request(app).post('/api/generations').send({
         preset_id: 'hairstyle',
-        style_id: 'perm',
+        style_id: 'bob',
         preset_input_upload_ids: ['upload-photo'],
       });
 
+      // Every hairstyle style now ships a thumb_url (style-reference image) — the sparse-slot
+      // validation itself is what this test guards (a single required-slot preset with no
+      // optional slots declared must dispatch normally), not whether an extra reference image
+      // is attached; that part is asserted by the earlier "expands template" test above.
       expect(res.status).toBe(200);
       expect(dispatchMock.mock.calls[0][0].referenceImages).toEqual([
         'https://r2.example.com/signed/uploads/test-user-id/photo.jpg',
+        'https://pub-cec5aa79de50452fa7eac827a03d7e04.r2.dev/presets/hairstyle/styles/bob-v1.jpg',
       ]);
     });
   });

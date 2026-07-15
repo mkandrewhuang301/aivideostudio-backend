@@ -5,24 +5,28 @@
 //   2. Wan 2.7 Image composite (generateKeyframeFromPhotos, ReplicateProvider.ts) — character
 //      photo + extracted frame -> a single still with the character's identity swapped in,
 //      original pose/lighting/background preserved.
-//   3. Kling v3 Motion Control (ReplicateProvider.ts, standalone since Plan 09.6-03) — transfers
-//      the ORIGINAL video's motion onto the composite still, character_orientation: 'video' (up
-//      to 30s, matching the preset's existing max_seconds cap) so the output tracks the source
-//      video's real duration rather than being capped at 10s. Uses Kling's 'std' mode (720p),
-//      NOT 'pro' — this preset's "Pro" tier is the 3-step pipeline itself, not Kling's own
-//      internal quality flag (2026-07-13, user-clarified); std keeps resolution parity with
-//      Standard tier's existing 720p output and is the cheaper of Kling's two rates.
+//   3. Kling v3 Motion Control (FalProvider.ts as of 2026-07-15 — was ReplicateProvider.ts,
+//      standalone since Plan 09.6-03; moved because Fal's per-second rate is roughly HALF
+//      Replicate's for this preset's audio-on config, see generationService.ts's
+//      KLING_MOTION_RATE comment) — transfers the ORIGINAL video's motion onto the composite
+//      still, character_orientation: 'video' (up to 30s, matching the preset's existing
+//      max_seconds cap) so the output tracks the source video's real duration rather than being
+//      capped at 10s. Uses Kling's 'std' mode (720p), NOT 'pro' — this preset's "Pro" tier is the
+//      3-step pipeline itself, not Kling's own internal quality flag (2026-07-13,
+//      user-clarified); std keeps resolution parity with Standard tier's existing 720p output and
+//      is the cheaper of Kling's two rates on either provider.
 // Mirrors chainGenerationWorker.ts's shape: try -> stage 1 -> stage 2 -> stage 3 ->
-// attachPredictionId (no markCompleted here — the existing Replicate webhook does that once Kling's
-// prediction actually completes); catch -> markFailed + refundCredits. No retry storm (attempts: 1).
+// attachPredictionId (no markCompleted here — webhooks/fal.ts does that once Kling's job actually
+// completes); catch -> markFailed + refundCredits. No retry storm (attempts: 1).
 
 import { Worker, Job } from 'bullmq';
 import { extractVideoFrame } from '../services/frameExtractor';
-import { generateKeyframeFromPhotos, ReplicateProvider } from '../services/providers/ReplicateProvider';
+import { generateKeyframeFromPhotos } from '../services/providers/ReplicateProvider';
+import { FalProvider } from '../services/providers/FalProvider';
 import { getGenerationPresignedUrl } from '../services/archivalService';
 import { attachPredictionId, markFailed, classifyFailureReason } from '../services/generationService';
 import { refundCredits } from '../services/creditService';
-import { getReplicateWebhookUrl } from '../config';
+import { getFalWebhookUrl } from '../config';
 import type { GenerationInput } from '../services/providers/ModelProvider';
 import type { InfluencerProGenerationJob } from './influencerProQueue';
 
@@ -34,7 +38,7 @@ const connectionOptions = {
   enableReadyCheck: false,
 };
 
-const provider = new ReplicateProvider();
+const provider = new FalProvider();
 
 // Tested baseline prompt (user-verified 2026-07-12) — may be reworded later, but this is the
 // known-working composite instruction. Never caller-supplied; this preset takes no text prompt
@@ -62,13 +66,12 @@ export async function processInfluencerProGeneration(data: InfluencerProGenerati
     );
     const compositeUrl = await getGenerationPresignedUrl(compositeR2Key);
 
-    // Stage 3: Kling v3 Motion Control — composite image + ORIGINAL video (not the extracted
-    // frame) so the output actually tracks the source video's motion. mediaType deliberately
-    // 'video' (not 'character_replace') — ReplicateProvider.ts branches on mediaType BEFORE its
-    // model-id checks, and 'character_replace' would misroute this into the Wan 2.2 Animate
-    // Replace payload shape instead of Kling's. The generation ROW's own media_type stays
-    // 'character_replace' (stamped at creation in generations.ts) so the client renders it
-    // identically to Standard tier — this mediaType only controls provider dispatch shape.
+    // Stage 3: Kling v3 Motion Control (FalProvider.ts) — composite image + ORIGINAL video (not
+    // the extracted frame) so the output actually tracks the source video's motion. The
+    // generation ROW's own media_type stays 'character_replace' (stamped at creation in
+    // generations.ts) so the client renders it identically to Standard tier — FalProvider only
+    // branches on `model`, not mediaType, so this field is along for the ride/for consistency
+    // with the row, not load-bearing for dispatch routing the way it was for ReplicateProvider.
     const input: GenerationInput = {
       prompt: '',
       model: 'kwaivgi/kling-v3-motion-control',
@@ -80,7 +83,7 @@ export async function processInfluencerProGeneration(data: InfluencerProGenerati
       klingMotionKeepOriginalSound: true,
     };
 
-    const { providerPredictionId } = await provider.dispatch(input, getReplicateWebhookUrl());
+    const { providerPredictionId } = await provider.dispatch(input, getFalWebhookUrl());
     await attachPredictionId(data.generationId, providerPredictionId);
     console.log(`[influencer-pro] Stage 3 dispatched for ${data.generationId} (prediction ${providerPredictionId})`);
   } catch (err) {

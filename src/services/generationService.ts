@@ -242,23 +242,25 @@ export function computeFaceswapCost(): number {
   return IMAGE_MODEL_COSTS['openai/gpt-image-2-medium'];
 }
 
-// ─── Kling v3 Motion Control (STANDALONE, Plan 09.6-03) ────────────────────────
+// ─── Kling v3 Motion Control (dispatched via FalProvider, 2026-07-15) ──────────
 // kwaivgi/kling-v3-motion-control: transfers motion from a reference driver video onto a
-// reference character image (std 720p / pro 1080p). This is a pure provider-layer integration —
-// no 9.6 preset wires it (Marlon uses wan-video/wan-2.2-animate-replace instead, Plan 08); it
-// exists so a FUTURE motion-transfer preset can dispatch it via the API.
-// Live schema verified 2026-07-12 (curl https://api.replicate.com/v1/models/kwaivgi/kling-v3-motion-control):
-//   required: image (reference character image, uri), video (reference driver video, uri, 3-30s)
-//   mode: enum ['std','pro'], default 'pro' — std=720p cost-effective, pro=1080p higher quality
-//   character_orientation: enum ['image','video'], default 'image' — 'image' caps driver video at
-//     10s, 'video' allows up to 30s
-//   prompt: string (optional), keep_original_sound: boolean (default true)
-// Live pricing verified 2026-07-12 (https://replicate.com/kwaivgi/kling-v3-motion-control pricing
-// table): std = $0.07/sec of output video, pro = $0.12/sec of output video.
-// pricing verified live 2026-07-12 — re-verify at build (Replicate model page)
+// reference character image (std 720p / pro 1080p). Same logical model id as the original
+// Plan 09.6-03 Replicate integration — only AI Influencer Pro's 3rd pipeline stage
+// (influencerProWorker.ts) consumes it, and as of 2026-07-15 that one call site dispatches via
+// FalProvider.ts instead of ReplicateProvider.ts (Fal is roughly HALF the cost for this preset's
+// audio-on config — see below). ReplicateProvider.ts's own Kling v3 branch is left in place,
+// unused by any live call site, in case a future consumer wants it back.
+//
+// Rates below are FAL's pricing (not Replicate's — this table moved providers with the dispatch
+// call, 2026-07-15, live-verified via https://fal.ai/models/fal-ai/kling-video/v3/standard/motion-control
+// and .../pro/motion-control): std = $0.126/sec with audio on (the ONLY config AI Influencer Pro
+// ever requests — keep_original_sound is always true), pro = $0.168/sec (audio setting doesn't
+// change Pro's rate per fal.ai's pricing page). For reference, Replicate's own current pricing
+// for the equivalent audio-on configs is roughly DOUBLE this (std-audio $0.252/sec, pro-audio
+// $0.336/sec, per Replicate's live dashboard 2026-07-15) — that gap is why this moved to Fal.
 export const KLING_MOTION_RATE: Record<'std' | 'pro', number> = {
-  std: 0.07, // $/sec
-  pro: 0.12, // $/sec
+  std: 0.126, // $/sec (Fal, audio on)
+  pro: 0.168, // $/sec (Fal)
 };
 
 export const SUPPORTED_KLING_MOTION_MODELS = ['kwaivgi/kling-v3-motion-control'] as const;

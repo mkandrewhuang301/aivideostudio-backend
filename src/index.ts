@@ -8,6 +8,7 @@ import { authMiddleware } from './middleware/auth';
 import { meRouter } from './routes/me';
 import { revenueCatWebhookRouter } from './routes/webhooks/revenuecat';
 import { replicateWebhookRouter } from './routes/webhooks/replicate';
+import { falWebhookRouter } from './routes/webhooks/fal';
 import { generationsRouter } from './routes/generations';
 import { scheduleReaper } from './queue/reaperWorker';
 import { scheduleUploadReaper } from './queue/uploadReaperWorker';
@@ -48,6 +49,14 @@ app.use(
   '/webhooks/replicate',
   express.raw({ type: 'application/json' }),
   replicateWebhookRouter,
+);
+
+// Fal's webhook signature (ED25519+JWKS, falWebhookVerify.ts) also needs the exact raw bytes —
+// same requirement, same reason, distinct route from Replicate's.
+app.use(
+  '/webhooks/fal',
+  express.raw({ type: 'application/json' }),
+  falWebhookRouter,
 );
 
 app.use(express.json());
