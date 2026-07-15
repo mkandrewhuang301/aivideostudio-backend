@@ -243,6 +243,9 @@ export const projectClips = pgTable(
     original_duration_seconds: doublePrecision('original_duration_seconds'), // nullable — ffprobe returns fractional seconds
     trim_start_seconds: doublePrecision('trim_start_seconds').notNull().default(0),
     trim_end_seconds: doublePrecision('trim_end_seconds'), // nullable
+    // Soft-delete (Plan 13-21 B1): full undo of deletes. R2 object is kept until the lazy purge
+    // (getProjectWithState) reaps rows older than 24h. Every read path MUST filter deleted_at IS NULL.
+    deleted_at: timestamp('deleted_at', { withTimezone: true }), // nullable
     created_at: timestamp('created_at', { withTimezone: true })
       .notNull()
       .default(sql`now()`),
@@ -299,7 +302,12 @@ export const projectAudioClips = pgTable(
     start_offset_seconds: doublePrecision('start_offset_seconds').notNull().default(0), // position on the assembled project timeline
     trim_start_seconds: doublePrecision('trim_start_seconds').notNull().default(0),
     trim_end_seconds: doublePrecision('trim_end_seconds'), // nullable
+    // Plan 13-21 B2: probed once at add-time (mediaProbe.probeDurationSeconds) so split can fall
+    // back to it when the pill has never been explicitly trimmed. Self-heals nulls like clips do.
+    original_duration_seconds: doublePrecision('original_duration_seconds'), // nullable
     sort_order: integer('sort_order').notNull().default(0),
+    // Soft-delete (Plan 13-21 B1) — see project_clips.deleted_at for the contract.
+    deleted_at: timestamp('deleted_at', { withTimezone: true }), // nullable
     created_at: timestamp('created_at', { withTimezone: true })
       .notNull()
       .default(sql`now()`),

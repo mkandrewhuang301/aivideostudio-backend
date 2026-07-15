@@ -29,7 +29,7 @@ import type {
   ProjectCaptionCue,
   ProjectCaptionWord,
 } from '../db/schema';
-import { eq, and, desc, lt, or, sql, inArray } from 'drizzle-orm';
+import { eq, and, desc, lt, or, sql, inArray, isNull, isNotNull } from 'drizzle-orm';
 import { getUploadPresignedUrl } from './archivalService';
 import { extractVideoFrame } from './frameExtractor';
 import { probeDurationSeconds } from './mediaProbe';
@@ -69,6 +69,54 @@ async function isProjectOwned(projectId: string, userId: string): Promise<boolea
     .from(projects)
     .where(and(eq(projects.id, projectId), eq(projects.user_id, userId)));
   return !!row;
+}
+
+// Plan 13-21 B1.5: lazy purge — called at the top of getProjectWithState (the read path every
+// editor open/refresh hits) so soft-deleted rows older than 24h are reaped with zero cron/worker
+// infra. Best-effort R2 delete per row (a stray object past the undo window is a minor storage
+// cost, matches deleteProject's established convention), then a hard DELETE of the row itself.
+async function purgeExpiredSoftDeletes(projectId: string): Promise<void> {
+  const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
+
+  const [expiredClips, expiredAudio] = await Promise.all([
+    db
+      .select({ id: projectClips.id, r2_key: projectClips.r2_key })
+      .from(projectClips)
+      .where(
+        and(
+          eq(projectClips.project_id, projectId),
+          isNotNull(projectClips.deleted_at),
+          lt(projectClips.deleted_at, cutoff),
+        ),
+      ),
+    db
+      .select({ id: projectAudioClips.id, r2_key: projectAudioClips.r2_key })
+      .from(projectAudioClips)
+      .where(
+        and(
+          eq(projectAudioClips.project_id, projectId),
+          isNotNull(projectAudioClips.deleted_at),
+          lt(projectAudioClips.deleted_at, cutoff),
+        ),
+      ),
+  ]);
+
+  for (const clip of expiredClips) {
+    try {
+      await r2.send(new DeleteObjectCommand({ Bucket: R2_BUCKET, Key: clip.r2_key }));
+    } catch (err) {
+      console.error('[projectService] Best-effort purge R2 delete failed for clip', clip.id, err);
+    }
+    await db.delete(projectClips).where(eq(projectClips.id, clip.id));
+  }
+  for (const audio of expiredAudio) {
+    try {
+      await r2.send(new DeleteObjectCommand({ Bucket: R2_BUCKET, Key: audio.r2_key }));
+    } catch (err) {
+      console.error('[projectService] Best-effort purge R2 delete failed for audio clip', audio.id, err);
+    }
+    await db.delete(projectAudioClips).where(eq(projectAudioClips.id, audio.id));
+  }
 }
 
 // ─── Project CRUD ──────────────────────────────────────────────────────────────
@@ -141,8 +189,19 @@ export async function getProjectWithState(
     .where(and(eq(projects.id, projectId), eq(projects.user_id, userId)));
   if (!projectRow) return null;
 
+  // B1.5: reap soft-deletes past the 24h undo window before reading — best-effort, never blocks.
+  try {
+    await purgeExpiredSoftDeletes(projectId);
+  } catch (err) {
+    console.error('[projectService] purgeExpiredSoftDeletes failed (non-blocking):', err);
+  }
+
   const [clipRows, textRows, audioRows, cueRows] = await Promise.all([
-    db.select().from(projectClips).where(eq(projectClips.project_id, projectId)).orderBy(projectClips.sort_order),
+    db
+      .select()
+      .from(projectClips)
+      .where(and(eq(projectClips.project_id, projectId), isNull(projectClips.deleted_at)))
+      .orderBy(projectClips.sort_order),
     db
       .select()
       .from(projectTextOverlays)
@@ -151,7 +210,7 @@ export async function getProjectWithState(
     db
       .select()
       .from(projectAudioClips)
-      .where(eq(projectAudioClips.project_id, projectId))
+      .where(and(eq(projectAudioClips.project_id, projectId), isNull(projectAudioClips.deleted_at)))
       .orderBy(projectAudioClips.sort_order),
     db
       .select()
@@ -208,7 +267,27 @@ export async function getProjectWithState(
   const audioClips: ProjectAudioClipWithUrl[] = await Promise.all(
     audioRows.map(async (a) => {
       const { r2_key, ...rest } = a;
-      return { ...rest, url: await getUploadPresignedUrl(r2_key) };
+      const url = await getUploadPresignedUrl(r2_key);
+
+      // B2.2 self-heal (Plan 13-21): audio clips added before the probe-at-add fix (or whose
+      // probe failed at add time) carry a null original_duration_seconds — backfill exactly like
+      // clips' self-heal above. Best-effort; a probe failure just leaves it null.
+      let original_duration_seconds = rest.original_duration_seconds;
+      if (original_duration_seconds == null) {
+        try {
+          original_duration_seconds = await probeDurationSeconds(url);
+          if (original_duration_seconds != null) {
+            await db
+              .update(projectAudioClips)
+              .set({ original_duration_seconds })
+              .where(eq(projectAudioClips.id, a.id));
+          }
+        } catch (err) {
+          console.error('[projectService] Self-heal duration probe failed for audio clip', a.id, err);
+        }
+      }
+
+      return { ...rest, original_duration_seconds, url };
     }),
   );
   const thumbnailUrl = projectRow.thumbnail_r2_key
@@ -291,6 +370,68 @@ export async function deleteProject(projectId: string, userId: string): Promise<
   return true;
 }
 
+// ─── Cover (Plan 13-21 B3 — custom project thumbnail from a scrubbed frame) ────
+// Returns null for "not found" in EITHER sense (project not owned, or clip not found/not owned/
+// soft-deleted) — the route maps both to a single 404, matching every other IDOR-guarded lookup
+// in this file. Video clips reuse the existing extractVideoFrame ffmpeg helper (the same one the
+// auto-cover-on-first-import path already calls); image clips get a fresh independent CopyObject
+// (never share the clip's own r2_key as the thumbnail — an R2 delete of one must never affect the
+// other, same D-03 copy-not-reference rationale as clip import).
+export async function setProjectCover(
+  projectId: string,
+  userId: string,
+  clipId: string,
+  atSeconds: number,
+): Promise<{ thumbnailUrl: string } | null> {
+  const [projectRow] = await db
+    .select()
+    .from(projects)
+    .where(and(eq(projects.id, projectId), eq(projects.user_id, userId)));
+  if (!projectRow) return null;
+
+  const [clip] = await db
+    .select()
+    .from(projectClips)
+    .where(and(eq(projectClips.id, clipId), eq(projectClips.project_id, projectId), isNull(projectClips.deleted_at)));
+  if (!clip) return null;
+
+  const duration = clip.original_duration_seconds;
+  const clampedSeconds = duration != null ? Math.min(Math.max(atSeconds, 0), duration) : Math.max(atSeconds, 0);
+
+  let newThumbnailKey: string;
+  if (clip.media_type === 'image') {
+    const ext = clip.r2_key.split('.').pop() ?? 'jpg';
+    newThumbnailKey = `generations/project-cover-${randomUUID()}.${ext}`;
+    await r2.send(
+      new CopyObjectCommand({
+        Bucket: R2_BUCKET,
+        CopySource: `${R2_BUCKET}/${clip.r2_key}`,
+        Key: newThumbnailKey,
+      }),
+    );
+  } else {
+    const clipUrl = await getUploadPresignedUrl(clip.r2_key);
+    newThumbnailKey = await extractVideoFrame(clipUrl, `project-cover-${randomUUID()}`, clampedSeconds);
+  }
+
+  const oldThumbnailKey = projectRow.thumbnail_r2_key;
+  await db
+    .update(projects)
+    .set({ thumbnail_r2_key: newThumbnailKey, updated_at: new Date() })
+    .where(eq(projects.id, projectId));
+
+  if (oldThumbnailKey && oldThumbnailKey !== newThumbnailKey) {
+    try {
+      await r2.send(new DeleteObjectCommand({ Bucket: R2_BUCKET, Key: oldThumbnailKey }));
+    } catch (err) {
+      console.error('[projectService] Best-effort delete of old cover thumbnail failed:', err);
+    }
+  }
+
+  const thumbnailUrl = await getUploadPresignedUrl(newThumbnailKey);
+  return { thumbnailUrl };
+}
+
 // ─── Import-by-copy (D-03) ─────────────────────────────────────────────────────
 
 export interface ImportClipParams {
@@ -353,7 +494,8 @@ export async function importClipByCopy(input: ImportClipParams): Promise<Project
   }
 
   const nextOrderResult = await db.execute(sql`
-    SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_order FROM project_clips WHERE project_id = ${projectId}::uuid
+    SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_order FROM project_clips
+    WHERE project_id = ${projectId}::uuid AND deleted_at IS NULL
   `);
   const nextSortOrder = Number((nextOrderResult.rows?.[0] as { next_order?: number } | undefined)?.next_order ?? 0);
 
@@ -428,7 +570,9 @@ export async function splitClip(
   const [clip] = await db
     .select()
     .from(projectClips)
-    .where(and(eq(projectClips.id, clipId), eq(projectClips.project_id, projectId)));
+    .where(
+      and(eq(projectClips.id, clipId), eq(projectClips.project_id, projectId), isNull(projectClips.deleted_at)),
+    );
   if (!clip) return null;
 
   const currentTrimEnd = clip.trim_end_seconds ?? clip.original_duration_seconds;
@@ -453,10 +597,12 @@ export async function splitClip(
   );
 
   // Resequence: every OTHER clip at/after the new piece's slot shifts down one — same contract
-  // updateClip(sortOrder:) already relies on (sort_order is a dense 0..N-1 ordering).
+  // updateClip(sortOrder:) already relies on (sort_order is a dense 0..N-1 ordering). Soft-deleted
+  // rows are excluded (B1) — a deleted clip's stale sort_order shouldn't shift on live edits.
   await db.execute(sql`
     UPDATE project_clips SET sort_order = sort_order + 1
     WHERE project_id = ${projectId}::uuid AND sort_order >= ${input.newSortOrder} AND id != ${clipId}::uuid
+      AND deleted_at IS NULL
   `);
 
   const [newClip] = await db
@@ -480,6 +626,34 @@ export async function splitClip(
     .returning();
 
   return { originalClip: updatedOriginal, newClip };
+}
+
+// ─── Clip soft-delete / restore (Plan 13-21 B1 — full undo of deletes) ─────────
+// Mirrors deleteAudioClip/restoreAudioClip's shape exactly. The R2 object is kept until
+// purgeExpiredSoftDeletes reaps it 24h later — undo just clears deleted_at, no re-copy needed.
+
+export async function softDeleteClip(projectId: string, userId: string, clipId: string): Promise<boolean> {
+  if (!(await isProjectOwned(projectId, userId))) return false;
+
+  const [row] = await db
+    .update(projectClips)
+    .set({ deleted_at: new Date() })
+    .where(and(eq(projectClips.id, clipId), eq(projectClips.project_id, projectId), isNull(projectClips.deleted_at)))
+    .returning({ id: projectClips.id });
+  return !!row;
+}
+
+export async function restoreClip(projectId: string, userId: string, clipId: string): Promise<ProjectClip | null> {
+  if (!(await isProjectOwned(projectId, userId))) return null;
+
+  const [row] = await db
+    .update(projectClips)
+    .set({ deleted_at: null })
+    .where(
+      and(eq(projectClips.id, clipId), eq(projectClips.project_id, projectId), isNotNull(projectClips.deleted_at)),
+    )
+    .returning();
+  return row ?? null;
 }
 
 // ─── Text overlay CRUD (SC3) ───────────────────────────────────────────────────
@@ -572,6 +746,7 @@ export interface AddAudioClipInput {
   startOffsetSeconds?: number;
   trimStartSeconds?: number;
   trimEndSeconds?: number;
+  originalDurationSeconds?: number | null;
 }
 export interface UpdateAudioClipInput {
   startOffsetSeconds?: number;
@@ -588,7 +763,8 @@ export async function addAudioClip(
   if (!(await isProjectOwned(projectId, userId))) return null;
 
   const nextOrderResult = await db.execute(sql`
-    SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_order FROM project_audio_clips WHERE project_id = ${projectId}::uuid
+    SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_order FROM project_audio_clips
+    WHERE project_id = ${projectId}::uuid AND deleted_at IS NULL
   `);
   const nextSortOrder = Number((nextOrderResult.rows?.[0] as { next_order?: number } | undefined)?.next_order ?? 0);
 
@@ -601,6 +777,7 @@ export async function addAudioClip(
       start_offset_seconds: input.startOffsetSeconds ?? 0,
       trim_start_seconds: input.trimStartSeconds ?? 0,
       trim_end_seconds: input.trimEndSeconds ?? null,
+      original_duration_seconds: input.originalDurationSeconds ?? null,
       sort_order: nextSortOrder,
     })
     .returning();
@@ -624,29 +801,57 @@ export async function updateAudioClip(
   const [row] = await db
     .update(projectAudioClips)
     .set(setValues)
-    .where(and(eq(projectAudioClips.id, audioId), eq(projectAudioClips.project_id, projectId)))
+    .where(
+      and(
+        eq(projectAudioClips.id, audioId),
+        eq(projectAudioClips.project_id, projectId),
+        isNull(projectAudioClips.deleted_at),
+      ),
+    )
     .returning();
   return row ?? null;
 }
 
-// Deletes the row AND its R2 object (best-effort on the R2 side, matching deleteProject's
-// established pattern — a stray orphaned R2 object is a minor storage cost, not a correctness bug).
+// B1: soft-delete only — sets deleted_at, keeps the row AND its R2 object so undo can fully
+// restore it via restoreAudioClip. The R2 object is reaped later by purgeExpiredSoftDeletes.
 export async function deleteAudioClip(projectId: string, userId: string, audioId: string): Promise<boolean> {
   if (!(await isProjectOwned(projectId, userId))) return false;
 
   const [row] = await db
-    .select({ r2_key: projectAudioClips.r2_key })
-    .from(projectAudioClips)
-    .where(and(eq(projectAudioClips.id, audioId), eq(projectAudioClips.project_id, projectId)));
-  if (!row) return false;
+    .update(projectAudioClips)
+    .set({ deleted_at: new Date() })
+    .where(
+      and(
+        eq(projectAudioClips.id, audioId),
+        eq(projectAudioClips.project_id, projectId),
+        isNull(projectAudioClips.deleted_at),
+      ),
+    )
+    .returning({ id: projectAudioClips.id });
+  return !!row;
+}
 
-  await db.delete(projectAudioClips).where(eq(projectAudioClips.id, audioId));
-  try {
-    await r2.send(new DeleteObjectCommand({ Bucket: R2_BUCKET, Key: row.r2_key }));
-  } catch (err) {
-    console.error('[projectService] Best-effort delete of audio clip R2 object failed:', err);
-  }
-  return true;
+// B1.3: restore endpoint target — clears deleted_at. Returns null (route maps to 404) if the row
+// doesn't exist, isn't owned, was never deleted, or was already purged past the 24h window.
+export async function restoreAudioClip(
+  projectId: string,
+  userId: string,
+  audioId: string,
+): Promise<ProjectAudioClip | null> {
+  if (!(await isProjectOwned(projectId, userId))) return null;
+
+  const [row] = await db
+    .update(projectAudioClips)
+    .set({ deleted_at: null })
+    .where(
+      and(
+        eq(projectAudioClips.id, audioId),
+        eq(projectAudioClips.project_id, projectId),
+        isNotNull(projectAudioClips.deleted_at),
+      ),
+    )
+    .returning();
+  return row ?? null;
 }
 
 // ─── Audio clip split (T-13-19 Task G2) ────────────────────────────────────────
@@ -674,10 +879,20 @@ export async function splitAudioClip(
   const [audio] = await db
     .select()
     .from(projectAudioClips)
-    .where(and(eq(projectAudioClips.id, audioId), eq(projectAudioClips.project_id, projectId)));
+    .where(
+      and(
+        eq(projectAudioClips.id, audioId),
+        eq(projectAudioClips.project_id, projectId),
+        isNull(projectAudioClips.deleted_at),
+      ),
+    );
   if (!audio) return null;
 
-  const currentTrimEnd = audio.trim_end_seconds;
+  // B2 fix (Plan 13-21 F9.1's backend counterpart): fall back to the probed
+  // original_duration_seconds for never-explicitly-trimmed audio, mirroring splitClip's identical
+  // clip.trim_end_seconds ?? clip.original_duration_seconds guard above — previously this bailed
+  // on ANY untrimmed audio clip (the root cause of "audio split silently does nothing").
+  const currentTrimEnd = audio.trim_end_seconds ?? audio.original_duration_seconds;
   if (currentTrimEnd == null) {
     throw new SplitValidationError('Audio clip has no trim_end_seconds set — set trim points before splitting');
   }
@@ -699,7 +914,8 @@ export async function splitAudioClip(
   );
 
   const nextOrderResult = await db.execute(sql`
-    SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_order FROM project_audio_clips WHERE project_id = ${projectId}::uuid
+    SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_order FROM project_audio_clips
+    WHERE project_id = ${projectId}::uuid AND deleted_at IS NULL
   `);
   const nextSortOrder = Number((nextOrderResult.rows?.[0] as { next_order?: number } | undefined)?.next_order ?? 0);
 
@@ -712,6 +928,7 @@ export async function splitAudioClip(
       start_offset_seconds: input.newStartOffsetSeconds,
       trim_start_seconds: input.newTrimStart,
       trim_end_seconds: input.newTrimEnd,
+      original_duration_seconds: audio.original_duration_seconds,
       sort_order: nextSortOrder,
     })
     .returning();
@@ -993,7 +1210,11 @@ export async function buildComposeSnapshot(projectId: string, userId: string): P
   if (!projectRow) return null;
 
   const [clipRows, textRows, audioRows, cueRows] = await Promise.all([
-    db.select().from(projectClips).where(eq(projectClips.project_id, projectId)).orderBy(projectClips.sort_order),
+    db
+      .select()
+      .from(projectClips)
+      .where(and(eq(projectClips.project_id, projectId), isNull(projectClips.deleted_at)))
+      .orderBy(projectClips.sort_order),
     db
       .select()
       .from(projectTextOverlays)
@@ -1002,7 +1223,7 @@ export async function buildComposeSnapshot(projectId: string, userId: string): P
     db
       .select()
       .from(projectAudioClips)
-      .where(eq(projectAudioClips.project_id, projectId))
+      .where(and(eq(projectAudioClips.project_id, projectId), isNull(projectAudioClips.deleted_at)))
       .orderBy(projectAudioClips.sort_order),
     db
       .select()

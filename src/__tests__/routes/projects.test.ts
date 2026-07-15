@@ -21,6 +21,13 @@ jest.mock('../../services/mediaProbe', () => ({
   probeDurationSeconds: (...args: unknown[]) => mockProbeDurationSeconds(...args),
 }));
 
+// Plan 13-21 B3: extractVideoFrame spawns a real ffmpeg process (download + frame grab) — mocked
+// at the module boundary so the cover-endpoint tests stay deterministic and offline.
+const mockExtractVideoFrame = jest.fn().mockResolvedValue('generations/project-cover-mocked.png');
+jest.mock('../../services/frameExtractor', () => ({
+  extractVideoFrame: (...args: unknown[]) => mockExtractVideoFrame(...args),
+}));
+
 // db/client must be mocked — neon() throws at module eval with a non-postgres URL
 jest.mock('../../db/client', () => ({
   db: {
@@ -195,6 +202,8 @@ describe('GET /api/projects/:id', () => {
   it('returns 200 with presigned (never raw r2_key) urls for every clip/audio when owned', async () => {
     dbMock.select
       .mockReturnValueOnce(makeChain([baseProjectRow({ id: 'proj-1' })])) // project row
+      .mockReturnValueOnce(makeChain([])) // B1.5 purge: expired clips (none)
+      .mockReturnValueOnce(makeChain([])) // B1.5 purge: expired audio (none)
       .mockReturnValueOnce(
         makeChain([
           { id: 'clip-1', project_id: 'proj-1', sort_order: 0, r2_key: 'projects/proj-1/clips/a.mp4', media_type: 'video', source_type: 'upload', original_duration_seconds: null, trim_start_seconds: 0, trim_end_seconds: null, created_at: NOW },
@@ -225,6 +234,8 @@ describe('GET /api/projects/:id', () => {
 
     dbMock.select
       .mockReturnValueOnce(makeChain([baseProjectRow({ id: 'proj-1' })])) // project row
+      .mockReturnValueOnce(makeChain([])) // B1.5 purge: expired clips (none)
+      .mockReturnValueOnce(makeChain([])) // B1.5 purge: expired audio (none)
       .mockReturnValueOnce(
         makeChain([
           { id: 'clip-heal', project_id: 'proj-1', sort_order: 0, r2_key: 'projects/proj-1/clips/a.mp4', media_type: 'video', source_type: 'upload', original_duration_seconds: null, trim_start_seconds: 0, trim_end_seconds: null, created_at: NOW },
@@ -250,6 +261,8 @@ describe('GET /api/projects/:id', () => {
 
     dbMock.select
       .mockReturnValueOnce(makeChain([baseProjectRow({ id: 'proj-1' })]))
+      .mockReturnValueOnce(makeChain([])) // B1.5 purge: expired clips (none)
+      .mockReturnValueOnce(makeChain([])) // B1.5 purge: expired audio (none)
       .mockReturnValueOnce(
         makeChain([
           { id: 'clip-heal-img', project_id: 'proj-1', sort_order: 0, r2_key: 'projects/proj-1/clips/a.jpg', media_type: 'image', source_type: 'upload', original_duration_seconds: null, trim_start_seconds: 0, trim_end_seconds: null, created_at: NOW },
@@ -271,6 +284,8 @@ describe('GET /api/projects/:id', () => {
 
     dbMock.select
       .mockReturnValueOnce(makeChain([baseProjectRow({ id: 'proj-1' })]))
+      .mockReturnValueOnce(makeChain([])) // B1.5 purge: expired clips (none)
+      .mockReturnValueOnce(makeChain([])) // B1.5 purge: expired audio (none)
       .mockReturnValueOnce(
         makeChain([
           { id: 'clip-heal-fail', project_id: 'proj-1', sort_order: 0, r2_key: 'projects/proj-1/clips/a.mp4', media_type: 'video', source_type: 'upload', original_duration_seconds: null, trim_start_seconds: 0, trim_end_seconds: null, created_at: NOW },
@@ -285,6 +300,49 @@ describe('GET /api/projects/:id', () => {
     expect(res.status).toBe(200);
     expect(res.body.project.clips[0].original_duration_seconds).toBeNull();
     expect(dbMock.update).not.toHaveBeenCalled();
+  });
+
+  it('B1.5 purge: reaps a clip + audio clip soft-deleted past 24h (best-effort R2 delete + hard row delete)', async () => {
+    dbMock.select
+      .mockReturnValueOnce(makeChain([baseProjectRow({ id: 'proj-1' })])) // project row
+      .mockReturnValueOnce(makeChain([{ id: 'expired-clip', r2_key: 'projects/proj-1/clips/old.mp4' }])) // purge: expired clips
+      .mockReturnValueOnce(makeChain([{ id: 'expired-audio', r2_key: 'projects/proj-1/audio/old.mp3' }])) // purge: expired audio
+      .mockReturnValueOnce(makeChain([])) // clips (post-purge, none active)
+      .mockReturnValueOnce(makeChain([])) // text overlays
+      .mockReturnValueOnce(makeChain([])) // audio clips (post-purge, none active)
+      .mockReturnValueOnce(makeChain([])); // caption cues
+    dbMock.delete.mockReturnValue(makeChain(undefined));
+
+    const res = await request(app).get('/api/projects/proj-1');
+
+    expect(res.status).toBe(200);
+    const clipDeleteCall = r2Mock.send.mock.calls.find(
+      (c) => c[0] instanceof DeleteObjectCommand && c[0].input.Key === 'projects/proj-1/clips/old.mp4',
+    );
+    const audioDeleteCall = r2Mock.send.mock.calls.find(
+      (c) => c[0] instanceof DeleteObjectCommand && c[0].input.Key === 'projects/proj-1/audio/old.mp3',
+    );
+    expect(clipDeleteCall).toBeDefined();
+    expect(audioDeleteCall).toBeDefined();
+    expect(dbMock.delete).toHaveBeenCalledTimes(2); // one hard-delete per expired row
+  });
+
+  it("doesn't leak a soft-deleted (but not-yet-purged) clip into the response", async () => {
+    dbMock.select
+      .mockReturnValueOnce(makeChain([baseProjectRow({ id: 'proj-1' })])) // project row
+      .mockReturnValueOnce(makeChain([])) // purge: no expired clips
+      .mockReturnValueOnce(makeChain([])) // purge: no expired audio
+      // clips query is scoped with deleted_at IS NULL — a just-deleted (not yet 24h expired) row
+      // is excluded at the query level, so the mocked "active clips" result is simply empty here.
+      .mockReturnValueOnce(makeChain([]))
+      .mockReturnValueOnce(makeChain([]))
+      .mockReturnValueOnce(makeChain([]))
+      .mockReturnValueOnce(makeChain([]));
+
+    const res = await request(app).get('/api/projects/proj-1');
+
+    expect(res.status).toBe(200);
+    expect(res.body.project.clips).toHaveLength(0);
   });
 });
 
@@ -361,6 +419,99 @@ describe('DELETE /api/projects/:id', () => {
     const res = await request(app).delete('/api/projects/not-mine');
 
     expect(res.status).toBe(404);
+  });
+});
+
+// ─── POST /api/projects/:id/cover (Plan 13-21 B3) ──────────────────────────────
+
+describe('POST /api/projects/:id/cover', () => {
+  it('video clip: extracts a frame via extractVideoFrame, updates thumbnail_r2_key, returns a fresh presigned url', async () => {
+    dbMock.select
+      .mockReturnValueOnce(makeChain([baseProjectRow({ id: 'proj-1', thumbnail_r2_key: 'generations/old-thumb.png' })])) // setProjectCover's project lookup
+      .mockReturnValueOnce(
+        makeChain([
+          { id: 'clip-1', project_id: 'proj-1', r2_key: 'projects/proj-1/clips/a.mp4', media_type: 'video', original_duration_seconds: 10, deleted_at: null },
+        ]),
+      ); // clip lookup
+    dbMock.update.mockReturnValueOnce(makeChain(undefined)); // set thumbnail_r2_key
+
+    const res = await request(app).post('/api/projects/proj-1/cover').send({ clip_id: 'clip-1', at_seconds: 3 });
+
+    expect(res.status).toBe(200);
+    expect(res.body.thumbnail_url).toBe('https://r2.example.com/presigned-clip-url');
+    expect(mockExtractVideoFrame).toHaveBeenCalledWith(
+      'https://r2.example.com/presigned-clip-url',
+      expect.stringMatching(/^project-cover-/),
+      3,
+    );
+    const deleteCall = r2Mock.send.mock.calls.find(
+      (c) => c[0] instanceof DeleteObjectCommand && c[0].input.Key === 'generations/old-thumb.png',
+    );
+    expect(deleteCall).toBeDefined(); // old thumbnail best-effort cleaned up
+  });
+
+  it('video clip: clamps at_seconds into the clip real duration', async () => {
+    dbMock.select
+      .mockReturnValueOnce(makeChain([baseProjectRow({ id: 'proj-1', thumbnail_r2_key: null })]))
+      .mockReturnValueOnce(
+        makeChain([
+          { id: 'clip-1', project_id: 'proj-1', r2_key: 'projects/proj-1/clips/a.mp4', media_type: 'video', original_duration_seconds: 5, deleted_at: null },
+        ]),
+      );
+    dbMock.update.mockReturnValueOnce(makeChain(undefined));
+
+    const res = await request(app).post('/api/projects/proj-1/cover').send({ clip_id: 'clip-1', at_seconds: 999 });
+
+    expect(res.status).toBe(200);
+    expect(mockExtractVideoFrame).toHaveBeenCalledWith(expect.any(String), expect.any(String), 5); // clamped to duration
+  });
+
+  it('image clip: CopyObjects the clip r2_key to a fresh key (never reuses it directly)', async () => {
+    dbMock.select
+      .mockReturnValueOnce(makeChain([baseProjectRow({ id: 'proj-1', thumbnail_r2_key: null })]))
+      .mockReturnValueOnce(
+        makeChain([
+          { id: 'clip-2', project_id: 'proj-1', r2_key: 'projects/proj-1/clips/b.jpg', media_type: 'image', original_duration_seconds: 3, deleted_at: null },
+        ]),
+      );
+    dbMock.update.mockReturnValueOnce(makeChain(undefined));
+
+    const res = await request(app).post('/api/projects/proj-1/cover').send({ clip_id: 'clip-2', at_seconds: 0 });
+
+    expect(res.status).toBe(200);
+    const copyCall = r2Mock.send.mock.calls.find((c) => c[0] instanceof CopyObjectCommand);
+    expect(copyCall).toBeDefined();
+    expect(copyCall![0].input.CopySource).toBe('test-bucket/projects/proj-1/clips/b.jpg');
+    expect(copyCall![0].input.Key).not.toBe('projects/proj-1/clips/b.jpg');
+    expect(mockExtractVideoFrame).not.toHaveBeenCalled();
+  });
+
+  it('returns 404 for a project owned by another user (IDOR)', async () => {
+    dbMock.select.mockReturnValueOnce(makeChain([]));
+
+    const res = await request(app).post('/api/projects/not-mine/cover').send({ clip_id: 'clip-1', at_seconds: 0 });
+
+    expect(res.status).toBe(404);
+  });
+
+  it('returns 404 for a clip that does not exist / is soft-deleted', async () => {
+    dbMock.select
+      .mockReturnValueOnce(makeChain([baseProjectRow({ id: 'proj-1' })]))
+      .mockReturnValueOnce(makeChain([])); // clip lookup empty (filtered out or missing)
+
+    const res = await request(app).post('/api/projects/proj-1/cover').send({ clip_id: 'gone', at_seconds: 0 });
+
+    expect(res.status).toBe(404);
+  });
+
+  it('rejects with 400 when clip_id/at_seconds are missing or invalid', async () => {
+    const res1 = await request(app).post('/api/projects/proj-1/cover').send({ at_seconds: 0 });
+    expect(res1.status).toBe(400);
+
+    const res2 = await request(app).post('/api/projects/proj-1/cover').send({ clip_id: 'clip-1', at_seconds: -1 });
+    expect(res2.status).toBe(400);
+
+    expect(dbMock.select).not.toHaveBeenCalled();
   });
 });
 
@@ -584,18 +735,64 @@ describe('PATCH /api/projects/:id/clips/:clipId', () => {
 // ─── DELETE /api/projects/:id/clips/:clipId ────────────────────────────────────
 
 describe('DELETE /api/projects/:id/clips/:clipId', () => {
-  it('returns 204 and deletes the R2 object', async () => {
-    dbMock.select
-      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }])) // owned project
-      .mockReturnValueOnce(makeChain([{ r2_key: 'projects/proj-1/clips/c1.mp4' }])); // clip lookup
-    dbMock.delete.mockReturnValueOnce(makeChain(undefined));
+  it('returns 204, soft-deletes (sets deleted_at) and does NOT touch R2 (Plan 13-21 B1)', async () => {
+    dbMock.select.mockReturnValueOnce(makeChain([{ id: 'proj-1' }])); // softDeleteClip's isProjectOwned
+    dbMock.update.mockReturnValueOnce(makeChain([{ id: 'clip-1' }])); // deleted_at set, isNull(deleted_at) matched
 
     const res = await request(app).delete('/api/projects/proj-1/clips/clip-1');
 
     expect(res.status).toBe(204);
-    const deleteCall = r2Mock.send.mock.calls.find((c) => c[0] instanceof DeleteObjectCommand);
-    expect(deleteCall).toBeDefined();
-    expect(deleteCall![0].input.Key).toBe('projects/proj-1/clips/c1.mp4');
+    expect(r2Mock.send.mock.calls.find((c) => c[0] instanceof DeleteObjectCommand)).toBeUndefined();
+  });
+
+  it('returns 404 when the clip is already soft-deleted or missing', async () => {
+    dbMock.select.mockReturnValueOnce(makeChain([{ id: 'proj-1' }]));
+    dbMock.update.mockReturnValueOnce(makeChain([])); // isNull(deleted_at) filter excludes it — 0 rows
+
+    const res = await request(app).delete('/api/projects/proj-1/clips/clip-1');
+
+    expect(res.status).toBe(404);
+  });
+
+  it('returns 404 when the project is not owned by the requester (IDOR)', async () => {
+    dbMock.select.mockReturnValueOnce(makeChain([]));
+
+    const res = await request(app).delete('/api/projects/not-mine/clips/clip-1');
+
+    expect(res.status).toBe(404);
+  });
+});
+
+// ─── POST /api/projects/:id/clips/:clipId/restore (Plan 13-21 B1.3) ───────────
+
+describe('POST /api/projects/:id/clips/:clipId/restore', () => {
+  it('returns 200 and clears deleted_at on a soft-deleted clip', async () => {
+    dbMock.select.mockReturnValueOnce(makeChain([{ id: 'proj-1' }])); // restoreClip's isProjectOwned
+    dbMock.update.mockReturnValueOnce(
+      makeChain([{ id: 'clip-1', project_id: 'proj-1', deleted_at: null }]),
+    );
+
+    const res = await request(app).post('/api/projects/proj-1/clips/clip-1/restore');
+
+    expect(res.status).toBe(200);
+    expect(res.body.clip.id).toBe('clip-1');
+  });
+
+  it('returns 404 when the clip was never deleted, is missing, or was already purged', async () => {
+    dbMock.select.mockReturnValueOnce(makeChain([{ id: 'proj-1' }]));
+    dbMock.update.mockReturnValueOnce(makeChain([])); // isNotNull(deleted_at) filter excludes it
+
+    const res = await request(app).post('/api/projects/proj-1/clips/clip-1/restore');
+
+    expect(res.status).toBe(404);
+  });
+
+  it('returns 404 when the project is not owned by the requester (IDOR)', async () => {
+    dbMock.select.mockReturnValueOnce(makeChain([]));
+
+    const res = await request(app).post('/api/projects/not-mine/clips/clip-1/restore');
+
+    expect(res.status).toBe(404);
   });
 });
 
@@ -1095,6 +1292,41 @@ describe('POST /api/projects/:id/audio', () => {
     expect(putCall![0].input.Key).toMatch(/^projects\/proj-1\/audio\//);
   });
 
+  it('B2: probes the uploaded file duration and persists it on the new row', async () => {
+    dbMock.select
+      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }]))
+      .mockReturnValueOnce(makeChain([{ count: 0 }]))
+      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }]));
+    dbMock.execute.mockResolvedValueOnce({ rows: [{ next_order: 0 }] });
+    mockProbeDurationSeconds.mockResolvedValueOnce(12.5);
+    const valuesFn = jest.fn().mockReturnValue(
+      makeChain([
+        {
+          id: 'audio-3',
+          project_id: 'proj-1',
+          r2_key: 'projects/proj-1/audio/new.mp3',
+          source_type: 'upload',
+          start_offset_seconds: 0,
+          trim_start_seconds: 0,
+          trim_end_seconds: null,
+          original_duration_seconds: 12.5,
+          sort_order: 0,
+          created_at: NOW,
+        },
+      ]),
+    );
+    dbMock.insert.mockReturnValueOnce({ values: valuesFn });
+
+    const res = await request(app)
+      .post('/api/projects/proj-1/audio')
+      .attach('file', Buffer.from('fake-mp3'), { filename: 'a.mp3', contentType: 'audio/mpeg' });
+
+    expect(res.status).toBe(201);
+    expect(mockProbeDurationSeconds).toHaveBeenCalled();
+    expect(res.body.audio_clip.original_duration_seconds).toBe(12.5);
+    expect(valuesFn.mock.calls[0][0]).toMatchObject({ original_duration_seconds: 12.5 });
+  });
+
   it('preset-music path: copies the preset track via CopyObjectCommand', async () => {
     dbMock.select
       .mockReturnValueOnce(makeChain([{ id: 'proj-1' }]))
@@ -1196,24 +1428,62 @@ describe('PATCH /api/projects/:id/audio/:audioId', () => {
 // ─── DELETE /api/projects/:id/audio/:audioId ───────────────────────────────────
 
 describe('DELETE /api/projects/:id/audio/:audioId', () => {
-  it('returns 204 and deletes the R2 object', async () => {
-    dbMock.select
-      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }])) // isProjectOwned
-      .mockReturnValueOnce(makeChain([{ r2_key: 'projects/proj-1/audio/a1.mp3' }])); // r2_key lookup
-    dbMock.delete.mockReturnValueOnce(makeChain(undefined));
+  it('returns 204, soft-deletes (sets deleted_at) and does NOT touch R2 (Plan 13-21 B1)', async () => {
+    dbMock.select.mockReturnValueOnce(makeChain([{ id: 'proj-1' }])); // deleteAudioClip's isProjectOwned
+    dbMock.update.mockReturnValueOnce(makeChain([{ id: 'audio-1' }]));
 
     const res = await request(app).delete('/api/projects/proj-1/audio/audio-1');
 
     expect(res.status).toBe(204);
-    const deleteCall = r2Mock.send.mock.calls.find((c) => c[0] instanceof DeleteObjectCommand);
-    expect(deleteCall).toBeDefined();
-    expect(deleteCall![0].input.Key).toBe('projects/proj-1/audio/a1.mp3');
+    expect(r2Mock.send.mock.calls.find((c) => c[0] instanceof DeleteObjectCommand)).toBeUndefined();
+  });
+
+  it('returns 404 when the audio clip is already soft-deleted or missing', async () => {
+    dbMock.select.mockReturnValueOnce(makeChain([{ id: 'proj-1' }]));
+    dbMock.update.mockReturnValueOnce(makeChain([]));
+
+    const res = await request(app).delete('/api/projects/proj-1/audio/audio-1');
+
+    expect(res.status).toBe(404);
   });
 
   it('returns 404 when the project is not owned by the requester (IDOR)', async () => {
     dbMock.select.mockReturnValueOnce(makeChain([]));
 
     const res = await request(app).delete('/api/projects/not-mine/audio/audio-1');
+
+    expect(res.status).toBe(404);
+  });
+});
+
+// ─── POST /api/projects/:id/audio/:audioId/restore (Plan 13-21 B1.3) ──────────
+
+describe('POST /api/projects/:id/audio/:audioId/restore', () => {
+  it('returns 200 and clears deleted_at on a soft-deleted audio clip', async () => {
+    dbMock.select.mockReturnValueOnce(makeChain([{ id: 'proj-1' }])); // restoreAudioClip's isProjectOwned
+    dbMock.update.mockReturnValueOnce(
+      makeChain([{ id: 'audio-1', project_id: 'proj-1', deleted_at: null }]),
+    );
+
+    const res = await request(app).post('/api/projects/proj-1/audio/audio-1/restore');
+
+    expect(res.status).toBe(200);
+    expect(res.body.audio_clip.id).toBe('audio-1');
+  });
+
+  it('returns 404 when the audio clip was never deleted, is missing, or was already purged', async () => {
+    dbMock.select.mockReturnValueOnce(makeChain([{ id: 'proj-1' }]));
+    dbMock.update.mockReturnValueOnce(makeChain([]));
+
+    const res = await request(app).post('/api/projects/proj-1/audio/audio-1/restore');
+
+    expect(res.status).toBe(404);
+  });
+
+  it('returns 404 when the project is not owned by the requester (IDOR)', async () => {
+    dbMock.select.mockReturnValueOnce(makeChain([]));
+
+    const res = await request(app).post('/api/projects/not-mine/audio/audio-1/restore');
 
     expect(res.status).toBe(404);
   });

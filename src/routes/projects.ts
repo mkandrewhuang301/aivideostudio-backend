@@ -10,7 +10,7 @@ import { randomUUID } from 'crypto';
 import { writeFile, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { PutObjectCommand, CopyObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
+import { PutObjectCommand, CopyObjectCommand } from '@aws-sdk/client-s3';
 import { r2, R2_BUCKET } from '../storage/r2';
 import { probeDurationSeconds } from '../services/mediaProbe';
 import { db } from '../db/client';
@@ -22,7 +22,7 @@ import {
   projectCaptionCues,
   generations,
 } from '../db/schema';
-import { eq, and, sql } from 'drizzle-orm';
+import { eq, and, sql, isNull } from 'drizzle-orm';
 import { getUploadPresignedUrl } from '../services/archivalService';
 import { PRESET_MUSIC } from '../config/presetMusic';
 import { ffmpegQueue } from '../queue/ffmpegWorker';
@@ -57,6 +57,10 @@ import {
   splitClip,
   splitAudioClip,
   SplitValidationError,
+  softDeleteClip,
+  restoreClip,
+  restoreAudioClip,
+  setProjectCover,
 } from '../services/projectService';
 
 export const projectsRouter = Router();
@@ -274,6 +278,36 @@ projectsRouter.delete('/:id', async (req: Request, res: Response) => {
   }
 });
 
+// POST /api/projects/:id/cover — set a custom project cover from a scrubbed frame (Plan 13-21 B3).
+// Video clip → extractVideoFrame at at_seconds (clamped server-side into the clip's real
+// duration); image clip → CopyObject. Always returns a fresh presigned thumbnail_url.
+projectsRouter.post('/:id/cover', async (req: Request, res: Response) => {
+  if (!req.user?.dbUserId) {
+    res.status(401).json({ error: 'Not authenticated' });
+    return;
+  }
+  const { clip_id, at_seconds } = req.body ?? {};
+  if (typeof clip_id !== 'string' || clip_id.length === 0) {
+    res.status(400).json({ error: 'clip_id is required' });
+    return;
+  }
+  if (typeof at_seconds !== 'number' || !Number.isFinite(at_seconds) || at_seconds < 0) {
+    res.status(400).json({ error: 'at_seconds must be a non-negative number' });
+    return;
+  }
+  try {
+    const result = await setProjectCover(req.params.id as string, req.user.dbUserId, clip_id, at_seconds);
+    if (!result) {
+      res.status(404).json({ error: 'Project or clip not found' });
+      return;
+    }
+    res.status(200).json({ thumbnail_url: result.thumbnailUrl });
+  } catch (err) {
+    console.error('[projects] Error setting project cover:', err);
+    res.status(500).json({ error: 'Failed to set project cover' });
+  }
+});
+
 // POST /api/projects/:id/clips — import a clip by copy (D-03), either from an owned generation
 // or a fresh multipart upload. Smart-unpacks structured generations (D-15/D-16) instead of
 // importing one opaque clip when the source carries a params.structured marker.
@@ -296,7 +330,7 @@ projectsRouter.post('/:id/clips', clipUpload.single('file'), async (req: Request
     const [{ count }] = await db
       .select({ count: sql<number>`count(*)` })
       .from(projectClips)
-      .where(eq(projectClips.project_id, projectId));
+      .where(and(eq(projectClips.project_id, projectId), isNull(projectClips.deleted_at)));
     if (Number(count) >= MAX_CLIPS_PER_PROJECT) {
       res.status(400).json({ error: `Project already has the maximum of ${MAX_CLIPS_PER_PROJECT} clips` });
       return;
@@ -439,7 +473,9 @@ projectsRouter.patch('/:id/clips/:clipId', async (req: Request, res: Response) =
     const [clip] = await db
       .update(projectClips)
       .set(setValues)
-      .where(and(eq(projectClips.id, clipId), eq(projectClips.project_id, projectId)))
+      .where(
+        and(eq(projectClips.id, clipId), eq(projectClips.project_id, projectId), isNull(projectClips.deleted_at)),
+      )
       .returning();
     if (!clip) {
       res.status(404).json({ error: 'Clip not found' });
@@ -452,7 +488,9 @@ projectsRouter.patch('/:id/clips/:clipId', async (req: Request, res: Response) =
   }
 });
 
-// DELETE /api/projects/:id/clips/:clipId — remove a clip row + its R2 object
+// DELETE /api/projects/:id/clips/:clipId — soft-delete (Plan 13-21 B1): sets deleted_at, keeps
+// the row + R2 object so undo can fully restore it via the /restore endpoint below. Route
+// signature/response shape unchanged — iOS callers don't change.
 projectsRouter.delete('/:id/clips/:clipId', async (req: Request, res: Response) => {
   if (!req.user?.dbUserId) {
     res.status(401).json({ error: 'Not authenticated' });
@@ -461,28 +499,34 @@ projectsRouter.delete('/:id/clips/:clipId', async (req: Request, res: Response) 
   const projectId = req.params.id as string;
   const clipId = req.params.clipId as string;
   try {
-    const [ownedProject] = await db
-      .select({ id: projects.id })
-      .from(projects)
-      .where(and(eq(projects.id, projectId), eq(projects.user_id, req.user.dbUserId)));
-    if (!ownedProject) {
-      res.status(404).json({ error: 'Project not found' });
-      return;
-    }
-    const [clip] = await db
-      .select({ r2_key: projectClips.r2_key })
-      .from(projectClips)
-      .where(and(eq(projectClips.id, clipId), eq(projectClips.project_id, projectId)));
-    if (!clip) {
+    const ok = await softDeleteClip(projectId, req.user.dbUserId, clipId);
+    if (!ok) {
       res.status(404).json({ error: 'Clip not found' });
       return;
     }
-    await r2.send(new DeleteObjectCommand({ Bucket: R2_BUCKET, Key: clip.r2_key }));
-    await db.delete(projectClips).where(eq(projectClips.id, clipId));
     res.status(204).send();
   } catch (err) {
     console.error('[projects] Error deleting clip:', err);
     res.status(500).json({ error: 'Failed to delete clip' });
+  }
+});
+
+// POST /api/projects/:id/clips/:clipId/restore — undo a clip delete (Plan 13-21 B1.3)
+projectsRouter.post('/:id/clips/:clipId/restore', async (req: Request, res: Response) => {
+  if (!req.user?.dbUserId) {
+    res.status(401).json({ error: 'Not authenticated' });
+    return;
+  }
+  try {
+    const clip = await restoreClip(req.params.id as string, req.user.dbUserId, req.params.clipId as string);
+    if (!clip) {
+      res.status(404).json({ error: 'Clip not found, not deleted, or already purged' });
+      return;
+    }
+    res.status(200).json({ clip });
+  } catch (err) {
+    console.error('[projects] Error restoring clip:', err);
+    res.status(500).json({ error: 'Failed to restore clip' });
   }
 });
 
@@ -527,7 +571,7 @@ projectsRouter.post('/:id/clips/:clipId/split', async (req: Request, res: Respon
     const [{ count }] = await db
       .select({ count: sql<number>`count(*)` })
       .from(projectClips)
-      .where(eq(projectClips.project_id, projectId));
+      .where(and(eq(projectClips.project_id, projectId), isNull(projectClips.deleted_at)));
     if (Number(count) >= MAX_CLIPS_PER_PROJECT) {
       res.status(400).json({ error: `Project already has the maximum of ${MAX_CLIPS_PER_PROJECT} clips` });
       return;
@@ -578,7 +622,7 @@ projectsRouter.post('/:id/export', async (req: Request, res: Response) => {
     const [{ count }] = await db
       .select({ count: sql<number>`count(*)` })
       .from(projectClips)
-      .where(eq(projectClips.project_id, projectId));
+      .where(and(eq(projectClips.project_id, projectId), isNull(projectClips.deleted_at)));
     if (Number(count) === 0) {
       res.status(400).json({ error: 'Project has no clips to export' });
       return;
@@ -817,7 +861,7 @@ projectsRouter.post('/:id/audio', audioUpload.single('file'), async (req: Reques
     const [{ count }] = await db
       .select({ count: sql<number>`count(*)` })
       .from(projectAudioClips)
-      .where(eq(projectAudioClips.project_id, projectId));
+      .where(and(eq(projectAudioClips.project_id, projectId), isNull(projectAudioClips.deleted_at)));
     if (Number(count) >= MAX_AUDIO_CLIPS_PER_PROJECT) {
       res.status(400).json({ error: `Project already has the maximum of ${MAX_AUDIO_CLIPS_PER_PROJECT} audio clips` });
       return;
@@ -829,6 +873,10 @@ projectsRouter.post('/:id/audio', audioUpload.single('file'), async (req: Reques
 
     let r2Key: string;
     let sourceType: 'upload' | 'preset';
+    // B2: probe the real duration at add-time (mirrors clips' probe-at-import) — fixes audio
+    // split's "silently does nothing" bug (the root cause was trim_end_seconds being the ONLY
+    // fallback, always null for untrimmed audio). Probe failure must never fail the add.
+    let originalDurationSeconds: number | undefined;
 
     if (req.file) {
       const ext = ALLOWED_AUDIO_MIMES[req.file.mimetype];
@@ -846,6 +894,14 @@ projectsRouter.post('/:id/audio', audioUpload.single('file'), async (req: Reques
         }),
       );
       sourceType = 'upload';
+
+      const tempPath = path.join(tmpdir(), `audio-probe-${randomUUID()}.${ext}`);
+      try {
+        await writeFile(tempPath, req.file.buffer);
+        originalDurationSeconds = (await probeDurationSeconds(tempPath)) ?? undefined;
+      } finally {
+        await unlink(tempPath).catch(() => {});
+      }
     } else if (req.body?.source_type === 'preset' && typeof req.body?.preset_music_id === 'string') {
       const track = PRESET_MUSIC.find((t) => t.id === req.body.preset_music_id);
       if (!track) {
@@ -861,6 +917,9 @@ projectsRouter.post('/:id/audio', audioUpload.single('file'), async (req: Reques
         }),
       );
       sourceType = 'preset';
+
+      const presignedUrl = await getUploadPresignedUrl(r2Key);
+      originalDurationSeconds = (await probeDurationSeconds(presignedUrl)) ?? undefined;
     } else {
       res.status(400).json({ error: 'Provide a file upload, or { source_type: "preset", preset_music_id }' });
       return;
@@ -872,6 +931,7 @@ projectsRouter.post('/:id/audio', audioUpload.single('file'), async (req: Reques
       startOffsetSeconds,
       trimStartSeconds,
       trimEndSeconds,
+      originalDurationSeconds,
     });
     if (!audioClip) {
       res.status(404).json({ error: 'Project not found' });
@@ -949,7 +1009,8 @@ projectsRouter.patch('/:id/audio/:audioId', async (req: Request, res: Response) 
   }
 });
 
-// DELETE /api/projects/:id/audio/:audioId — remove an audio clip row + its R2 object
+// DELETE /api/projects/:id/audio/:audioId — soft-delete (Plan 13-21 B1): sets deleted_at, keeps
+// the row + R2 object so undo can fully restore it via the /restore endpoint below.
 projectsRouter.delete('/:id/audio/:audioId', async (req: Request, res: Response) => {
   if (!req.user?.dbUserId) {
     res.status(401).json({ error: 'Not authenticated' });
@@ -965,6 +1026,25 @@ projectsRouter.delete('/:id/audio/:audioId', async (req: Request, res: Response)
   } catch (err) {
     console.error('[projects] Error deleting audio clip:', err);
     res.status(500).json({ error: 'Failed to delete audio clip' });
+  }
+});
+
+// POST /api/projects/:id/audio/:audioId/restore — undo an audio clip delete (Plan 13-21 B1.3)
+projectsRouter.post('/:id/audio/:audioId/restore', async (req: Request, res: Response) => {
+  if (!req.user?.dbUserId) {
+    res.status(401).json({ error: 'Not authenticated' });
+    return;
+  }
+  try {
+    const audioClip = await restoreAudioClip(req.params.id as string, req.user.dbUserId, req.params.audioId as string);
+    if (!audioClip) {
+      res.status(404).json({ error: 'Audio clip not found, not deleted, or already purged' });
+      return;
+    }
+    res.status(200).json({ audio_clip: audioClip });
+  } catch (err) {
+    console.error('[projects] Error restoring audio clip:', err);
+    res.status(500).json({ error: 'Failed to restore audio clip' });
   }
 });
 
@@ -1014,7 +1094,7 @@ projectsRouter.post('/:id/audio/:audioId/split', async (req: Request, res: Respo
     const [{ count }] = await db
       .select({ count: sql<number>`count(*)` })
       .from(projectAudioClips)
-      .where(eq(projectAudioClips.project_id, projectId));
+      .where(and(eq(projectAudioClips.project_id, projectId), isNull(projectAudioClips.deleted_at)));
     if (Number(count) >= MAX_AUDIO_CLIPS_PER_PROJECT) {
       res.status(400).json({ error: `Project already has the maximum of ${MAX_AUDIO_CLIPS_PER_PROJECT} audio clips` });
       return;
@@ -1231,7 +1311,9 @@ projectsRouter.post('/:id/clips/:clipId/captions/auto-generate', async (req: Req
     const [clip] = await db
       .select({ r2_key: projectClips.r2_key })
       .from(projectClips)
-      .where(and(eq(projectClips.id, clipId), eq(projectClips.project_id, projectId)));
+      .where(
+        and(eq(projectClips.id, clipId), eq(projectClips.project_id, projectId), isNull(projectClips.deleted_at)),
+      );
     if (!clip) {
       res.status(404).json({ error: 'Clip not found' });
       return;
