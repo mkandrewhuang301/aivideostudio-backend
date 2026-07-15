@@ -32,7 +32,7 @@ import type {
 import { eq, and, desc, lt, or, sql, inArray, isNull, isNotNull } from 'drizzle-orm';
 import { getUploadPresignedUrl } from './archivalService';
 import { extractVideoFrame } from './frameExtractor';
-import { probeDurationSeconds } from './mediaProbe';
+import { probeDurationSeconds, probeVideoMeta } from './mediaProbe';
 import type { ComposeSpec, ComposeCaptionCue, ComposeCaptionStyle } from '../queue/ffmpegWorker';
 
 // DoS guard (T-13-10): route layer enforces this cap before calling importClipByCopy.
@@ -130,7 +130,9 @@ export async function createProject(
     .values({
       user_id: userId,
       title: opts.title ?? null,
-      aspect_ratio: opts.aspectRatio ?? '9:16',
+      // Plan 13-22 B2: 'original' (the first clip's exact native ratio, not a snapped preset) is
+      // the default for new projects — matches the CapCut-style "don't force a crop" UX decision.
+      aspect_ratio: opts.aspectRatio ?? 'original',
     })
     .returning();
   return row;
@@ -238,30 +240,41 @@ export async function getProjectWithState(
       const { r2_key, ...rest } = c;
       const url = await getUploadPresignedUrl(r2_key);
 
-      // B1.4 self-heal (Plan 13-20): rows imported before the ffprobe-at-import fix (or whose
-      // probe failed at the time) carry a null duration — backfill it here so every existing
-      // project fixes itself with zero manual steps. Best-effort per clip; a probe failure still
-      // returns the project (with original_duration_seconds left null).
+      // B1.4 self-heal (Plan 13-20, extended by Plan 13-22 B1): rows imported before the
+      // ffprobe-at-import fix (or whose probe failed at the time) carry a null duration and/or
+      // null width/height — backfill both here so every existing project fixes itself with zero
+      // manual steps. Best-effort per clip; a probe failure still returns the project (with
+      // whichever fields stay unresolved left null).
       let original_duration_seconds = rest.original_duration_seconds;
-      if (original_duration_seconds == null) {
+      let width = rest.width;
+      let height = rest.height;
+      if (original_duration_seconds == null || width == null || height == null) {
         try {
-          if (c.media_type === 'image') {
-            original_duration_seconds = 3;
-          } else {
-            original_duration_seconds = await probeDurationSeconds(url);
+          const meta = await probeVideoMeta(url);
+          const updates: { original_duration_seconds?: number; width?: number; height?: number } = {};
+
+          if (original_duration_seconds == null) {
+            original_duration_seconds = c.media_type === 'image' ? 3 : meta.durationSeconds;
+            if (original_duration_seconds != null) updates.original_duration_seconds = original_duration_seconds;
           }
-          if (original_duration_seconds != null) {
-            await db
-              .update(projectClips)
-              .set({ original_duration_seconds })
-              .where(eq(projectClips.id, c.id));
+          if (width == null && meta.width != null) {
+            width = meta.width;
+            updates.width = meta.width;
+          }
+          if (height == null && meta.height != null) {
+            height = meta.height;
+            updates.height = meta.height;
+          }
+
+          if (Object.keys(updates).length > 0) {
+            await db.update(projectClips).set(updates).where(eq(projectClips.id, c.id));
           }
         } catch (err) {
-          console.error('[projectService] Self-heal duration probe failed for clip', c.id, err);
+          console.error('[projectService] Self-heal duration/dimensions probe failed for clip', c.id, err);
         }
       }
 
-      return { ...rest, original_duration_seconds, url };
+      return { ...rest, original_duration_seconds, width, height, url };
     }),
   );
   const audioClips: ProjectAudioClipWithUrl[] = await Promise.all(
@@ -443,6 +456,8 @@ export interface ImportClipParams {
   mimeType: string;
   mediaType: 'video' | 'image';
   durationSeconds?: number;
+  width?: number;
+  height?: number;
 }
 
 // Copy-not-reference (D-03): for 'generation' sources this resolves the source generation
@@ -451,7 +466,7 @@ export interface ImportClipParams {
 // to projects/{id}/clips/ by the route (a fresh upload has no prior owner to protect against).
 export async function importClipByCopy(input: ImportClipParams): Promise<ProjectClip> {
   const { projectId, userId, sourceType, sourceId, uploadedR2Key, mediaType, mimeType } = input;
-  let { durationSeconds } = input;
+  let { durationSeconds, width, height } = input;
 
   let r2Key: string;
 
@@ -476,17 +491,21 @@ export async function importClipByCopy(input: ImportClipParams): Promise<Project
     );
     r2Key = destKey;
 
-    // B1 (Plan 13-20): derive a real duration at import time. Images get a fixed CapCut-style
-    // still duration; videos are probed against a fresh presigned GET of the just-copied R2
-    // object (same presign helper getProjectWithState uses for clip `url`s). Probe failure must
-    // never fail the import — durationSeconds stays whatever the caller passed (usually
-    // undefined), persisted as null, self-healed later by getProjectWithState.
+    // B1 (Plan 13-20, extended by Plan 13-22 B1): derive a real duration + pixel dimensions at
+    // import time. Images get a fixed CapCut-style still duration but are still probed for
+    // dimensions (ffprobe reads image pixel size too). Videos are probed against a fresh presigned
+    // GET of the just-copied R2 object (same presign helper getProjectWithState uses for clip
+    // `url`s). Probe failure must never fail the import — durationSeconds/width/height stay
+    // whatever the caller passed (usually undefined), persisted as null, self-healed later by
+    // getProjectWithState.
+    const presignedUrl = await getUploadPresignedUrl(destKey);
+    const meta = await probeVideoMeta(presignedUrl);
+    width = meta.width ?? undefined;
+    height = meta.height ?? undefined;
     if (mediaType === 'image') {
       durationSeconds = 3;
-    } else {
-      const presignedUrl = await getUploadPresignedUrl(destKey);
-      const probed = await probeDurationSeconds(presignedUrl);
-      if (probed !== null) durationSeconds = probed;
+    } else if (meta.durationSeconds !== null) {
+      durationSeconds = meta.durationSeconds;
     }
   } else {
     if (!uploadedR2Key) throw new Error('uploadedR2Key is required for sourceType=upload');
@@ -508,6 +527,8 @@ export async function importClipByCopy(input: ImportClipParams): Promise<Project
       media_type: mediaType,
       source_type: sourceType,
       original_duration_seconds: durationSeconds ?? null,
+      width: width ?? null,
+      height: height ?? null,
     })
     .returning();
 
@@ -614,6 +635,10 @@ export async function splitClip(
       media_type: clip.media_type,
       source_type: clip.source_type,
       original_duration_seconds: clip.original_duration_seconds,
+      // Same source pixels, just a duration trim — carry the already-known dimensions through
+      // rather than leaving them null (would otherwise re-trigger a probe on next read).
+      width: clip.width,
+      height: clip.height,
       trim_start_seconds: input.newTrimStart,
       trim_end_seconds: input.newTrimEnd,
     })
@@ -1287,8 +1312,17 @@ export async function buildComposeSnapshot(projectId: string, userId: string): P
 
   const captionStyle = (projectRow.caption_style as ComposeCaptionStyle | null) ?? DEFAULT_CAPTION_STYLE;
 
+  // Plan 13-22 B2: 'original' resolves to the FIRST (sort_order) non-deleted clip's stored pixel
+  // dimensions — clipRows is already ordered by sort_order. Left undefined when the first clip's
+  // dimensions were never probed; resolveComposeCanvas falls back to 1080x1920 in that case.
+  const firstClip = clipRows[0];
+  const originalCanvasWidth = projectRow.aspect_ratio === 'original' ? firstClip?.width ?? undefined : undefined;
+  const originalCanvasHeight = projectRow.aspect_ratio === 'original' ? firstClip?.height ?? undefined : undefined;
+
   return {
     aspectRatio: projectRow.aspect_ratio as ComposeSpec['aspectRatio'],
+    originalCanvasWidth,
+    originalCanvasHeight,
     clips,
     textOverlays: textRows.map((t) => ({
       text: t.text,

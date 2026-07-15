@@ -12,7 +12,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { PutObjectCommand, CopyObjectCommand } from '@aws-sdk/client-s3';
 import { r2, R2_BUCKET } from '../storage/r2';
-import { probeDurationSeconds } from '../services/mediaProbe';
+import { probeDurationSeconds, probeVideoMeta } from '../services/mediaProbe';
 import { db } from '../db/client';
 import {
   projects,
@@ -65,7 +65,8 @@ import {
 
 export const projectsRouter = Router();
 
-const VALID_ASPECT_RATIOS = ['9:16', '4:5', '1:1', '16:9'];
+// Plan 13-22 B2: 'original' = the first clip's exact native ratio (not snapped to a preset).
+const VALID_ASPECT_RATIOS = ['original', '9:16', '4:5', '1:1', '16:9'];
 const VALID_CAPTION_POSITIONS = ['top', 'middle', 'bottom'];
 
 const ALLOWED_CLIP_MIMES: Record<string, string> = {
@@ -350,22 +351,25 @@ projectsRouter.post('/:id/clips', clipUpload.single('file'), async (req: Request
         }),
       );
 
-      // B1 (Plan 13-20): derive a real duration at import time — the root cause of the
-      // 0:00-total/black-preview bug was original_duration_seconds never being written. Images
-      // get a fixed CapCut-style still duration; videos are probed via ffprobe against a temp
-      // copy of the just-uploaded buffer. Probe failure must never fail the import — leaves
-      // durationSeconds undefined (persisted as null, self-healed later by getProjectWithState).
+      // B1 (Plan 13-20, extended by Plan 13-22 B1): derive a real duration + pixel dimensions at
+      // import time — the root cause of the 0:00-total/black-preview bug was
+      // original_duration_seconds never being written; width/height power the "Original" canvas
+      // aspect ratio. Images get a fixed CapCut-style still duration but still get probed for
+      // dimensions (ffprobe reads image pixel size too). Probe failure must never fail the import
+      // — leaves durationSeconds/width/height undefined (persisted as null, self-healed later by
+      // getProjectWithState).
       let durationSeconds: number | undefined;
-      if (mediaType === 'video') {
-        const tempPath = path.join(tmpdir(), `clip-probe-${randomUUID()}.${ext}`);
-        try {
-          await writeFile(tempPath, req.file.buffer);
-          durationSeconds = (await probeDurationSeconds(tempPath)) ?? undefined;
-        } finally {
-          await unlink(tempPath).catch(() => {});
-        }
-      } else {
-        durationSeconds = 3;
+      let width: number | undefined;
+      let height: number | undefined;
+      const tempPath = path.join(tmpdir(), `clip-probe-${randomUUID()}.${ext}`);
+      try {
+        await writeFile(tempPath, req.file.buffer);
+        const meta = await probeVideoMeta(tempPath);
+        width = meta.width ?? undefined;
+        height = meta.height ?? undefined;
+        durationSeconds = mediaType === 'video' ? meta.durationSeconds ?? undefined : 3;
+      } finally {
+        await unlink(tempPath).catch(() => {});
       }
 
       const clip = await importClipByCopy({
@@ -376,6 +380,8 @@ projectsRouter.post('/:id/clips', clipUpload.single('file'), async (req: Request
         mimeType: req.file.mimetype,
         mediaType,
         durationSeconds,
+        width,
+        height,
       });
       res.status(201).json({ clip });
       return;

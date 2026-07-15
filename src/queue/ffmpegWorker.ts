@@ -78,7 +78,16 @@ export interface ComposeCaptionStyle {
 }
 
 export interface ComposeSpec {
-  aspectRatio: '9:16' | '4:5' | '1:1' | '16:9';
+  // Plan 13-22 B2: 'original' = the first clip's exact native pixel ratio (not snapped to a
+  // preset) — resolved at snapshot-build time (buildComposeSnapshot) into
+  // originalCanvasWidth/originalCanvasHeight below.
+  aspectRatio: '9:16' | '4:5' | '1:1' | '16:9' | 'original';
+  /** Only meaningful when aspectRatio === 'original' — the first (sort_order) non-deleted clip's
+   * stored pixel dimensions, RAW (not yet even-forced — resolveComposeCanvas does that). Undefined
+   * when unresolvable (no clips, or the first clip's dimensions were never probed); the canvas
+   * resolver falls back to 1080x1920 in that case. */
+  originalCanvasWidth?: number;
+  originalCanvasHeight?: number;
   clips: ComposeClipSpec[];
   textOverlays: ComposeTextSpec[];
   audioClips: ComposeAudioSpec[];

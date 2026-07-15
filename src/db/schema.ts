@@ -241,6 +241,11 @@ export const projectClips = pgTable(
     media_type: text('media_type').notNull(), // 'video' | 'image'
     source_type: text('source_type').notNull(), // 'generation' | 'upload' — provenance only, NOT a live FK
     original_duration_seconds: doublePrecision('original_duration_seconds'), // nullable — ffprobe returns fractional seconds
+    // Plan 13-22 B1: pixel dimensions probed via ffprobe at import (rotation-corrected — see
+    // mediaProbe.ts's probeVideoMeta). Nullable — self-healed on read like duration. Powers the
+    // "Original" canvas aspect ratio (project_clips[0]'s exact native ratio, not a snapped preset).
+    width: integer('width'),
+    height: integer('height'),
     trim_start_seconds: doublePrecision('trim_start_seconds').notNull().default(0),
     trim_end_seconds: doublePrecision('trim_end_seconds'), // nullable
     // Soft-delete (Plan 13-21 B1): full undo of deletes. R2 object is kept until the lazy purge

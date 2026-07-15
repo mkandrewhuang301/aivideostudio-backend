@@ -28,7 +28,7 @@ jest.mock('../../config', () => ({
 }));
 
 import type { ComposeSpec } from '../../queue/ffmpegWorker';
-import { buildComposeArgs } from '../../queue/ffmpegProcessor';
+import { buildComposeArgs, resolveComposeCanvas } from '../../queue/ffmpegProcessor';
 
 function baseSpec(overrides: Partial<ComposeSpec> = {}): ComposeSpec {
   return {
@@ -95,6 +95,46 @@ describe('buildComposeArgs', () => {
       });
       expect(filterComplexOf(args)).toContain(`scale=${expected}`);
     }
+  });
+
+  describe("resolveComposeCanvas — 'original' aspect ratio (Plan 13-22 B2)", () => {
+    it("resolves originalCanvasWidth/Height as-is when already even", () => {
+      expect(resolveComposeCanvas({ aspectRatio: 'original', originalCanvasWidth: 1920, originalCanvasHeight: 1080 })).toEqual({
+        width: 1920,
+        height: 1080,
+      });
+    });
+
+    it('forces odd dimensions down to the nearest even number (h264 requirement)', () => {
+      expect(resolveComposeCanvas({ aspectRatio: 'original', originalCanvasWidth: 1921, originalCanvasHeight: 1081 })).toEqual({
+        width: 1920,
+        height: 1080,
+      });
+    });
+
+    it('falls back to 1080x1920 when originalCanvasWidth/Height are unknown', () => {
+      expect(resolveComposeCanvas({ aspectRatio: 'original' })).toEqual({ width: 1080, height: 1920 });
+    });
+
+    it('falls back to 1080x1920 when only one of width/height is known', () => {
+      expect(resolveComposeCanvas({ aspectRatio: 'original', originalCanvasWidth: 1920 })).toEqual({
+        width: 1080,
+        height: 1920,
+      });
+    });
+
+    it("buildComposeArgs threads the resolved+even-forced 'original' canvas into the scale/pad filters", () => {
+      const args = buildComposeArgs({
+        spec: baseSpec({ aspectRatio: 'original', originalCanvasWidth: 721, originalCanvasHeight: 1281, clips: [baseSpec().clips[0]] }),
+        clipPaths: ['/tmp/clip0.mp4'],
+        audioPaths: [],
+        assPath: null,
+        textOverlayAssPath: null,
+        fontsDir: '/app/assets/fonts',
+        outPath: '/tmp/out.mp4',
+      });
+      expect(filterComplexOf(args)).toContain('scale=720:1280');
+    });
   });
 
   it('includes a libass filter referencing textOverlayAssPath + fontsDir when textOverlays are present (G4 — replaces drawtext)', () => {

@@ -58,16 +58,35 @@ async function runFfmpeg(args: string[]): Promise<void> {
 
 // 13-RESEARCH.md Open Question 3 (RESOLVED via 13-UI-SPEC.md): export always hard-caps at 1080p
 // regardless of source clip resolution, keyed off the project's chosen aspect ratio.
-const COMPOSE_CANVAS: Record<ComposeSpec['aspectRatio'], { width: number; height: number }> = {
+const COMPOSE_CANVAS: Record<'9:16' | '4:5' | '1:1' | '16:9', { width: number; height: number }> = {
   '9:16': { width: 1080, height: 1920 },
   '4:5': { width: 1080, height: 1350 },
   '1:1': { width: 1080, height: 1080 },
   '16:9': { width: 1920, height: 1080 },
 };
 
-/** Resolves the 1080p-capped canvas WxH for a compose spec's aspect ratio. */
-export function resolveComposeCanvas(aspectRatio: ComposeSpec['aspectRatio']): { width: number; height: number } {
-  return COMPOSE_CANVAS[aspectRatio] ?? COMPOSE_CANVAS['9:16'];
+// h264 requires even width/height — the fixed presets above are already even, but a clip's raw
+// probed pixel dimensions (the 'original' aspect ratio path) can be odd.
+function forceEven(n: number): number {
+  return n % 2 === 0 ? n : n - 1;
+}
+
+/**
+ * Resolves the 1080p-capped canvas WxH for a compose spec's aspect ratio. Plan 13-22 B2:
+ * 'original' resolves to the spec's originalCanvasWidth/Height (the first clip's stored pixel
+ * dimensions, computed at snapshot-build time), forced to even numbers; falls back to the 9:16
+ * canvas (1080x1920) when those dimensions are unknown.
+ */
+export function resolveComposeCanvas(
+  spec: Pick<ComposeSpec, 'aspectRatio' | 'originalCanvasWidth' | 'originalCanvasHeight'>,
+): { width: number; height: number } {
+  if (spec.aspectRatio === 'original') {
+    if (spec.originalCanvasWidth && spec.originalCanvasHeight) {
+      return { width: forceEven(spec.originalCanvasWidth), height: forceEven(spec.originalCanvasHeight) };
+    }
+    return { width: 1080, height: 1920 };
+  }
+  return COMPOSE_CANVAS[spec.aspectRatio] ?? COMPOSE_CANVAS['9:16'];
 }
 
 export interface BuildComposeArgsInput {
@@ -96,7 +115,7 @@ export interface BuildComposeArgsInput {
  */
 export function buildComposeArgs(input: BuildComposeArgsInput): string[] {
   const { spec, clipPaths, audioPaths, assPath, textOverlayAssPath, fontsDir, outPath } = input;
-  const { width, height } = resolveComposeCanvas(spec.aspectRatio);
+  const { width, height } = resolveComposeCanvas(spec);
 
   const args: string[] = ['-y'];
   const filterParts: string[] = [];
@@ -232,7 +251,7 @@ export async function runFfmpegOp(data: FfmpegJobData): Promise<{ r2Key: string;
         audioPaths.push(audioPath);
       }
 
-      const canvas = resolveComposeCanvas(spec.aspectRatio);
+      const canvas = resolveComposeCanvas(spec);
 
       let textOverlayAssPath: string | null = null;
       if (spec.textOverlays.length > 0) {
