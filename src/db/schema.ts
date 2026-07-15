@@ -282,6 +282,10 @@ export const projectTextOverlays = pgTable(
     rotation: doublePrecision('rotation').notNull().default(0),
     start_seconds: doublePrecision('start_seconds').notNull(),
     end_seconds: doublePrecision('end_seconds').notNull(),
+    // Plan 13-26 M8-backend: which timeline text row this overlay is pinned to (0-based). Nullable
+    // — legacy rows and any overlay never explicitly placed fall back to greedy row assignment
+    // computed client-side (TimelineTrackView.effectiveRow). Bounds (0..50) enforced at the route.
+    row_index: integer('row_index'),
     created_at: timestamp('created_at', { withTimezone: true })
       .notNull()
       .default(sql`now()`),

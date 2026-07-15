@@ -763,7 +763,7 @@ projectsRouter.post('/:id/text', async (req: Request, res: Response) => {
     return;
   }
   const projectId = req.params.id as string;
-  const { text, x_norm, y_norm, width_norm, rotation, start_seconds, end_seconds } = req.body ?? {};
+  const { text, x_norm, y_norm, width_norm, rotation, row_index, start_seconds, end_seconds } = req.body ?? {};
 
   if (typeof text !== 'string' || text.length === 0) {
     res.status(400).json({ error: 'text is required' });
@@ -786,6 +786,13 @@ projectsRouter.post('/:id/text', async (req: Request, res: Response) => {
   }
   if (rotation !== undefined && (typeof rotation !== 'number' || rotation < -360 || rotation > 360)) {
     res.status(400).json({ error: 'rotation must be between -360 and 360' });
+    return;
+  }
+  if (
+    row_index !== undefined &&
+    (typeof row_index !== 'number' || !Number.isInteger(row_index) || row_index < 0 || row_index > 50)
+  ) {
+    res.status(400).json({ error: 'row_index must be an integer between 0 and 50' });
     return;
   }
   if (
@@ -823,6 +830,7 @@ projectsRouter.post('/:id/text', async (req: Request, res: Response) => {
       yNorm: y_norm,
       widthNorm: typeof width_norm === 'number' ? width_norm : undefined,
       rotation: typeof rotation === 'number' ? rotation : undefined,
+      rowIndex: typeof row_index === 'number' ? row_index : undefined,
       startSeconds: start_seconds,
       endSeconds: end_seconds,
     });
@@ -843,7 +851,7 @@ projectsRouter.patch('/:id/text/:textId', async (req: Request, res: Response) =>
     res.status(401).json({ error: 'Not authenticated' });
     return;
   }
-  const { text, x_norm, y_norm, width_norm, rotation, start_seconds, end_seconds } = req.body ?? {};
+  const { text, x_norm, y_norm, width_norm, rotation, row_index, start_seconds, end_seconds } = req.body ?? {};
 
   if (text !== undefined && typeof text !== 'string') {
     res.status(400).json({ error: 'text must be a string' });
@@ -863,6 +871,13 @@ projectsRouter.patch('/:id/text/:textId', async (req: Request, res: Response) =>
   }
   if (rotation !== undefined && (typeof rotation !== 'number' || rotation < -360 || rotation > 360)) {
     res.status(400).json({ error: 'rotation must be between -360 and 360' });
+    return;
+  }
+  if (
+    row_index !== undefined &&
+    (typeof row_index !== 'number' || !Number.isInteger(row_index) || row_index < 0 || row_index > 50)
+  ) {
+    res.status(400).json({ error: 'row_index must be an integer between 0 and 50' });
     return;
   }
   if (start_seconds !== undefined && end_seconds !== undefined) {
@@ -890,6 +905,7 @@ projectsRouter.patch('/:id/text/:textId', async (req: Request, res: Response) =>
       yNorm: typeof y_norm === 'number' ? y_norm : undefined,
       widthNorm: typeof width_norm === 'number' ? width_norm : undefined,
       rotation: typeof rotation === 'number' ? rotation : undefined,
+      rowIndex: typeof row_index === 'number' ? row_index : undefined,
       startSeconds: typeof start_seconds === 'number' ? start_seconds : undefined,
       endSeconds: typeof end_seconds === 'number' ? end_seconds : undefined,
     });

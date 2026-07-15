@@ -736,6 +736,7 @@ export interface AddTextOverlayInput {
   yNorm: number;
   widthNorm?: number;
   rotation?: number;
+  rowIndex?: number;
   startSeconds: number;
   endSeconds: number;
 }
@@ -745,6 +746,7 @@ export interface UpdateTextOverlayInput {
   yNorm?: number;
   widthNorm?: number;
   rotation?: number;
+  rowIndex?: number;
   startSeconds?: number;
   endSeconds?: number;
 }
@@ -765,6 +767,7 @@ export async function addTextOverlay(
       y_norm: input.yNorm,
       width_norm: input.widthNorm ?? null,
       rotation: input.rotation ?? 0,
+      row_index: input.rowIndex ?? null,
       start_seconds: input.startSeconds,
       end_seconds: input.endSeconds,
     })
@@ -786,6 +789,7 @@ export async function updateTextOverlay(
   if (updates.yNorm !== undefined) setValues.y_norm = updates.yNorm;
   if (updates.widthNorm !== undefined) setValues.width_norm = updates.widthNorm;
   if (updates.rotation !== undefined) setValues.rotation = updates.rotation;
+  if (updates.rowIndex !== undefined) setValues.row_index = updates.rowIndex;
   if (updates.startSeconds !== undefined) setValues.start_seconds = updates.startSeconds;
   if (updates.endSeconds !== undefined) setValues.end_seconds = updates.endSeconds;
 

@@ -1381,6 +1381,60 @@ describe('POST /api/projects/:id/text', () => {
     expect(insertedValues.rotation).toBe(45);
   });
 
+  it('rejects an out-of-range row_index (400) with 400 and never touches the db (Plan 13-26 M8-backend)', async () => {
+    const res = await request(app)
+      .post('/api/projects/proj-1/text')
+      .send({ text: 'Hi', x_norm: 0.5, y_norm: 0.5, row_index: 51, start_seconds: 0, end_seconds: 2 });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/row_index must be an integer between 0 and 50/);
+    expect(dbMock.insert).not.toHaveBeenCalled();
+  });
+
+  it('rejects a non-integer row_index (400) with 400 and never touches the db (Plan 13-26 M8-backend)', async () => {
+    const res = await request(app)
+      .post('/api/projects/proj-1/text')
+      .send({ text: 'Hi', x_norm: 0.5, y_norm: 0.5, row_index: 1.5, start_seconds: 0, end_seconds: 2 });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/row_index must be an integer between 0 and 50/);
+    expect(dbMock.insert).not.toHaveBeenCalled();
+  });
+
+  it('accepts a row_index within 0..50 and threads it through to addTextOverlay (Plan 13-26 M8-backend)', async () => {
+    dbMock.select
+      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }]))
+      .mockReturnValueOnce(makeChain([{ count: 0 }]))
+      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }]));
+    dbMock.insert.mockReturnValueOnce(
+      makeChain([
+        {
+          id: 'text-row',
+          project_id: 'proj-1',
+          text: 'Hi',
+          x_norm: 0.5,
+          y_norm: 0.5,
+          width_norm: 1,
+          rotation: 0,
+          row_index: 2,
+          start_seconds: 0,
+          end_seconds: 2,
+          created_at: NOW,
+        },
+      ]),
+    );
+
+    const res = await request(app)
+      .post('/api/projects/proj-1/text')
+      .send({ text: 'Hi', x_norm: 0.5, y_norm: 0.5, row_index: 2, start_seconds: 0, end_seconds: 2 });
+
+    expect(res.status).toBe(201);
+    expect(res.body.text_overlay.row_index).toBe(2);
+    expect(dbMock.insert).toHaveBeenCalled();
+    const insertedValues = dbMock.insert.mock.results[0].value.values.mock.calls[0][0];
+    expect(insertedValues.row_index).toBe(2);
+  });
+
   it('rejects invalid start_seconds/end_seconds with 400', async () => {
     const res = await request(app)
       .post('/api/projects/proj-1/text')
@@ -1526,6 +1580,32 @@ describe('PATCH /api/projects/:id/text/:textId', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.text_overlay.rotation).toBe(-30);
+  });
+
+  it('rejects an out-of-range row_index with 400 (Plan 13-26 M8-backend)', async () => {
+    const res = await request(app).patch('/api/projects/proj-1/text/text-1').send({ row_index: 100 });
+
+    expect(res.status).toBe(400);
+    expect(dbMock.update).not.toHaveBeenCalled();
+  });
+
+  it('rejects a negative row_index with 400 (Plan 13-26 M8-backend)', async () => {
+    const res = await request(app).patch('/api/projects/proj-1/text/text-1').send({ row_index: -1 });
+
+    expect(res.status).toBe(400);
+    expect(dbMock.update).not.toHaveBeenCalled();
+  });
+
+  it('updates row_index and returns 200 (Plan 13-26 M8-backend)', async () => {
+    dbMock.select.mockReturnValueOnce(makeChain([{ id: 'proj-1' }])); // isProjectOwned
+    dbMock.update.mockReturnValueOnce(
+      makeChain([{ id: 'text-1', project_id: 'proj-1', text: 'Hi', row_index: 3 }]),
+    );
+
+    const res = await request(app).patch('/api/projects/proj-1/text/text-1').send({ row_index: 3 });
+
+    expect(res.status).toBe(200);
+    expect(res.body.text_overlay.row_index).toBe(3);
   });
 
   it('returns 404 for a mutation on a project owned by another user (IDOR)', async () => {
