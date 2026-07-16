@@ -99,6 +99,21 @@ export interface PresetSheetMeta {
   preparing_label?: string;
 }
 
+/**
+ * SERVER-ONLY. Per-preset instructions for the LLM prompt-intelligence endpoints
+ * (POST /api/prompt/enhance and /api/prompt/from-image — see routes/prompt.ts). Each entry
+ * replaces that endpoint's generic default system instruction when the client passes this
+ * preset's `preset_id`, so one preset can ask for "expand into a spoken script", another for
+ * "spice up cinematically", another for "write an i2v motion prompt from this image's content".
+ * Omit entirely to use the defaults in promptIntelligenceService.ts.
+ */
+export interface PresetPromptIntelligence {
+  /** System instruction for /enhance (rough user prompt → improved prompt/script). */
+  enhance?: { instruction: string };
+  /** System instruction for /from-image (finished image → tailored prompt). */
+  from_image?: { instruction: string };
+}
+
 export interface PresetDef {
   preset_id: string;
   title: string;
@@ -185,6 +200,11 @@ export interface PresetDef {
    * Never reaches the client.
    */
   i2v_routing?: 'seedance' | 'grok' | 'try_seedance_fallback_grok';
+  /**
+   * SERVER-ONLY. Per-preset LLM instructions for /api/prompt endpoints — never reaches the
+   * client (CLIENT_PRESETS strips it, same posture as prompt_template).
+   */
+  prompt_intelligence?: PresetPromptIntelligence;
   input_schema?: PresetInputSchema;
   // SOON rows carry no cost — nothing is billed until the feature ships.
   cost?: PresetCost;
@@ -233,6 +253,20 @@ export const SERVER_PRESETS: PresetDef[] = [
       'movement, soft ambient background motion — keep the vintage look and colors intact, no audio.',
     input_schema: {
       slots: [{ kind: 'image', label: 'Old photo', source: 'any' }],
+    },
+    // Worked example of the per-preset prompt-intelligence hook (routes/prompt.ts): when the
+    // client calls POST /api/prompt/from-image with this preset_id, the vision LLM gets this
+    // instruction instead of the generic default. Nothing dispatches through this preset row —
+    // it only tailors the suggested prompt returned to the composer.
+    prompt_intelligence: {
+      from_image: {
+        instruction:
+          'You are writing an image-to-video animation prompt for an old/vintage photograph. ' +
+          'Look at the photo and describe subtle, period-faithful motion tailored to its actual ' +
+          'content — who/what is in frame, their pose, the setting — e.g. gentle breathing, a ' +
+          'slight head turn, drifting dust or foliage. Preserve the vintage look, grain, and ' +
+          'colors; never modernize. Output only the prompt text, one paragraph, no preamble.',
+      },
     },
     cost: { type: 'per_second', credits_per_sec: 9, max_seconds: 5 },
     sheet: {
@@ -1086,6 +1120,10 @@ export const CLIENT_PRESETS = SERVER_PRESETS.map((def) => {
     driver_video_asset,
     ...rest
   } = def;
+
+  // Keep per-preset LLM instructions server-only without adding another intentionally-unused
+  // destructured binding to this legacy stripping block.
+  delete rest.prompt_intelligence;
 
   if (rest.input_schema?.style_grid?.length) {
     rest.input_schema = {

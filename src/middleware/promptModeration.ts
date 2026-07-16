@@ -63,6 +63,20 @@ async function checkOpenAIModeration(prompt: string): Promise<boolean> {
 
 const MAX_PROMPT_LENGTH = 2000;
 
+/**
+ * Reusable moderation check (regex blocklist + OpenAI semantic layer in parallel).
+ * Returns true when the text violates content policy. Used by the middleware below and
+ * called directly by routes that moderate non-`prompt` body fields (e.g. /api/prompt's
+ * from-image `hint`).
+ */
+export async function isPromptFlagged(prompt: string): Promise<boolean> {
+  const [blocklistFlagged, openAiFlagged] = await Promise.all([
+    Promise.resolve(BLOCKED_PATTERNS.some((pattern) => pattern.test(prompt))),
+    checkOpenAIModeration(prompt),
+  ]);
+  return blocklistFlagged || openAiFlagged;
+}
+
 export async function promptModerationMiddleware(
   req: Request,
   res: Response,
@@ -82,13 +96,7 @@ export async function promptModerationMiddleware(
   }
 
   try {
-    // Run both checks in parallel — neither waits for the other
-    const [blocklistFlagged, openAiFlagged] = await Promise.all([
-      Promise.resolve(BLOCKED_PATTERNS.some((pattern) => pattern.test(prompt))),
-      checkOpenAIModeration(prompt),
-    ]);
-
-    if (blocklistFlagged || openAiFlagged) {
+    if (await isPromptFlagged(prompt)) {
       res.status(400).json({
         error: 'This prompt violates our content policy',
         code: 'content_policy_violation',

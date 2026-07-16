@@ -26,6 +26,7 @@ import { privacyRouter } from './routes/privacy';
 import { termsRouter } from './routes/terms';
 import { ratesRouter } from './routes/rates';
 import { presetsRouter } from './routes/presets';
+import { promptRouter } from './routes/prompt';
 
 // Eagerly initialize Firebase Admin at startup — prevents double-init on concurrent requests
 getFirebaseAdmin();
@@ -87,6 +88,7 @@ app.use('/api/generations', generationsRouter);
 app.use('/api/reports', reportsRouter);
 app.use('/api/uploads', uploadsRouter);
 app.use('/api/projects', projectsRouter);
+app.use('/api/prompt', promptRouter);
 
 app.use('/privacy', privacyRouter);
 app.use('/terms', termsRouter);
