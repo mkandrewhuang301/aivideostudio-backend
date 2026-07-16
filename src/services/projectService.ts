@@ -1037,6 +1037,31 @@ export interface CaptionTimelineClip {
   originalDurationSeconds: number | null;
 }
 
+interface NormalizedClipWindow {
+  start: number;
+  end: number;
+}
+
+function normalizeCaptionClipWindow(clip: CaptionTimelineClip): NormalizedClipWindow | null {
+  if (!Number.isFinite(clip.trimStartSeconds)) return null;
+  if (
+    clip.originalDurationSeconds !== null &&
+    (!Number.isFinite(clip.originalDurationSeconds) || clip.originalDurationSeconds < 0)
+  ) {
+    return null;
+  }
+
+  const sourceDuration = clip.originalDurationSeconds;
+  const clampToSource = (value: number): number => {
+    const nonNegative = Math.max(0, value);
+    return sourceDuration === null ? nonNegative : Math.min(nonNegative, sourceDuration);
+  };
+  const start = clampToSource(clip.trimStartSeconds);
+  const rawEnd = clip.trimEndSeconds ?? sourceDuration ?? start;
+  if (!Number.isFinite(rawEnd)) return null;
+  return { start, end: clampToSource(rawEnd) };
+}
+
 /**
  * Converts Whisper's source-local word times into the project's global timeline. The target
  * clip's current position is derived from the authoritative, already-reordered clip rows. Words
@@ -1052,20 +1077,28 @@ export function translateCaptionDraftsToProjectTimeline(
   if (targetIndex < 0) return [];
 
   const visibleDuration = (clip: CaptionTimelineClip): number => {
-    const end = clip.trimEndSeconds ?? clip.originalDurationSeconds ?? clip.trimStartSeconds;
-    return Math.max(0, end - clip.trimStartSeconds);
+    const window = normalizeCaptionClipWindow(clip);
+    if (!window) return 0;
+    const duration = Math.max(0, window.end - window.start);
+    return Number.isFinite(duration) ? duration : 0;
   };
   const timelineStart = orderedClips
     .slice(0, targetIndex)
-    .reduce((total, clip) => total + visibleDuration(clip), 0);
+    .reduce((total, clip) => {
+      const next = total + visibleDuration(clip);
+      return Number.isFinite(next) ? next : total;
+    }, 0);
   const target = orderedClips[targetIndex];
-  const visibleSourceStart = target.trimStartSeconds;
-  const visibleSourceEnd = visibleSourceStart + visibleDuration(target);
+  const targetWindow = normalizeCaptionClipWindow(target);
+  if (!targetWindow || targetWindow.end <= targetWindow.start) return [];
+  const visibleSourceStart = targetWindow.start;
+  const visibleSourceEnd = targetWindow.end;
 
   const translated: AddCaptionCueInput[] = [];
   for (const draft of drafts) {
     const words: CaptionWordInput[] = [];
     for (const word of draft.words ?? []) {
+      if (!Number.isFinite(word.startSeconds) || !Number.isFinite(word.endSeconds)) continue;
       const clippedStart = Math.max(word.startSeconds, visibleSourceStart);
       const clippedEnd = Math.min(word.endSeconds, visibleSourceEnd);
       if (clippedEnd <= clippedStart) continue;

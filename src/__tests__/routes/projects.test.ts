@@ -68,6 +68,7 @@ import { smartUnpackOnImport, translateCaptionDraftsToProjectTimeline } from '..
 import { TranscriptionError } from '../../services/captionTranscriptionService';
 import { r2 } from '../../storage/r2';
 import { db } from '../../db/client';
+import { projectClips } from '../../db/schema';
 
 const r2Mock = r2 as unknown as { send: jest.Mock };
 const dbMock = db as unknown as {
@@ -824,6 +825,9 @@ describe('PATCH /api/projects/:id/clips/:clipId', () => {
   it('trims a clip and returns 200', async () => {
     dbMock.select
       .mockReturnValueOnce(makeChain([{ id: 'proj-1' }])) // owned project
+      .mockReturnValueOnce(makeChain([{
+        trim_start_seconds: 0, trim_end_seconds: 10, original_duration_seconds: 10,
+      }])) // authoritative current clip
       .mockReturnValueOnce(makeChain([])); // no captions
     dbMock.update.mockReturnValueOnce(
       makeChain([{ id: 'clip-1', project_id: 'proj-1', sort_order: 0, trim_start_seconds: 2, trim_end_seconds: 8 }]),
@@ -841,6 +845,9 @@ describe('PATCH /api/projects/:id/clips/:clipId', () => {
   it('returns captions_may_be_stale when a trim changes on a project with caption cues', async () => {
     dbMock.select
       .mockReturnValueOnce(makeChain([{ id: 'proj-1' }])) // owned project
+      .mockReturnValueOnce(makeChain([{
+        trim_start_seconds: 0, trim_end_seconds: 8, original_duration_seconds: 10,
+      }])) // authoritative current clip
       .mockReturnValueOnce(makeChain([{ id: 'cue-1' }])); // project has captions
     dbMock.update.mockReturnValueOnce(
       makeChain([{ id: 'clip-1', project_id: 'proj-1', sort_order: 0, trim_start_seconds: 5, trim_end_seconds: 8 }]),
@@ -852,6 +859,50 @@ describe('PATCH /api/projects/:id/clips/:clipId', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.captions_may_be_stale).toBe(true);
+  });
+
+  it('omits captions_may_be_stale for an idempotent trim PATCH even when captions exist', async () => {
+    dbMock.select
+      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }])) // owned project
+      .mockReturnValueOnce(makeChain([{
+        trim_start_seconds: 5, trim_end_seconds: 8, original_duration_seconds: 10,
+      }])); // authoritative current clip; cue lookup must never run
+    dbMock.update.mockReturnValueOnce(
+      makeChain([{ id: 'clip-1', project_id: 'proj-1', sort_order: 0, trim_start_seconds: 5, trim_end_seconds: 8 }]),
+    );
+
+    const res = await request(app)
+      .patch('/api/projects/proj-1/clips/clip-1')
+      .send({ trim_start_seconds: 5 });
+
+    expect(res.status).toBe(200);
+    expect(res.body).not.toHaveProperty('captions_may_be_stale');
+    expect(dbMock.select).toHaveBeenCalledTimes(2);
+  });
+
+  it('rejects negative, non-finite JSON, reversed, and out-of-source trim bounds', async () => {
+    const invalidInputs = [
+      { body: { trim_start_seconds: -1 }, needsCurrentClip: false },
+      { body: { trim_end_seconds: Number.POSITIVE_INFINITY }, needsCurrentClip: false },
+      { body: { trim_start_seconds: 8, trim_end_seconds: 2 }, needsCurrentClip: true },
+      { body: { trim_end_seconds: 11 }, needsCurrentClip: true },
+    ];
+
+    for (const { body, needsCurrentClip } of invalidInputs) {
+      dbMock.select.mockReset();
+      dbMock.update.mockReset();
+      dbMock.select.mockReturnValueOnce(makeChain([{ id: 'proj-1' }]));
+      if (needsCurrentClip) {
+        dbMock.select.mockReturnValueOnce(makeChain([{
+          trim_start_seconds: 0, trim_end_seconds: 10, original_duration_seconds: 10,
+        }]));
+      }
+
+      const res = await request(app).patch('/api/projects/proj-1/clips/clip-1').send(body);
+
+      expect(res.status).toBe(400);
+      expect(dbMock.update).not.toHaveBeenCalled();
+    }
   });
 
   it('returns 404 when the project is not owned by the requester', async () => {
@@ -2246,6 +2297,67 @@ describe('POST /api/projects/:id/clips/:clipId/captions/auto-generate', () => {
     expect(dbMock.insert).not.toHaveBeenCalled();
   });
 
+  it('maps a trimmed second clip through the route before persisting cues and words', async () => {
+    const orderedClipsChain = makeChain([
+      {
+        id: 'clip-1', r2_key: 'projects/proj-1/clips/first.mp4', trim_start_seconds: 1,
+        trim_end_seconds: 4, original_duration_seconds: 8,
+      },
+      {
+        id: 'clip-2', r2_key: 'projects/proj-1/clips/second.mp4', trim_start_seconds: 5,
+        trim_end_seconds: 9, original_duration_seconds: 10,
+      },
+    ]);
+    dbMock.select
+      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }])) // route ownership
+      .mockReturnValueOnce(orderedClipsChain) // authoritative ordered, non-deleted clips
+      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }])); // addCaptionCue ownership
+    mockTranscribeToWordCues.mockResolvedValueOnce([{
+      startSeconds: 2,
+      endSeconds: 6,
+      words: [
+        { text: 'cut', startSeconds: 2, endSeconds: 3 },
+        { text: 'kept', startSeconds: 5.5, endSeconds: 6 },
+      ],
+    }]);
+    dbMock.execute.mockResolvedValueOnce({ rows: [{ next_order: 0 }] });
+    const cueInsertChain = makeChain([{
+      id: 'cue-route', project_id: 'proj-1', sort_order: 0, start_seconds: 3.5, end_seconds: 4,
+      created_at: NOW,
+    }]);
+    const wordInsertChain = makeChain([{
+      id: 'word-route', cue_id: 'cue-route', text: 'kept', start_seconds: 3.5,
+      end_seconds: 4, sort_order: 0,
+    }]);
+    dbMock.insert.mockReturnValueOnce(cueInsertChain).mockReturnValueOnce(wordInsertChain);
+
+    const res = await request(app).post('/api/projects/proj-1/clips/clip-2/captions/auto-generate');
+
+    expect(res.status).toBe(200);
+    expect(mockTranscribeToWordCues).toHaveBeenCalledWith('projects/proj-1/clips/second.mp4');
+    expect(cueInsertChain.values).toHaveBeenCalledWith(expect.objectContaining({
+      start_seconds: 3.5,
+      end_seconds: 4,
+    }));
+    expect(wordInsertChain.values).toHaveBeenCalledWith([expect.objectContaining({
+      text: 'kept',
+      start_seconds: 3.5,
+      end_seconds: 4,
+    })]);
+    expect(wordInsertChain.values).not.toHaveBeenCalledWith(
+      expect.arrayContaining([expect.objectContaining({ text: 'cut' })]),
+    );
+    expect(res.body.cues[0].words).toEqual([expect.objectContaining({ text: 'kept' })]);
+    expect(orderedClipsChain.orderBy).toHaveBeenCalledWith(expect.anything(), expect.anything());
+    const containsReference = (value: unknown, needle: unknown, seen = new Set<unknown>()): boolean => {
+      if (value === needle) return true;
+      if (value === null || typeof value !== 'object' || seen.has(value)) return false;
+      seen.add(value);
+      return Object.values(value as Record<string, unknown>).some((child) => containsReference(child, needle, seen));
+    };
+    expect(containsReference(orderedClipsChain.where.mock.calls[0][0], projectClips.deleted_at)).toBe(true);
+  });
+
   it('maps a word at source trimStart=5 to the target clip timeline start', () => {
     const translated = translateCaptionDraftsToProjectTimeline(
       [{ startSeconds: 5, endSeconds: 5.5, words: [{ text: 'hello', startSeconds: 5, endSeconds: 5.5 }] }],
@@ -2319,6 +2431,57 @@ describe('POST /api/projects/:id/clips/:clipId/captions/auto-generate', () => {
         { text: 'edge', startSeconds: 9.8, endSeconds: 10 },
       ],
     }]);
+  });
+
+  it('normalizes source bounds and drops reversed, null-duration, and non-finite inputs safely', () => {
+    const normalized = translateCaptionDraftsToProjectTimeline(
+      [{
+        startSeconds: -2,
+        endSeconds: 20,
+        words: [
+          { text: 'left', startSeconds: -2, endSeconds: 1 },
+          { text: 'right', startSeconds: 9, endSeconds: 20 },
+          { text: 'nan', startSeconds: Number.NaN, endSeconds: 3 },
+          { text: 'infinite', startSeconds: 3, endSeconds: Number.POSITIVE_INFINITY },
+        ],
+      }],
+      [
+        { id: 'bad-predecessor', trimStartSeconds: 0, trimEndSeconds: Number.POSITIVE_INFINITY, originalDurationSeconds: null },
+        { id: 'target', trimStartSeconds: -5, trimEndSeconds: 20, originalDurationSeconds: 10 },
+      ],
+      'target',
+    );
+
+    expect(normalized).toEqual([{
+      startSeconds: 0,
+      endSeconds: 10,
+      words: [
+        { text: 'left', startSeconds: 0, endSeconds: 1 },
+        { text: 'right', startSeconds: 9, endSeconds: 10 },
+      ],
+    }]);
+    expect(JSON.stringify(normalized)).not.toMatch(/NaN|Infinity/);
+
+    expect(translateCaptionDraftsToProjectTimeline(
+      [{ startSeconds: 0, endSeconds: 1, words: [{ text: 'x', startSeconds: 0, endSeconds: 1 }] }],
+      [{ id: 'target', trimStartSeconds: 5, trimEndSeconds: 2, originalDurationSeconds: 10 }],
+      'target',
+    )).toEqual([]);
+    expect(translateCaptionDraftsToProjectTimeline(
+      [{ startSeconds: 0, endSeconds: 1, words: [{ text: 'x', startSeconds: 0, endSeconds: 1 }] }],
+      [{ id: 'target', trimStartSeconds: 0, trimEndSeconds: null, originalDurationSeconds: null }],
+      'target',
+    )).toEqual([]);
+    expect(translateCaptionDraftsToProjectTimeline(
+      [{ startSeconds: 0, endSeconds: 1, words: [{ text: 'x', startSeconds: 0, endSeconds: 1 }] }],
+      [{ id: 'target', trimStartSeconds: Number.NaN, trimEndSeconds: 2, originalDurationSeconds: 10 }],
+      'target',
+    )).toEqual([]);
+    expect(translateCaptionDraftsToProjectTimeline(
+      [{ startSeconds: 0, endSeconds: 1, words: [{ text: 'x', startSeconds: 0, endSeconds: 1 }] }],
+      [{ id: 'target', trimStartSeconds: 0, trimEndSeconds: 2, originalDurationSeconds: Number.POSITIVE_INFINITY }],
+      'target',
+    )).toEqual([]);
   });
 });
 

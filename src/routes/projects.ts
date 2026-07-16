@@ -490,7 +490,7 @@ projectsRouter.patch('/:id/clips/:clipId', async (req: Request, res: Response) =
   const projectId = req.params.id as string;
   const clipId = req.params.clipId as string;
   const { sort_order, trim_start_seconds, trim_end_seconds } = req.body ?? {};
-  const trimWasUpdated = trim_start_seconds !== undefined || trim_end_seconds !== undefined;
+  const trimWasSupplied = trim_start_seconds !== undefined || trim_end_seconds !== undefined;
 
   try {
     const [ownedProject] = await db
@@ -512,15 +512,15 @@ projectsRouter.patch('/:id/clips/:clipId', async (req: Request, res: Response) =
       requestedSortOrder = sort_order;
     }
     if (trim_start_seconds !== undefined) {
-      if (typeof trim_start_seconds !== 'number') {
-        res.status(400).json({ error: 'trim_start_seconds must be a number' });
+      if (typeof trim_start_seconds !== 'number' || !Number.isFinite(trim_start_seconds) || trim_start_seconds < 0) {
+        res.status(400).json({ error: 'trim_start_seconds must be a finite non-negative number' });
         return;
       }
       setValues.trim_start_seconds = trim_start_seconds;
     }
     if (trim_end_seconds !== undefined) {
-      if (typeof trim_end_seconds !== 'number') {
-        res.status(400).json({ error: 'trim_end_seconds must be a number' });
+      if (typeof trim_end_seconds !== 'number' || !Number.isFinite(trim_end_seconds) || trim_end_seconds < 0) {
+        res.status(400).json({ error: 'trim_end_seconds must be a finite non-negative number' });
         return;
       }
       setValues.trim_end_seconds = trim_end_seconds;
@@ -530,8 +530,54 @@ projectsRouter.patch('/:id/clips/:clipId', async (req: Request, res: Response) =
       return;
     }
 
+    let trimActuallyChanged = false;
+    if (trimWasSupplied) {
+      const [currentClip] = await db
+        .select({
+          trim_start_seconds: projectClips.trim_start_seconds,
+          trim_end_seconds: projectClips.trim_end_seconds,
+          original_duration_seconds: projectClips.original_duration_seconds,
+        })
+        .from(projectClips)
+        .where(
+          and(eq(projectClips.id, clipId), eq(projectClips.project_id, projectId), isNull(projectClips.deleted_at)),
+        );
+      if (!currentClip) {
+        res.status(404).json({ error: 'Clip not found' });
+        return;
+      }
+
+      const nextTrimStart = trim_start_seconds ?? currentClip.trim_start_seconds;
+      const nextTrimEnd = trim_end_seconds ?? currentClip.trim_end_seconds ?? currentClip.original_duration_seconds;
+      if (
+        !Number.isFinite(nextTrimStart) ||
+        nextTrimStart < 0 ||
+        (nextTrimEnd !== null && (!Number.isFinite(nextTrimEnd) || nextTrimEnd < 0)) ||
+        (currentClip.original_duration_seconds !== null &&
+          (!Number.isFinite(currentClip.original_duration_seconds) || currentClip.original_duration_seconds < 0))
+      ) {
+        res.status(409).json({ error: 'Clip has invalid trim metadata' });
+        return;
+      }
+      if (nextTrimEnd !== null && nextTrimStart >= nextTrimEnd) {
+        res.status(400).json({ error: 'trim_start_seconds must be less than trim_end_seconds' });
+        return;
+      }
+      if (
+        currentClip.original_duration_seconds !== null &&
+        (nextTrimStart > currentClip.original_duration_seconds ||
+          (nextTrimEnd !== null && nextTrimEnd > currentClip.original_duration_seconds))
+      ) {
+        res.status(400).json({ error: 'Trim bounds cannot exceed the clip source duration' });
+        return;
+      }
+      trimActuallyChanged =
+        (trim_start_seconds !== undefined && trim_start_seconds !== currentClip.trim_start_seconds) ||
+        (trim_end_seconds !== undefined && trim_end_seconds !== currentClip.trim_end_seconds);
+    }
+
     const captionStalenessResponse = async (): Promise<{ captions_may_be_stale?: true }> => {
-      if (!trimWasUpdated) return {};
+      if (!trimActuallyChanged) return {};
       const [captionCue] = await db
         .select({ id: projectCaptionCues.id })
         .from(projectCaptionCues)
