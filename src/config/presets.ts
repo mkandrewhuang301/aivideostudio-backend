@@ -125,6 +125,13 @@ export interface PresetDef {
    */
   prompt_template_with_reference?: string;
   /**
+   * SERVER-ONLY. Bundled visual examples prepended to an image preset's user-uploaded slots.
+   * The array order is load-bearing because prompt_template may refer to the examples first and
+   * the user's actual subject photos last. These private R2 keys are never serialized to iOS;
+   * presetResolver signs them just-in-time for provider dispatch.
+   */
+  fixed_reference_keys?: string[];
+  /**
    * SERVER-ONLY (09.3, D-03/D-05). R2/public URL of the bundled canonical character still image
    * (e.g. the gorilla vlogger) — injected server-side into `reference_images`, ahead of any user
    * upload slots. Never reaches the client (CLIENT_PRESETS strips it).
@@ -768,25 +775,43 @@ export const SERVER_PRESETS: PresetDef[] = [
     status: 'live',
     media_type: 'image',
     model: 'openai/gpt-image-2-medium', // D-22: medium tier, 5 credits
+    // The first two inputs teach GPT Image 2 the childhood/adulthood Polaroid Hug composition;
+    // presetResolver appends the user's childhood + adulthood photos after them in slot order.
+    fixed_reference_keys: [
+      'preset-assets/polaroid/references/example-1.png',
+      'preset-assets/polaroid/references/example-2.png',
+    ],
     prompt_template:
-      'Composite the two people from the reference photos into a single vintage polaroid-style ' +
-      'photograph, warmly hugging each other, soft film grain, warm polaroid color grading, ' +
-      'natural lighting, photorealistic, both faces clearly visible and unchanged.',
+      'The FIRST TWO images are visual examples only: they show the desired childhood/adulthood ' +
+      'Polaroid Hug composition and aesthetic. Do not copy or depict the people from those example ' +
+      'images. Create a new single photorealistic Polaroid photograph using the people in the LAST ' +
+      'TWO images: image 3 is the person as a child and image 4 is the same person as an adult. ' +
+      'Preserve both ages and facial identities faithfully. The adult must lovingly hold or hug ' +
+      'their younger self. You have creative liberty with natural standing or seated poses and should ' +
+      'vary the camera framing between chest-up and waist-up compositions so the results do not all ' +
+      'use the same pose or crop. Vary their natural expressions too: they may smirk or smile with ' +
+      'their teeth showing. Keep both faces clearly visible. Use subtle vintage instant-film ' +
+      'grain and warm natural color. Make one cohesive photograph, not a collage. The surrounding ' +
+      'non-photo Polaroid card/border must be clean pure white.',
     input_schema: {
       slots: [
-        { kind: 'image', label: 'Person 1', source: 'any' },
-        { kind: 'image', label: 'Person 2', source: 'any' },
+        { kind: 'image', label: 'Childhood photo', source: 'any' },
+        { kind: 'image', label: 'Adult photo', source: 'any' },
       ],
     },
     cost: { type: 'flat', credits: 5 },
     sheet: {
       description:
-        'Composite two people into one warm, vintage polaroid-style photo — hugging like old friends.',
+        'Upload a childhood photo and an adult photo — hold your younger self in a timeless Polaroid.',
       aspect_ratios: ['3:2', '1:1', '2:3'],
-      default_aspect_ratio: '1:1',
+      default_aspect_ratio: '2:3',
       resolution_label: 'High resolution',
     },
-    tile: placeholderTile('polaroid'),
+    tile: {
+      poster_url: 'https://pub-cec5aa79de50452fa7eac827a03d7e04.r2.dev/presets/polaroid/poster-v1.jpg',
+      loop_url: 'https://pub-cec5aa79de50452fa7eac827a03d7e04.r2.dev/presets/polaroid/loop-v1.mp4',
+      aspect: '3:4',
+    },
   },
   {
     preset_id: 'enhancer-image',
@@ -1051,6 +1076,7 @@ export const CLIENT_PRESETS = SERVER_PRESETS.map((def) => {
   const {
     prompt_template,
     prompt_template_with_reference,
+    fixed_reference_keys,
     character_asset,
     script_expansion,
     dialogue_prompt_template,

@@ -67,6 +67,16 @@ describe('presets registry config', () => {
     expect(JSON.stringify(CLIENT_PRESETS)).not.toContain('prompt_template');
   });
 
+  it('keeps bundled preset reference assets server-only', () => {
+    const serverPolaroid = SERVER_PRESETS.find((p) => p.preset_id === 'polaroid');
+    const clientPolaroid = CLIENT_PRESETS.find((p) => p.preset_id === 'polaroid');
+    expect(serverPolaroid?.fixed_reference_keys).toHaveLength(2);
+    expect(serverPolaroid?.tile.poster_url).toContain('/presets/polaroid/poster-v1.jpg');
+    expect(serverPolaroid?.tile.loop_url).toContain('/presets/polaroid/loop-v1.mp4');
+    expect(clientPolaroid).not.toHaveProperty('fixed_reference_keys');
+    expect(JSON.stringify(CLIENT_PRESETS)).not.toContain('preset-assets/polaroid/references/');
+  });
+
   // 09.3 (SC3): the character-system registry fields (D-03/D-05) are server-only — this is now a
   // live regression guard since the 09.3-06 8-row drop actually exercises these fields
   // (gorilla-vlogs's character_asset/script_expansion/dialogue_prompt_template, viral-motions'

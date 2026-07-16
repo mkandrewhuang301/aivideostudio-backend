@@ -18,6 +18,11 @@
 // Each becomes both the PresetInputSheet grid thumbnail AND the second reference image sent to
 // the model alongside the user's own photo (see presetResolver.ts). Independent of loop.mp4 —
 // a preset can have style photos uploaded before/without its tile art existing yet.
+//
+// Also scans <preset_id>/references/<reference_id>.{jpg,jpeg,png} for server-only visual examples
+// prepended by presetResolver (for example Polaroid Hug). Unlike public card/style art, these are
+// written to the app's PRIVATE R2 bucket and resolved to short-lived signed URLs per generation.
+// Pass `--preset <preset_id>` to ingest a single folder without re-versioning unrelated assets.
 
 import 'dotenv/config';
 import { execFileSync } from 'child_process';
@@ -26,6 +31,7 @@ import { join } from 'path';
 import { tmpdir } from 'os';
 import { S3Client, PutObjectCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
 import { config } from '../config';
+import { r2 as privateR2, R2_BUCKET } from '../storage/r2';
 
 const ASSETS_DIR = join(__dirname, '..', '..', 'assets', 'preset-art');
 
@@ -125,6 +131,16 @@ async function uploadFile(localPath: string, key: string, contentType: string): 
   return publicUrl(key);
 }
 
+async function uploadPrivateFile(localPath: string, key: string, contentType: string): Promise<string> {
+  await privateR2.send(new PutObjectCommand({
+    Bucket: R2_BUCKET,
+    Key: key,
+    Body: readFileSync(localPath),
+    ContentType: contentType,
+  }));
+  return key;
+}
+
 async function processPreset(presetId: string, folder: string, hasFfmpeg: boolean): Promise<{ posterUrl: string; loopUrl: string } | null> {
   const loopPath = join(folder, 'loop.mp4');
   const posterPathInput = join(folder, 'poster.jpg');
@@ -199,11 +215,16 @@ function resizeStylePhoto(inputPath: string, outputPath: string): void {
   ], { stdio: 'ignore' });
 }
 
-async function processStylePhotos(presetId: string, folder: string, hasFfmpeg: boolean): Promise<Record<string, string>> {
-  const stylesDir = join(folder, 'styles');
-  if (!existsSync(stylesDir)) return {};
+async function processPhotoDirectory(
+  presetId: string,
+  folder: string,
+  directoryName: 'styles' | 'references',
+  hasFfmpeg: boolean,
+): Promise<Record<string, string>> {
+  const photosDir = join(folder, directoryName);
+  if (!existsSync(photosDir)) return {};
 
-  const files = readdirSync(stylesDir, { withFileTypes: true })
+  const files = readdirSync(photosDir, { withFileTypes: true })
     .filter((entry) => entry.isFile())
     .map((entry) => entry.name)
     .filter((name) => Object.keys(IMAGE_EXT_CONTENT_TYPE).some((ext) => name.toLowerCase().endsWith(ext)));
@@ -212,11 +233,11 @@ async function processStylePhotos(presetId: string, folder: string, hasFfmpeg: b
 
   for (const filename of files) {
     const ext = Object.keys(IMAGE_EXT_CONTENT_TYPE).find((e) => filename.toLowerCase().endsWith(e))!;
-    const styleId = filename.slice(0, -ext.length);
-    const inputPath = join(stylesDir, filename);
+    const photoId = filename.slice(0, -ext.length);
+    const inputPath = join(photosDir, filename);
 
     let finalPath = inputPath;
-    const workDir = join(tmpdir(), `preset-art-${presetId}-style-${styleId}-${Date.now()}`);
+    const workDir = join(tmpdir(), `preset-art-${presetId}-${directoryName}-${photoId}-${Date.now()}`);
     if (hasFfmpeg) {
       mkdirSync(workDir, { recursive: true });
       const resized = join(workDir, `resized${ext}`);
@@ -224,15 +245,20 @@ async function processStylePhotos(presetId: string, folder: string, hasFfmpeg: b
         resizeStylePhoto(inputPath, resized);
         finalPath = resized;
       } catch (err) {
-        console.warn(`[upload:preset-art] "${presetId}" style "${styleId}" — resize failed, uploading as-is:`, (err as Error).message);
+        console.warn(`[upload:preset-art] "${presetId}" ${directoryName} "${photoId}" — resize failed, uploading as-is:`, (err as Error).message);
       }
     }
 
-    const prefix = `presets/${presetId}/styles/${styleId}-`;
-    const version = await nextVersion(prefix);
-    const key = `${prefix}v${version}${ext}`;
-    results[styleId] = await uploadFile(finalPath, key, IMAGE_EXT_CONTENT_TYPE[ext]);
-    console.log(`[upload:preset-art] "${presetId}" — uploaded style "${styleId}"`);
+    if (directoryName === 'references') {
+      const key = `preset-assets/${presetId}/references/${photoId}${ext}`;
+      results[photoId] = await uploadPrivateFile(finalPath, key, IMAGE_EXT_CONTENT_TYPE[ext]);
+    } else {
+      const prefix = `presets/${presetId}/${directoryName}/${photoId}-`;
+      const version = await nextVersion(prefix);
+      const key = `${prefix}v${version}${ext}`;
+      results[photoId] = await uploadFile(finalPath, key, IMAGE_EXT_CONTENT_TYPE[ext]);
+    }
+    console.log(`[upload:preset-art] "${presetId}" — uploaded ${directoryName} "${photoId}"`);
   }
 
   return results;
@@ -252,16 +278,22 @@ async function main() {
   const entries = readdirSync(ASSETS_DIR, { withFileTypes: true })
     .filter((entry) => entry.isDirectory())
     .map((entry) => entry.name);
+  const presetArgIndex = process.argv.indexOf('--preset');
+  const requestedPreset = presetArgIndex >= 0 ? process.argv[presetArgIndex + 1] : undefined;
+  const selectedEntries = requestedPreset ? entries.filter((entry) => entry === requestedPreset) : entries;
 
-  if (entries.length === 0) {
-    console.log('[upload:preset-art] No preset folders found. Nothing to upload.');
+  if (selectedEntries.length === 0) {
+    console.log(requestedPreset
+      ? `[upload:preset-art] Preset folder "${requestedPreset}" not found. Nothing to upload.`
+      : '[upload:preset-art] No preset folders found. Nothing to upload.');
     return;
   }
 
   const results: Record<string, { posterUrl: string; loopUrl: string }> = {};
   const styleResults: Record<string, Record<string, string>> = {};
+  const referenceResults: Record<string, Record<string, string>> = {};
 
-  for (const presetId of entries) {
+  for (const presetId of selectedEntries) {
     const folder = join(ASSETS_DIR, presetId);
     if (!statSync(folder).isDirectory()) continue;
 
@@ -270,15 +302,21 @@ async function main() {
       results[presetId] = result;
     }
 
-    const stylePhotos = await processStylePhotos(presetId, folder, hasFfmpeg);
+    const stylePhotos = await processPhotoDirectory(presetId, folder, 'styles', hasFfmpeg);
     if (Object.keys(stylePhotos).length > 0) {
       styleResults[presetId] = stylePhotos;
+    }
+
+    const referencePhotos = await processPhotoDirectory(presetId, folder, 'references', hasFfmpeg);
+    if (Object.keys(referencePhotos).length > 0) {
+      referenceResults[presetId] = referencePhotos;
     }
   }
 
   const uploadedIds = Object.keys(results);
   const styledPresetIds = Object.keys(styleResults);
-  if (uploadedIds.length === 0 && styledPresetIds.length === 0) {
+  const referencedPresetIds = Object.keys(referenceResults);
+  if (uploadedIds.length === 0 && styledPresetIds.length === 0 && referencedPresetIds.length === 0) {
     console.log('[upload:preset-art] No presets were uploaded.');
     return;
   }
@@ -300,6 +338,17 @@ async function main() {
       console.log(`  ${presetId}:`);
       for (const [styleId, url] of Object.entries(styleResults[presetId])) {
         console.log(`    ${styleId} -> thumb_url: '${url}',`);
+      }
+    }
+    console.log('');
+  }
+
+  if (referencedPresetIds.length > 0) {
+    console.log('[upload:preset-art] Private server-only reference photos uploaded — paste these into fixed_reference_keys:\n');
+    for (const presetId of referencedPresetIds) {
+      console.log(`  ${presetId}:`);
+      for (const [referenceId, url] of Object.entries(referenceResults[presetId])) {
+        console.log(`    ${referenceId} -> '${url}',`);
       }
     }
     console.log('');

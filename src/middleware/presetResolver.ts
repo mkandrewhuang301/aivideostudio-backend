@@ -230,10 +230,18 @@ export async function presetResolver(req: Request, res: Response, next: NextFunc
           res.status(400).json({ error: 'Missing required image', code: 'INVALID_PRESET_INPUT' });
           return;
         }
-        // styleReferenceUrl (hairstyle's per-style thumb_url, once populated) is appended AFTER
-        // the user's own slot photo(s) — order matches prompt_template_with_reference's
-        // "first image" / "second image" framing.
-        req.body.reference_images = [...slotUrls.filter(Boolean), ...(styleReferenceUrl ? [styleReferenceUrl] : [])];
+        // Bundled fixed_reference_keys (Polaroid Hug's two composition examples) come FIRST as
+        // short-lived private-bucket URLs — never permanent public URLs and never client-visible —
+        // then the user's actual subject slots in their declared order. A styleReferenceUrl
+        // (Hairstyle) remains last, preserving its existing "first image" / "second image" prompt.
+        const fixedReferenceUrls = await Promise.all(
+          (def.fixed_reference_keys ?? []).map((key) => getUploadPresignedUrl(key)),
+        );
+        req.body.reference_images = [
+          ...fixedReferenceUrls,
+          ...slotUrls.filter(Boolean),
+          ...(styleReferenceUrl ? [styleReferenceUrl] : []),
+        ];
 
         // Magic Editor (09.2-08, T-09.2-17): resolve the client's mask_upload_id to a fresh
         // presigned URL, ownership-scoped to req.user.dbUserId via the SAME referenceUploads
