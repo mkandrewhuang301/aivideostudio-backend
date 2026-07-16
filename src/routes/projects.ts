@@ -547,8 +547,10 @@ projectsRouter.patch('/:id/clips/:clipId', async (req: Request, res: Response) =
         return;
       }
 
-      const nextTrimStart = trim_start_seconds ?? currentClip.trim_start_seconds;
-      const nextTrimEnd = trim_end_seconds ?? currentClip.trim_end_seconds ?? currentClip.original_duration_seconds;
+      const oldEffectiveTrimStart = currentClip.trim_start_seconds;
+      const oldEffectiveTrimEnd = currentClip.trim_end_seconds ?? currentClip.original_duration_seconds;
+      const nextTrimStart = trim_start_seconds ?? oldEffectiveTrimStart;
+      const nextTrimEnd = trim_end_seconds ?? oldEffectiveTrimEnd;
       if (
         !Number.isFinite(nextTrimStart) ||
         nextTrimStart < 0 ||
@@ -571,9 +573,7 @@ projectsRouter.patch('/:id/clips/:clipId', async (req: Request, res: Response) =
         res.status(400).json({ error: 'Trim bounds cannot exceed the clip source duration' });
         return;
       }
-      trimActuallyChanged =
-        (trim_start_seconds !== undefined && trim_start_seconds !== currentClip.trim_start_seconds) ||
-        (trim_end_seconds !== undefined && trim_end_seconds !== currentClip.trim_end_seconds);
+      trimActuallyChanged = nextTrimStart !== oldEffectiveTrimStart || nextTrimEnd !== oldEffectiveTrimEnd;
     }
 
     const captionStalenessResponse = async (): Promise<{ captions_may_be_stale?: true }> => {

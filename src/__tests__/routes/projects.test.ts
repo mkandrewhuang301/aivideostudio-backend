@@ -880,6 +880,25 @@ describe('PATCH /api/projects/:id/clips/:clipId', () => {
     expect(dbMock.select).toHaveBeenCalledTimes(2);
   });
 
+  it('treats a null trim end and an explicit source-duration end as the same visible window', async () => {
+    dbMock.select
+      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }])) // owned project
+      .mockReturnValueOnce(makeChain([{
+        trim_start_seconds: 0, trim_end_seconds: null, original_duration_seconds: 10,
+      }])); // captions may exist, but equivalent visibility must skip the cue lookup
+    dbMock.update.mockReturnValueOnce(
+      makeChain([{ id: 'clip-1', project_id: 'proj-1', sort_order: 0, trim_start_seconds: 0, trim_end_seconds: 10 }]),
+    );
+
+    const res = await request(app)
+      .patch('/api/projects/proj-1/clips/clip-1')
+      .send({ trim_end_seconds: 10 });
+
+    expect(res.status).toBe(200);
+    expect(res.body).not.toHaveProperty('captions_may_be_stale');
+    expect(dbMock.select).toHaveBeenCalledTimes(2);
+  });
+
   it('rejects negative, non-finite JSON, reversed, and out-of-source trim bounds', async () => {
     const invalidInputs = [
       { body: { trim_start_seconds: -1 }, needsCurrentClip: false },
@@ -2348,14 +2367,26 @@ describe('POST /api/projects/:id/clips/:clipId/captions/auto-generate', () => {
       expect.arrayContaining([expect.objectContaining({ text: 'cut' })]),
     );
     expect(res.body.cues[0].words).toEqual([expect.objectContaining({ text: 'kept' })]);
-    expect(orderedClipsChain.orderBy).toHaveBeenCalledWith(expect.anything(), expect.anything());
-    const containsReference = (value: unknown, needle: unknown, seen = new Set<unknown>()): boolean => {
-      if (value === needle) return true;
+    const sqlNodeHasClause = (value: unknown, column: unknown, suffix: string, seen = new Set<unknown>()): boolean => {
       if (value === null || typeof value !== 'object' || seen.has(value)) return false;
       seen.add(value);
-      return Object.values(value as Record<string, unknown>).some((child) => containsReference(child, needle, seen));
+      const record = value as Record<string, unknown>;
+      const chunks = record.queryChunks;
+      if (Array.isArray(chunks)) {
+        const hasColumn = chunks.some((chunk) => chunk === column);
+        const hasSuffix = chunks.some((chunk) => {
+          if (chunk === null || typeof chunk !== 'object') return false;
+          const chunkValue = (chunk as { value?: unknown }).value;
+          return Array.isArray(chunkValue) && chunkValue.includes(suffix);
+        });
+        if (hasColumn && hasSuffix) return true;
+      }
+      return Object.values(record).some((child) => sqlNodeHasClause(child, column, suffix, seen));
     };
-    expect(containsReference(orderedClipsChain.where.mock.calls[0][0], projectClips.deleted_at)).toBe(true);
+    const orderArgs = orderedClipsChain.orderBy.mock.calls[0];
+    expect(sqlNodeHasClause(orderArgs[0], projectClips.sort_order, ' asc')).toBe(true);
+    expect(sqlNodeHasClause(orderArgs[1], projectClips.created_at, ' asc')).toBe(true);
+    expect(sqlNodeHasClause(orderedClipsChain.where.mock.calls[0][0], projectClips.deleted_at, ' is null')).toBe(true);
   });
 
   it('maps a word at source trimStart=5 to the target clip timeline start', () => {
@@ -2482,6 +2513,20 @@ describe('POST /api/projects/:id/clips/:clipId/captions/auto-generate', () => {
       [{ id: 'target', trimStartSeconds: 0, trimEndSeconds: 2, originalDurationSeconds: Number.POSITIVE_INFINITY }],
       'target',
     )).toEqual([]);
+  });
+
+  it('fails closed when individually finite predecessor durations overflow their timeline sum', () => {
+    const translated = translateCaptionDraftsToProjectTimeline(
+      [{ startSeconds: 0, endSeconds: 1, words: [{ text: 'target', startSeconds: 0, endSeconds: 1 }] }],
+      [
+        { id: 'huge-1', trimStartSeconds: 0, trimEndSeconds: Number.MAX_VALUE, originalDurationSeconds: null },
+        { id: 'huge-2', trimStartSeconds: 0, trimEndSeconds: Number.MAX_VALUE, originalDurationSeconds: null },
+        { id: 'target', trimStartSeconds: 0, trimEndSeconds: 1, originalDurationSeconds: 1 },
+      ],
+      'target',
+    );
+
+    expect(translated).toEqual([]);
   });
 });
 

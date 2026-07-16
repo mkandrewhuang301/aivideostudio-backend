@@ -1082,12 +1082,12 @@ export function translateCaptionDraftsToProjectTimeline(
     const duration = Math.max(0, window.end - window.start);
     return Number.isFinite(duration) ? duration : 0;
   };
-  const timelineStart = orderedClips
-    .slice(0, targetIndex)
-    .reduce((total, clip) => {
-      const next = total + visibleDuration(clip);
-      return Number.isFinite(next) ? next : total;
-    }, 0);
+  let timelineStart = 0;
+  for (const clip of orderedClips.slice(0, targetIndex)) {
+    const next = timelineStart + visibleDuration(clip);
+    if (!Number.isFinite(next)) return [];
+    timelineStart = next;
+  }
   const target = orderedClips[targetIndex];
   const targetWindow = normalizeCaptionClipWindow(target);
   if (!targetWindow || targetWindow.end <= targetWindow.start) return [];
@@ -1104,6 +1104,7 @@ export function translateCaptionDraftsToProjectTimeline(
       if (clippedEnd <= clippedStart) continue;
       const mappedStart = Math.max(0, clippedStart - visibleSourceStart + timelineStart);
       const mappedEnd = Math.max(0, clippedEnd - visibleSourceStart + timelineStart);
+      if (!Number.isFinite(mappedStart) || !Number.isFinite(mappedEnd)) continue;
       if (mappedEnd <= mappedStart) continue;
       words.push({
         text: word.text,
