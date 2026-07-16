@@ -22,7 +22,7 @@ import {
   projectCaptionCues,
   generations,
 } from '../db/schema';
-import { eq, and, sql, isNull } from 'drizzle-orm';
+import { eq, and, sql, isNull, asc } from 'drizzle-orm';
 import { getUploadPresignedUrl } from '../services/archivalService';
 import { PRESET_MUSIC } from '../config/presetMusic';
 import { ffmpegQueue } from '../queue/ffmpegWorker';
@@ -60,6 +60,7 @@ import {
   softDeleteClip,
   restoreClip,
   restoreAudioClip,
+  translateCaptionDraftsToProjectTimeline,
   setProjectCover,
   setProjectCoverFromUpload,
 } from '../services/projectService';
@@ -489,6 +490,7 @@ projectsRouter.patch('/:id/clips/:clipId', async (req: Request, res: Response) =
   const projectId = req.params.id as string;
   const clipId = req.params.clipId as string;
   const { sort_order, trim_start_seconds, trim_end_seconds } = req.body ?? {};
+  const trimWasUpdated = trim_start_seconds !== undefined || trim_end_seconds !== undefined;
 
   try {
     const [ownedProject] = await db
@@ -528,6 +530,16 @@ projectsRouter.patch('/:id/clips/:clipId', async (req: Request, res: Response) =
       return;
     }
 
+    const captionStalenessResponse = async (): Promise<{ captions_may_be_stale?: true }> => {
+      if (!trimWasUpdated) return {};
+      const [captionCue] = await db
+        .select({ id: projectCaptionCues.id })
+        .from(projectCaptionCues)
+        .where(eq(projectCaptionCues.project_id, projectId))
+        .limit(1);
+      return captionCue ? { captions_may_be_stale: true } : {};
+    };
+
     // Plan 13-25 L6: sort_order uses move-semantics resequence (dense 0..n-1), not a naive SET.
     if (requestedSortOrder !== undefined) {
       const resequenced = await resequenceClipSortOrder(projectId, clipId, requestedSortOrder);
@@ -547,10 +559,10 @@ projectsRouter.patch('/:id/clips/:clipId', async (req: Request, res: Response) =
           res.status(404).json({ error: 'Clip not found' });
           return;
         }
-        res.status(200).json({ clip });
+        res.status(200).json({ clip, ...(await captionStalenessResponse()) });
         return;
       }
-      res.status(200).json({ clip: resequenced });
+      res.status(200).json({ clip: resequenced, ...(await captionStalenessResponse()) });
       return;
     }
 
@@ -565,7 +577,7 @@ projectsRouter.patch('/:id/clips/:clipId', async (req: Request, res: Response) =
       res.status(404).json({ error: 'Clip not found' });
       return;
     }
-    res.status(200).json({ clip });
+    res.status(200).json({ clip, ...(await captionStalenessResponse()) });
   } catch (err) {
     console.error('[projects] Error updating clip:', err);
     res.status(500).json({ error: 'Failed to update clip' });
@@ -1434,12 +1446,18 @@ projectsRouter.post('/:id/clips/:clipId/captions/auto-generate', async (req: Req
       return;
     }
 
-    const [clip] = await db
-      .select({ r2_key: projectClips.r2_key })
+    const clipRows = await db
+      .select({
+        id: projectClips.id,
+        r2_key: projectClips.r2_key,
+        trim_start_seconds: projectClips.trim_start_seconds,
+        trim_end_seconds: projectClips.trim_end_seconds,
+        original_duration_seconds: projectClips.original_duration_seconds,
+      })
       .from(projectClips)
-      .where(
-        and(eq(projectClips.id, clipId), eq(projectClips.project_id, projectId), isNull(projectClips.deleted_at)),
-      );
+      .where(and(eq(projectClips.project_id, projectId), isNull(projectClips.deleted_at)))
+      .orderBy(asc(projectClips.sort_order), asc(projectClips.created_at));
+    const clip = clipRows.find((row) => row.id === clipId);
     if (!clip) {
       res.status(404).json({ error: 'Clip not found' });
       return;
@@ -1457,12 +1475,27 @@ projectsRouter.post('/:id/clips/:clipId/captions/auto-generate', async (req: Req
       throw transcribeErr;
     }
 
+    const translatedDrafts = translateCaptionDraftsToProjectTimeline(
+      cueDrafts,
+      clipRows.map((row) => ({
+        id: row.id,
+        trimStartSeconds: row.trim_start_seconds,
+        trimEndSeconds: row.trim_end_seconds,
+        originalDurationSeconds: row.original_duration_seconds,
+      })),
+      clipId,
+    );
+
     const cues = [];
-    for (const draft of cueDrafts) {
+    for (const draft of translatedDrafts) {
       const cue = await addCaptionCue(projectId, req.user.dbUserId, {
         startSeconds: draft.startSeconds,
         endSeconds: draft.endSeconds,
-        words: draft.words.map((w) => ({ text: w.text, startSeconds: w.startSeconds, endSeconds: w.endSeconds })),
+        words: (draft.words ?? []).map((w) => ({
+          text: w.text,
+          startSeconds: w.startSeconds,
+          endSeconds: w.endSeconds,
+        })),
       });
       if (cue) cues.push(cue);
     }
@@ -1473,4 +1506,3 @@ projectsRouter.post('/:id/clips/:clipId/captions/auto-generate', async (req: Req
     res.status(500).json({ error: 'Failed to auto-generate captions' });
   }
 });
-

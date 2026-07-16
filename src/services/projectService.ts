@@ -1029,6 +1029,64 @@ export interface AddCaptionCueInput {
   endSeconds: number;
   words?: CaptionWordInput[];
 }
+
+export interface CaptionTimelineClip {
+  id: string;
+  trimStartSeconds: number;
+  trimEndSeconds: number | null;
+  originalDurationSeconds: number | null;
+}
+
+/**
+ * Converts Whisper's source-local word times into the project's global timeline. The target
+ * clip's current position is derived from the authoritative, already-reordered clip rows. Words
+ * outside its visible trim window are removed; boundary-crossing words are clipped so captions
+ * can never spill into an adjacent clip.
+ */
+export function translateCaptionDraftsToProjectTimeline(
+  drafts: AddCaptionCueInput[],
+  orderedClips: CaptionTimelineClip[],
+  targetClipId: string,
+): AddCaptionCueInput[] {
+  const targetIndex = orderedClips.findIndex((clip) => clip.id === targetClipId);
+  if (targetIndex < 0) return [];
+
+  const visibleDuration = (clip: CaptionTimelineClip): number => {
+    const end = clip.trimEndSeconds ?? clip.originalDurationSeconds ?? clip.trimStartSeconds;
+    return Math.max(0, end - clip.trimStartSeconds);
+  };
+  const timelineStart = orderedClips
+    .slice(0, targetIndex)
+    .reduce((total, clip) => total + visibleDuration(clip), 0);
+  const target = orderedClips[targetIndex];
+  const visibleSourceStart = target.trimStartSeconds;
+  const visibleSourceEnd = visibleSourceStart + visibleDuration(target);
+
+  const translated: AddCaptionCueInput[] = [];
+  for (const draft of drafts) {
+    const words: CaptionWordInput[] = [];
+    for (const word of draft.words ?? []) {
+      const clippedStart = Math.max(word.startSeconds, visibleSourceStart);
+      const clippedEnd = Math.min(word.endSeconds, visibleSourceEnd);
+      if (clippedEnd <= clippedStart) continue;
+      const mappedStart = Math.max(0, clippedStart - visibleSourceStart + timelineStart);
+      const mappedEnd = Math.max(0, clippedEnd - visibleSourceStart + timelineStart);
+      if (mappedEnd <= mappedStart) continue;
+      words.push({
+        text: word.text,
+        startSeconds: mappedStart,
+        endSeconds: mappedEnd,
+      });
+    }
+    if (words.length === 0) continue;
+    translated.push({
+      startSeconds: Math.min(...words.map((word) => word.startSeconds)),
+      endSeconds: Math.max(...words.map((word) => word.endSeconds)),
+      words,
+    });
+  }
+  return translated;
+}
 export interface UpdateCaptionCueInput {
   startSeconds?: number;
   endSeconds?: number;

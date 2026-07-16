@@ -64,7 +64,7 @@ import express, { NextFunction, Request, Response } from 'express';
 import request from 'supertest';
 import { CopyObjectCommand, PutObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
 import { projectsRouter } from '../../routes/projects';
-import { smartUnpackOnImport } from '../../services/projectService';
+import { smartUnpackOnImport, translateCaptionDraftsToProjectTimeline } from '../../services/projectService';
 import { TranscriptionError } from '../../services/captionTranscriptionService';
 import { r2 } from '../../storage/r2';
 import { db } from '../../db/client';
@@ -822,7 +822,9 @@ describe('POST /api/projects/:id/clips', () => {
 
 describe('PATCH /api/projects/:id/clips/:clipId', () => {
   it('trims a clip and returns 200', async () => {
-    dbMock.select.mockReturnValueOnce(makeChain([{ id: 'proj-1' }])); // owned project
+    dbMock.select
+      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }])) // owned project
+      .mockReturnValueOnce(makeChain([])); // no captions
     dbMock.update.mockReturnValueOnce(
       makeChain([{ id: 'clip-1', project_id: 'proj-1', sort_order: 0, trim_start_seconds: 2, trim_end_seconds: 8 }]),
     );
@@ -833,6 +835,23 @@ describe('PATCH /api/projects/:id/clips/:clipId', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.clip.trim_start_seconds).toBe(2);
+    expect(res.body).not.toHaveProperty('captions_may_be_stale');
+  });
+
+  it('returns captions_may_be_stale when a trim changes on a project with caption cues', async () => {
+    dbMock.select
+      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }])) // owned project
+      .mockReturnValueOnce(makeChain([{ id: 'cue-1' }])); // project has captions
+    dbMock.update.mockReturnValueOnce(
+      makeChain([{ id: 'clip-1', project_id: 'proj-1', sort_order: 0, trim_start_seconds: 5, trim_end_seconds: 8 }]),
+    );
+
+    const res = await request(app)
+      .patch('/api/projects/proj-1/clips/clip-1')
+      .send({ trim_start_seconds: 5 });
+
+    expect(res.status).toBe(200);
+    expect(res.body.captions_may_be_stale).toBe(true);
   });
 
   it('returns 404 when the project is not owned by the requester', async () => {
@@ -904,6 +923,7 @@ describe('PATCH /api/projects/:id/clips/:clipId', () => {
     expect(res.status).toBe(200);
     expect(res.body.clip.id).toBe('clip-0');
     expect(res.body.clip.sort_order).toBe(2);
+    expect(res.body).not.toHaveProperty('captions_may_be_stale');
     expect(finalOrder).toEqual([
       { id: 'clip-1', sort_order: 0 },
       { id: 'clip-2', sort_order: 1 },
@@ -2174,7 +2194,10 @@ describe('POST /api/projects/:id/clips/:clipId/captions/auto-generate', () => {
   it('happy path: transcribes the clip and persists each returned cue via addCaptionCue, 200', async () => {
     dbMock.select
       .mockReturnValueOnce(makeChain([{ id: 'proj-1' }])) // owned project
-      .mockReturnValueOnce(makeChain([{ r2_key: 'projects/proj-1/clips/a.mp4' }])) // clip lookup
+      .mockReturnValueOnce(makeChain([{
+        id: 'clip-1', r2_key: 'projects/proj-1/clips/a.mp4', trim_start_seconds: 0,
+        trim_end_seconds: 5, original_duration_seconds: 5,
+      }])) // ordered clip lookup
       .mockReturnValueOnce(makeChain([{ id: 'proj-1' }])); // addCaptionCue's internal isProjectOwned
     mockTranscribeToWordCues.mockResolvedValueOnce([
       {
@@ -2210,7 +2233,10 @@ describe('POST /api/projects/:id/clips/:clipId/captions/auto-generate', () => {
   it('returns 502 when transcription fails, and never calls addCaptionCue', async () => {
     dbMock.select
       .mockReturnValueOnce(makeChain([{ id: 'proj-1' }])) // owned project
-      .mockReturnValueOnce(makeChain([{ r2_key: 'projects/proj-1/clips/a.mp4' }])); // clip lookup
+      .mockReturnValueOnce(makeChain([{
+        id: 'clip-1', r2_key: 'projects/proj-1/clips/a.mp4', trim_start_seconds: 0,
+        trim_end_seconds: 5, original_duration_seconds: 5,
+      }])); // ordered clip lookup
     mockTranscribeToWordCues.mockRejectedValueOnce(new TranscriptionError('OpenAI transcription failed (500): boom'));
 
     const res = await request(app).post('/api/projects/proj-1/clips/clip-1/captions/auto-generate');
@@ -2218,6 +2244,81 @@ describe('POST /api/projects/:id/clips/:clipId/captions/auto-generate', () => {
     expect(res.status).toBe(502);
     expect(res.body.error).toBe('Transcription failed');
     expect(dbMock.insert).not.toHaveBeenCalled();
+  });
+
+  it('maps a word at source trimStart=5 to the target clip timeline start', () => {
+    const translated = translateCaptionDraftsToProjectTimeline(
+      [{ startSeconds: 5, endSeconds: 5.5, words: [{ text: 'hello', startSeconds: 5, endSeconds: 5.5 }] }],
+      [{ id: 'clip-a', trimStartSeconds: 5, trimEndSeconds: 10, originalDurationSeconds: 10 }],
+      'clip-a',
+    );
+
+    expect(translated[0].words?.[0]).toEqual({ text: 'hello', startSeconds: 0, endSeconds: 0.5 });
+    expect(translated[0].startSeconds).toBe(0);
+  });
+
+  it('drops a word wholly inside the trimmed-away beginning', () => {
+    const translated = translateCaptionDraftsToProjectTimeline(
+      [{ startSeconds: 2, endSeconds: 3, words: [{ text: 'cut', startSeconds: 2, endSeconds: 3 }] }],
+      [{ id: 'clip-a', trimStartSeconds: 5, trimEndSeconds: 10, originalDurationSeconds: 10 }],
+      'clip-a',
+    );
+
+    expect(translated).toEqual([]);
+  });
+
+  it("offsets a second clip's words by the first clip's trimmed duration", () => {
+    const translated = translateCaptionDraftsToProjectTimeline(
+      [{ startSeconds: 2, endSeconds: 2.5, words: [{ text: 'second', startSeconds: 2, endSeconds: 2.5 }] }],
+      [
+        { id: 'clip-a', trimStartSeconds: 1, trimEndSeconds: 4, originalDurationSeconds: 8 },
+        { id: 'clip-b', trimStartSeconds: 2, trimEndSeconds: 7, originalDurationSeconds: 9 },
+      ],
+      'clip-b',
+    );
+
+    expect(translated[0].words?.[0]).toEqual({ text: 'second', startSeconds: 3, endSeconds: 3.5 });
+  });
+
+  it('leaves an untrimmed single clip unchanged', () => {
+    const translated = translateCaptionDraftsToProjectTimeline(
+      [{ startSeconds: 1, endSeconds: 2, words: [{ text: 'same', startSeconds: 1, endSeconds: 2 }] }],
+      [{ id: 'clip-a', trimStartSeconds: 0, trimEndSeconds: null, originalDurationSeconds: 10 }],
+      'clip-a',
+    );
+
+    expect(translated).toEqual([
+      { startSeconds: 1, endSeconds: 2, words: [{ text: 'same', startSeconds: 1, endSeconds: 2 }] },
+    ]);
+  });
+
+  it('clamps boundary-overlapping words and derives cue bounds from mapped words', () => {
+    const translated = translateCaptionDraftsToProjectTimeline(
+      [{
+        startSeconds: 1.5,
+        endSeconds: 8.5,
+        words: [
+          { text: 'before', startSeconds: 1.5, endSeconds: 1.9 },
+          { text: 'hello', startSeconds: 2.5, endSeconds: 3.0 },
+          { text: 'edge', startSeconds: 7.8, endSeconds: 8.4 },
+          { text: 'after', startSeconds: 8.5, endSeconds: 9.0 },
+        ],
+      }],
+      [
+        { id: 'clip-b', trimStartSeconds: 0, trimEndSeconds: 4, originalDurationSeconds: 4 },
+        { id: 'clip-a', trimStartSeconds: 2, trimEndSeconds: 8, originalDurationSeconds: 10 },
+      ],
+      'clip-a',
+    );
+
+    expect(translated).toEqual([{
+      startSeconds: 4.5,
+      endSeconds: 10,
+      words: [
+        { text: 'hello', startSeconds: 4.5, endSeconds: 5 },
+        { text: 'edge', startSeconds: 9.8, endSeconds: 10 },
+      ],
+    }]);
   });
 });
 
