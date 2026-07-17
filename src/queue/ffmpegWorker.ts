@@ -13,12 +13,19 @@
 import { Queue, Worker, Job } from 'bullmq';
 import { execFile } from 'child_process';
 import { config } from '../config';
-import { markCompleted, markFailed, mergeGenerationParams } from '../services/generationService';
+import {
+  markCompleted,
+  markFailed,
+  markQuarantined,
+  mergeGenerationParams,
+} from '../services/generationService';
 import { refundCredits } from '../services/creditService';
 import { sendGenerationComplete } from '../services/apnsService';
+import { scanForCsam } from '../services/hiveService';
 import { db } from '../db/client';
 import { sql } from 'drizzle-orm';
 import { runFfmpegOp } from './ffmpegProcessor';
+import { hiveScanQueue } from './hiveScanWorker';
 
 const QUEUE_NAME = 'ffmpeg-postprocess';
 export const FFMPEG_ATTEMPTS = 3;
@@ -160,6 +167,37 @@ export async function processFfmpegJob(data: FfmpegJobData): Promise<void> {
   const { generationId, userId, mediaType } = data;
 
   const { r2Key, masterR2Key } = await runFfmpegOp(data);
+
+  // Every ffmpeg output is a newly assembled delivery artifact. It must pass the same final
+  // CSAM boundary as webhook and OpenAI outputs before the row becomes client-visible.
+  if (config.hiveScanEnabled) {
+    try {
+      const { flagged } = await scanForCsam(r2Key);
+      if (flagged) {
+        await markQuarantined(generationId);
+        await refundCredits(
+          userId,
+          data.costCredits,
+          `csam-quarantine-ffmpeg-${generationId}`,
+        );
+        console.warn(`[ffmpeg-postprocess] CSAM flagged: generation ${generationId} quarantined`);
+        return;
+      }
+    } catch (hiveErr) {
+      // Fail safe: the generic retry worker owns scan retries and completion. Never expose a
+      // newly composed output merely because the first Hive request failed.
+      console.error(`[ffmpeg-postprocess] Hive scan error for ${generationId} — queuing retry:`, hiveErr);
+      await hiveScanQueue.add('scan', {
+        generationId,
+        r2Key,
+        userId,
+        costCredits: data.costCredits,
+        mediaType,
+      });
+      console.log(`[ffmpeg-postprocess] Hive retry queued for generation ${generationId}`);
+      return;
+    }
+  }
 
   const completed = await markCompleted(generationId, r2Key);
   if (completed) {
