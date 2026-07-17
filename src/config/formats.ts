@@ -98,7 +98,7 @@ export interface FormatDef {
 export const SERVER_FORMATS: FormatDef[] = [
   {
     format_id: 'explainer',
-    title: 'Explainer',
+    title: 'AI Explainer',
     subtitle: 'A narrated, animated video from any topic',
     section: 'formats',
     badge: 'NEW',
