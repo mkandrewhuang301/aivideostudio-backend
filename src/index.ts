@@ -15,6 +15,7 @@ import { scheduleUploadReaper } from './queue/uploadReaperWorker';
 import { scheduleYearlyGrant } from './queue/yearlyGrantWorker';
 import './queue/hiveScanWorker';
 import './queue/openaiGenerationWorker';
+import './queue/falImageToolWorker';
 import './queue/chainGenerationWorker';
 import './queue/explainerGenerationWorker';
 import './queue/influencerProWorker';

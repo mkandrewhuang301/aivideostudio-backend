@@ -19,8 +19,10 @@ jest.mock('@fal-ai/client', () => ({
 
 import {
   FalProvider,
+  FAL_IMAGE_BACKGROUND_REMOVAL_MODEL,
   FAL_KLING_V3_STANDARD_I2V_MODEL,
   encodePredictionId,
+  falRunImageBackgroundRemoval,
   falRunLyria,
   falRunOmniI2v,
   falRunTts,
@@ -116,6 +118,25 @@ describe('FalProvider — blocking Explainer media calls', () => {
         image_url: 'https://r2.example.com/still.png',
         aspect_ratio: '9:16',
         duration: 4,
+      },
+    });
+  });
+
+  it('maps photo background removal to the live Pixelcut contract', async () => {
+    subscribeMock.mockResolvedValue({
+      data: { image: { url: 'https://fal.media/cutout.png' } },
+      requestId: 'remove-bg-1',
+    });
+
+    await expect(
+      falRunImageBackgroundRemoval('https://r2.example.com/source.jpg'),
+    ).resolves.toBe('https://fal.media/cutout.png');
+
+    expect(subscribeMock).toHaveBeenCalledWith(FAL_IMAGE_BACKGROUND_REMOVAL_MODEL, {
+      input: {
+        image_url: 'https://r2.example.com/source.jpg',
+        output_format: 'rgba',
+        sync_mode: false,
       },
     });
   });

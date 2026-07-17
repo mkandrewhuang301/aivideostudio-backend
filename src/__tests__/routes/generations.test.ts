@@ -89,7 +89,7 @@ jest.mock('../../services/generationService', () => ({
     'xai/grok-imagine-video-1.5':  ['480p', '720p'],
     'alibaba/happyhorse-1.1':      ['720p', '1080p'],
   },
-  SUPPORTED_IMAGE_MODELS: ['openai/gpt-image-2-high', 'openai/gpt-image-2-medium', 'openai/gpt-image-2-low', 'openai/gpt-image-2'],
+  SUPPORTED_IMAGE_MODELS: ['openai/gpt-image-2-high', 'openai/gpt-image-2-medium', 'openai/gpt-image-2-low', 'openai/gpt-image-2', 'pixelcut/background-removal'],
   SUPPORTED_AVATAR_MODELS: ['bytedance/dreamactor-m2.0'],
   SUPPORTED_UPSCALER_MODELS: ['bytedance/video-upscaler'],
   SUPPORTED_IMAGE_UPSCALE_MODELS: ['recraft-ai/recraft-crisp-upscale'],
@@ -117,6 +117,7 @@ jest.mock('../../services/providers/ReplicateProvider', () => {
 });
 
 jest.mock('../../services/providers/FalProvider', () => ({
+  FAL_IMAGE_BACKGROUND_REMOVAL_MODEL: 'pixelcut/background-removal',
   FalProvider: jest.fn().mockImplementation(() => ({
     dispatch: jest.fn(),
   })),
@@ -135,6 +136,12 @@ jest.mock('../../services/openaiImageService', () => ({
 // this instead of running the OpenAI call inline in the request.
 jest.mock('../../queue/openaiGenerationQueue', () => ({
   openaiGenerationQueue: {
+    add: jest.fn().mockResolvedValue(undefined),
+  },
+}));
+
+jest.mock('../../queue/falImageToolQueue', () => ({
+  falImageToolQueue: {
     add: jest.fn().mockResolvedValue(undefined),
   },
 }));
@@ -211,6 +218,7 @@ import {
 import { getGenerationPresignedUrl, getUploadPresignedUrl } from '../../services/archivalService';
 import { generateImageWithOpenAI, generateImageEditWithMask, generateFaceswap } from '../../services/openaiImageService';
 import { openaiGenerationQueue } from '../../queue/openaiGenerationQueue';
+import { falImageToolQueue } from '../../queue/falImageToolQueue';
 import { chainGenerationQueue } from '../../queue/chainGenerationQueue';
 import { ReplicateProvider } from '../../services/providers/ReplicateProvider';
 import { FalProvider } from '../../services/providers/FalProvider';
@@ -807,6 +815,70 @@ describe('POST /api/generations — gpt-image-2 image (Replicate)', () => {
   });
 });
 
+// ─── POST /api/generations — fal photo background removal ────────────────────
+
+describe('POST /api/generations — photo background removal', () => {
+  const BODY = {
+    prompt: '',
+    media_type: 'image',
+    model: 'pixelcut/background-removal',
+    reference_images: ['https://r2.example.com/source.png'],
+  };
+
+  it('charges two credits, enqueues the worker, and never dispatches inline', async () => {
+    (computeImageCostCredits as jest.Mock).mockReturnValue(2);
+    (deductCredits as jest.Mock).mockResolvedValue(true);
+    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-remove-bg-photo' });
+
+    const res = await request(app).post('/api/generations').send(BODY);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ generation_id: 'gen-remove-bg-photo', status: 'processing' });
+    expect(computeImageCostCredits).toHaveBeenCalledWith('pixelcut/background-removal');
+    expect(falImageToolQueue.add).toHaveBeenCalledWith('generate', {
+      kind: 'remove-background',
+      generationId: 'gen-remove-bg-photo',
+      userId: 'test-user-id',
+      cost: 2,
+      sourceImage: 'https://r2.example.com/source.png',
+    });
+    expect(dispatchMock).not.toHaveBeenCalled();
+    expect(falDispatchMock).not.toHaveBeenCalled();
+    expect(attachPredictionId).not.toHaveBeenCalled();
+  });
+
+  it('rejects a missing source image before billing or row creation', async () => {
+    const res = await request(app)
+      .post('/api/generations')
+      .send({ ...BODY, reference_images: [] });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_INPUT');
+    expect(deductCredits).not.toHaveBeenCalled();
+    expect(createGeneration).not.toHaveBeenCalled();
+    expect(falImageToolQueue.add).not.toHaveBeenCalled();
+  });
+
+  it('refunds atomically when enqueueing fails', async () => {
+    (computeImageCostCredits as jest.Mock).mockReturnValue(2);
+    (deductCredits as jest.Mock).mockResolvedValue(true);
+    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-remove-bg-enqueue-fail' });
+    (falImageToolQueue.add as jest.Mock).mockRejectedValueOnce(new Error('Redis unreachable'));
+    (markFailed as jest.Mock).mockResolvedValue(true);
+    (refundCredits as jest.Mock).mockResolvedValue(undefined);
+
+    const res = await request(app).post('/api/generations').send(BODY);
+
+    expect(res.status).toBe(502);
+    expect(markFailed).toHaveBeenCalledWith('gen-remove-bg-enqueue-fail', 'generic_error');
+    expect(refundCredits).toHaveBeenCalledWith(
+      'test-user-id',
+      2,
+      'dispatch-failure-gen-remove-bg-enqueue-fail',
+    );
+  });
+});
+
 // ─── POST /api/generations — Magic Editor mask edit (async, 09.2-13 / SC4) ────
 //
 // Routed by resolved.maskUrl (set from req.body.mask_url), not by model id, so these tests send
@@ -1131,6 +1203,41 @@ describe('POST /api/generations — presets', () => {
         ],
       }),
     );
+  });
+
+  it('remove-background-photo: resolves the owned upload and enqueues the fal image worker', async () => {
+    mockUploadRows([{ id: 'upload-cutout', r2_key: 'uploads/test-user-id/cutout.jpg' }]);
+    (computeImageCostCredits as jest.Mock).mockReturnValue(2);
+    (deductCredits as jest.Mock).mockResolvedValue(true);
+    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-cutout-preset' });
+
+    const res = await request(app).post('/api/generations').send({
+      preset_id: 'remove-background-photo',
+      preset_input_upload_ids: ['upload-cutout'],
+    });
+
+    expect(res.status).toBe(200);
+    expect(computeImageCostCredits).toHaveBeenCalledWith('pixelcut/background-removal');
+    expect(createGeneration).toHaveBeenCalledWith(
+      expect.objectContaining({
+        media_type: 'image',
+        model: 'pixelcut/background-removal',
+        cost_credits: 2,
+        params: expect.objectContaining({
+          preset_id: 'remove-background-photo',
+          preset_input_upload_ids: ['upload-cutout'],
+        }),
+      }),
+    );
+    expect(falImageToolQueue.add).toHaveBeenCalledWith('generate', {
+      kind: 'remove-background',
+      generationId: 'gen-cutout-preset',
+      userId: 'test-user-id',
+      cost: 2,
+      sourceImage: 'https://r2.example.com/signed/uploads/test-user-id/cutout.jpg',
+    });
+    expect(dispatchMock).not.toHaveBeenCalled();
+    expect(falDispatchMock).not.toHaveBeenCalled();
   });
 
   it('enhancer-video: overwrites model to bytedance/video-upscaler, bills computeUpscalerCost from the real duration', async () => {

@@ -925,12 +925,37 @@ export const SERVER_PRESETS: PresetDef[] = [
     tile: placeholderTile('magic-editor'),
   },
   {
+    // fal Tools: a one-input transparent PNG cutout. The blocking provider call runs in the
+    // fal-image-tool BullMQ worker so the route returns immediately; its URL is archived to R2
+    // before any completion state is exposed.
+    preset_id: 'remove-background-photo',
+    title: 'Remove Background',
+    subtitle: 'Transparent photo cutout',
+    section: 'photo_effects',
+    sort_order: 8,
+    status: 'live',
+    badge: 'NEW',
+    media_type: 'image',
+    model: 'pixelcut/background-removal',
+    prompt_template: '',
+    input_schema: {
+      slots: [{ kind: 'image', label: 'Photo', source: 'any' }],
+    },
+    cost: { type: 'flat', credits: 2 },
+    sheet: {
+      description: 'Remove the background and keep your subject as a transparent PNG.',
+      aspect_label: 'Matches your photo',
+      resolution_label: 'Transparent PNG',
+    },
+    tile: placeholderTile('remove-background-photo'),
+  },
+  {
     // Action Figure (09.3 SC5): first registry-drop image template — individual photo_effects
     // card (not a pack), like Anime Yourself / Polaroid Hug.
     preset_id: 'action-figure',
     title: 'Action Figure',
     section: 'photo_effects',
-    sort_order: 8,
+    sort_order: 9,
     status: 'live',
     badge: 'NEW',
     media_type: 'image',
@@ -957,7 +982,7 @@ export const SERVER_PRESETS: PresetDef[] = [
     preset_id: 'yearbook-90s',
     title: '90s Yearbook',
     section: 'photo_effects',
-    sort_order: 9,
+    sort_order: 10,
     status: 'live',
     media_type: 'image',
     model: 'openai/gpt-image-2-medium', // D-22: medium tier, 5 credits
@@ -982,7 +1007,7 @@ export const SERVER_PRESETS: PresetDef[] = [
     preset_id: 'pro-headshot',
     title: 'Pro Headshot',
     section: 'photo_effects',
-    sort_order: 10,
+    sort_order: 11,
     status: 'live',
     media_type: 'image',
     model: 'openai/gpt-image-2-medium', // D-22: medium tier, 5 credits
@@ -1009,7 +1034,7 @@ export const SERVER_PRESETS: PresetDef[] = [
     preset_id: 'restore-old-photo',
     title: 'Restore Old Photo',
     section: 'photo_effects',
-    sort_order: 11,
+    sort_order: 12,
     status: 'live',
     media_type: 'image',
     model: 'openai/gpt-image-2-medium', // D-22: medium tier, 5 credits

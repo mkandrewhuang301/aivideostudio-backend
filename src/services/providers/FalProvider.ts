@@ -16,6 +16,7 @@ import { fal, ApiError } from '@fal-ai/client';
 import { ModelProvider, GenerationInput, DispatchResult, PredictionStatus } from './ModelProvider';
 
 export const FAL_KLING_V3_STANDARD_I2V_MODEL = 'fal-ai/kling-video/v3/standard/image-to-video' as const;
+export const FAL_IMAGE_BACKGROUND_REMOVAL_MODEL = 'pixelcut/background-removal' as const;
 const SUPPORTED_FAL_ENDPOINTS = new Set<string>([FAL_KLING_V3_STANDARD_I2V_MODEL]);
 
 export function encodePredictionId(endpointId: string, requestId: string): string {
@@ -63,7 +64,7 @@ function falFailure(label: string, error: unknown): never {
 async function falSubscribeForUrl(
   label: string,
   resultPromise: Promise<{ data?: unknown }>,
-  outputField: 'audio' | 'video',
+  outputField: 'audio' | 'image' | 'video',
 ): Promise<string> {
   let result: { data?: unknown };
   try {
@@ -93,6 +94,21 @@ export async function falRunTts(modelId: string, input: TtsInput): Promise<strin
 /** Blocking Lyria2 call. The caller must archive the expiring provider URL immediately. */
 export async function falRunLyria(modelId: string, input: LyriaInput): Promise<string> {
   return falSubscribeForUrl('Lyria2', fal.subscribe(modelId, { input }), 'audio');
+}
+
+/** Blocking Pixelcut cutout. The caller must archive the expiring PNG URL immediately. */
+export async function falRunImageBackgroundRemoval(imageUrl: string): Promise<string> {
+  return falSubscribeForUrl(
+    'image background removal',
+    fal.subscribe(FAL_IMAGE_BACKGROUND_REMOVAL_MODEL, {
+      input: {
+        image_url: imageUrl,
+        output_format: 'rgba',
+        sync_mode: false,
+      },
+    }),
+    'image',
+  );
 }
 
 export class FalProvider implements ModelProvider {

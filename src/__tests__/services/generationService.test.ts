@@ -24,8 +24,10 @@ import {
   computeHappyHorseCost,
   resolveHappyHorseDuration,
   computeFalKlingV3Cost,
+  computeImageCostCredits,
   resolveFalKlingV3Duration,
   SUPPORTED_IMAGE_UPSCALE_MODELS,
+  SUPPORTED_IMAGE_MODELS,
   SUPPORTED_CHARACTER_REPLACE_MODELS,
   SUPPORTED_FACESWAP_MODELS,
   markCompleted,
@@ -157,6 +159,13 @@ describe('fal Kling v3 Standard cost + duration', () => {
     expect(() => resolveFalKlingV3Duration(2)).toThrow(/between 3 and 15/);
     expect(() => resolveFalKlingV3Duration(16)).toThrow(/between 3 and 15/);
     expect(() => resolveFalKlingV3Duration(5.5)).toThrow(/between 3 and 15/);
+  });
+});
+
+describe('fal image tool cost', () => {
+  it('charges the cents-rule Pixelcut price and allows the model', () => {
+    expect(SUPPORTED_IMAGE_MODELS).toContain('pixelcut/background-removal');
+    expect(computeImageCostCredits('pixelcut/background-removal')).toBe(2);
   });
 });
 

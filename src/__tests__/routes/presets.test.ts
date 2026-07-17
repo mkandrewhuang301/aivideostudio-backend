@@ -15,7 +15,7 @@ describe('presets registry config', () => {
     expect(typeof PRESETS_VERSION).toBe('number');
   });
 
-  it('includes all 22 live presets (7 original + AI Influencer D-23 + Clothes Swap 09.1-11 + Faceswap 09.2-07 + Magic Editor 09.2-08 + 09.3-06 8-row registry drop + 09.6-08 kbo-fan-cam/marlon-motion + 09.6-06 you-vs-you)', () => {
+  it('includes all 23 live presets, including the fal photo background-removal tool', () => {
     const liveIds = SERVER_PRESETS.filter((p) => p.status === 'live').map((p) => p.preset_id);
     expect(liveIds.sort()).toEqual(
       [
@@ -30,6 +30,7 @@ describe('presets registry config', () => {
         'clothes-swap',
         'faceswap',
         'magic-editor',
+        'remove-background-photo',
         'gorilla-vlogs',
         'viral-motions',
         'camera-moves',
@@ -43,6 +44,18 @@ describe('presets registry config', () => {
         'you-vs-you',
       ].sort(),
     );
+  });
+
+  it('publishes photo background removal as a two-credit one-image preset', () => {
+    const preset = SERVER_PRESETS.find((row) => row.preset_id === 'remove-background-photo');
+    expect(preset).toMatchObject({
+      status: 'live',
+      section: 'photo_effects',
+      media_type: 'image',
+      model: 'pixelcut/background-removal',
+      cost: { type: 'flat', credits: 2 },
+    });
+    expect(preset?.input_schema?.slots).toHaveLength(1);
   });
 
   it('includes the SOON rows (registry-driven, not hardcoded UI — D-04)', () => {

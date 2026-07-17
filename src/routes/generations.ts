@@ -47,7 +47,7 @@ import {
   type SupportedModel,
 } from '../services/generationService';
 import { ReplicateProvider } from '../services/providers/ReplicateProvider';
-import { FalProvider } from '../services/providers/FalProvider';
+import { FalProvider, FAL_IMAGE_BACKGROUND_REMOVAL_MODEL } from '../services/providers/FalProvider';
 import { refundCredits } from '../services/creditService';
 import { classifyFailureReason, markFailed } from '../services/generationService';
 import { getGenerationPresignedUrl, getUploadPresignedUrl } from '../services/archivalService';
@@ -55,6 +55,7 @@ import { openaiGenerationQueue } from '../queue/openaiGenerationQueue';
 import { chainGenerationQueue } from '../queue/chainGenerationQueue';
 import { explainerGenerationQueue } from '../queue/explainerGenerationQueue';
 import { influencerProQueue } from '../queue/influencerProQueue';
+import { falImageToolQueue } from '../queue/falImageToolQueue';
 import { getFalWebhookUrl, getReplicateWebhookUrl } from '../config';
 import type { GenerationInput } from '../services/providers/ModelProvider';
 import { db } from '../db/client';
@@ -242,7 +243,9 @@ function prepareCost(req: Request, res: Response, next: NextFunction): void {
   // avatar/upscale/character-replace/faceswap/chain branches take no text prompt (D-16/D-22/D-23
   // presets: motion-transfer, enhancer-video, enhancer-image, ai-influencer, faceswap, chain all
   // have an empty prompt_template) — only image/video/grok branches require one.
-  if (media_type !== 'avatar' && media_type !== 'upscale' && media_type !== 'character_replace' && media_type !== 'faceswap' && media_type !== 'chain' && (!prompt || typeof prompt !== 'string')) {
+  const allowsPromptlessImageTool =
+    media_type === 'image' && model === FAL_IMAGE_BACKGROUND_REMOVAL_MODEL;
+  if (!allowsPromptlessImageTool && media_type !== 'avatar' && media_type !== 'upscale' && media_type !== 'character_replace' && media_type !== 'faceswap' && media_type !== 'chain' && (!prompt || typeof prompt !== 'string')) {
     res.status(400).json({ error: 'prompt is required', code: 'INVALID_PROMPT' });
     return;
   }
@@ -476,6 +479,13 @@ function prepareCost(req: Request, res: Response, next: NextFunction): void {
     const refImages: string[] = Array.isArray(reference_images)
       ? reference_images.filter((u: unknown) => typeof u === 'string')
       : [];
+    if (imageModel === FAL_IMAGE_BACKGROUND_REMOVAL_MODEL && refImages.length !== 1) {
+      res.status(400).json({
+        error: 'Photo background removal requires exactly one source image.',
+        code: 'INVALID_INPUT',
+      });
+      return;
+    }
 
     req.body.cost_credits = cost;
     req._resolved = {
@@ -923,6 +933,36 @@ generationsRouter.post('/', promptModerationMiddleware, presetResolver, formatRe
         await markFailed(generationId, 'generic_error');
         await refundCredits(req.user.dbUserId, resolved.cost, `dispatch-failure-${generationId}`);
         res.status(502).json({ error: 'Generation service unavailable. Credits have been refunded.' });
+        return;
+      }
+
+      res.status(200).json({ generation_id: generationId, status: 'processing' });
+      return;
+    }
+
+    // Pixelcut photo background removal: short blocking fal call in a worker, followed by
+    // immediate R2 archival and the shared CSAM gate. The route never waits on provider latency.
+    if (resolved.mediaType === 'image' && resolved.model === FAL_IMAGE_BACKGROUND_REMOVAL_MODEL) {
+      const sourceImage = resolved.referenceImages?.[0];
+      if (!sourceImage) {
+        await markFailed(generationId, 'generic_error');
+        await refundCredits(req.user.dbUserId, resolved.cost, `dispatch-failure-${generationId}`);
+        res.status(400).json({ error: 'A source image is required. Credits have been refunded.' });
+        return;
+      }
+      try {
+        await falImageToolQueue.add('generate', {
+          kind: 'remove-background',
+          generationId,
+          userId: req.user.dbUserId,
+          cost: resolved.cost,
+          sourceImage,
+        });
+      } catch (err) {
+        console.error(`[generations] Failed to enqueue photo background removal for ${generationId}:`, err);
+        await markFailed(generationId, 'generic_error');
+        await refundCredits(req.user.dbUserId, resolved.cost, `dispatch-failure-${generationId}`);
+        res.status(502).json({ error: 'Background removal service unavailable. Credits have been refunded.' });
         return;
       }
 

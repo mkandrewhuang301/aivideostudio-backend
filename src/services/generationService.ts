@@ -135,6 +135,7 @@ export const IMAGE_MODEL_COSTS: Record<string, number> = {
   'openai/gpt-image-2-medium': 5,  // $0.047/image
   'openai/gpt-image-2-low':    2,  // $0.012/image
   'openai/gpt-image-2':        13, // backward compat — defaults to high cost
+  'pixelcut/background-removal': 2, // $0.016/image -> cents rule rounds up to 2 credits
   // Chain image_stage (09.6-05, D-01) — UVU's keyframe compositor. $0.03/output image, cents rule
   // (1 credit = 1¢, rounded up) = 3 credits/image. Looked up generically by computeChainCost() via
   // chain.image_stage.model — never hardcode this model id elsewhere.
@@ -147,6 +148,7 @@ export const SUPPORTED_IMAGE_MODELS = [
   'openai/gpt-image-2-medium',
   'openai/gpt-image-2-low',
   'openai/gpt-image-2',
+  'pixelcut/background-removal',
 ] as const;
 export type SupportedImageModel = typeof SUPPORTED_IMAGE_MODELS[number];
 
