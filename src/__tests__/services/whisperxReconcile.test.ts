@@ -1,3 +1,9 @@
+jest.mock('../../config', () => ({
+  config: {
+    replicateApiToken: 'mock-replicate-token',
+  },
+}));
+
 import {
   buildSceneCues,
   reconcileScriptWithTiming,

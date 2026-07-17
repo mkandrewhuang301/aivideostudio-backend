@@ -2,12 +2,71 @@
 // CLAUDE.md Rule 6: provider abstraction — this is the ONLY file that imports the `replicate` package.
 // CLAUDE.md Rule 7: durationSeconds must already be resolved (never -1) by the caller before dispatch().
 
-import Replicate from 'replicate';
+import Replicate, { validateWebhook } from 'replicate';
 import { config } from '../../config';
 import { ModelProvider, GenerationInput, DispatchResult, PredictionStatus } from './ModelProvider';
 import { archiveToR2 } from '../archivalService';
 
 const replicate = new Replicate({ auth: config.replicateApiToken });
+const WHISPERX_MODEL = 'victor-upmeet/whisperx:655845d6190ef70573c669245f245892cd039df4b880a1e3a65852c09252f5cc';
+
+export interface WhisperXWord {
+  word: string;
+  start: number;
+  end: number;
+}
+
+/** Keeps Replicate's SDK webhook verifier behind the same provider boundary as every SDK call. */
+export async function validateReplicateWebhook(
+  args: Parameters<typeof validateWebhook>[0],
+): Promise<boolean> {
+  return validateWebhook(args);
+}
+
+interface WhisperXOutput {
+  segments?: Array<{
+    words?: Array<{
+      word?: unknown;
+      start?: unknown;
+      end?: unknown;
+    }>;
+  }>;
+}
+
+/**
+ * Sync WhisperX dispatch over a presigned audio URL. The version pin and field names come from
+ * the authenticated live schema captured by Plan 14-01.
+ */
+export async function transcribeWordTimings(audioUrl: string): Promise<WhisperXWord[]> {
+  const output = (await replicate.run(WHISPERX_MODEL, {
+    input: {
+      audio_file: audioUrl,
+      align_output: true,
+      language: 'en',
+    },
+  })) as unknown as WhisperXOutput;
+
+  const words = Array.isArray(output?.segments)
+    ? output.segments.flatMap((segment) => (
+      Array.isArray(segment.words)
+        ? segment.words.flatMap((word) => (
+          typeof word.word === 'string'
+          && typeof word.start === 'number'
+          && Number.isFinite(word.start)
+          && typeof word.end === 'number'
+          && Number.isFinite(word.end)
+            ? [{ word: word.word, start: word.start, end: word.end }]
+            : []
+        ))
+        : []
+    ))
+    : [];
+
+  if (words.length === 0) {
+    throw new Error('whisperx returned no word timings');
+  }
+  return words;
+}
 
 // ─── Chained-job image stage: Wan 2.7 Image (09.6-05) ─────────────────────────
 // Composes chain keyframe(s) (UVU's 2 cinematic stills — arena walk-in / spotlight reveal) from

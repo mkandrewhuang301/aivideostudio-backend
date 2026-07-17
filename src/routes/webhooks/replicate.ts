@@ -7,7 +7,6 @@
 // RESEARCH.md Pitfall 4: check generation.status before reprocessing — idempotent on retries.
 
 import { Router, Request, Response } from 'express';
-import { validateWebhook } from 'replicate';
 import { config, getReplicateWebhookUrl } from '../../config';
 import { archiveToR2, getUploadPresignedUrl } from '../../services/archivalService';
 import { scanForCsam } from '../../services/hiveService';
@@ -30,7 +29,10 @@ import { ffmpegQueue } from '../../queue/ffmpegWorker';
 import { db } from '../../db/client';
 import { referenceUploads } from '../../db/schema';
 import { sql, inArray } from 'drizzle-orm';
-import { ReplicateProvider } from '../../services/providers/ReplicateProvider';
+import {
+  ReplicateProvider,
+  validateReplicateWebhook,
+} from '../../services/providers/ReplicateProvider';
 import type { GenerationInput } from '../../services/providers/ModelProvider';
 import { deleteRawFaceUploads } from '../../services/uploadCleanup';
 
@@ -91,7 +93,7 @@ async function buildRetryInput(generation: GenerationByPredictionRow): Promise<G
 }
 
 replicateWebhookRouter.post('/', async (req: Request, res: Response) => {
-  const isValid = await validateWebhook({
+  const isValid = await validateReplicateWebhook({
     id: req.headers['webhook-id'] as string,
     timestamp: req.headers['webhook-timestamp'] as string,
     signature: req.headers['webhook-signature'] as string,
@@ -325,4 +327,3 @@ replicateWebhookRouter.post('/', async (req: Request, res: Response) => {
     res.status(200).json({ received: true, error: 'internal_error' });
   }
 });
-
