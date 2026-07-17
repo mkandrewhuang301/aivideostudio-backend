@@ -216,3 +216,63 @@ export async function expandExplainerScript(
     return explainerFallback(args);
   }
 }
+
+/**
+ * D-16 soft quality signal: choose one rendered still for Omni animation. Every failure falls back
+ * to candidate zero so a vision-ranking outage can never fail the paid generation pipeline.
+ */
+export async function pickBestCandidateIndex(
+  candidateUrls: string[],
+  visualPrompt: string,
+  textZone: FormatTextZone,
+): Promise<number> {
+  if (candidateUrls.length <= 1) return 0;
+
+  try {
+    const response = await fetch(OPENAI_CHAT_COMPLETIONS_URL, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${config.openaiApiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        response_format: { type: 'json_object' },
+        messages: [{
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: `Pick the best still for this scene. Visual intent: "${visualPrompt}". Rubric: closest style match to the visual intent, NO narrator/presenter/speaker/host figure, cleanest uncluttered ${textZone} region reserved for captions. Reply ONLY JSON {"winner_index": N} — 0-based index into the images below, in the order given.`,
+            },
+            ...candidateUrls.map((url) => ({
+              type: 'image_url',
+              image_url: { url },
+            })),
+          ],
+        }],
+        max_tokens: 50,
+        temperature: 0,
+      }),
+    });
+    if (!response.ok) return 0;
+
+    const data = (await response.json()) as OpenAIChatCompletionResponse;
+    const content = data.choices?.[0]?.message?.content;
+    if (!content) return 0;
+
+    const parsed = JSON.parse(content) as Record<string, unknown>;
+    const index = parsed.winner_index;
+    if (
+      typeof index !== 'number'
+      || !Number.isInteger(index)
+      || index < 0
+      || index >= candidateUrls.length
+    ) {
+      return 0;
+    }
+    return index;
+  } catch {
+    return 0;
+  }
+}
