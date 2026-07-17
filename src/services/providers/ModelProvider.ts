@@ -13,6 +13,7 @@ export interface GenerationInput {
   audioEnabled?: boolean;
   referenceImages?: string[];            // presigned R2 URLs; @Image1 auto-appended to prompt (D-23)
   referenceVideos?: string[];            // presigned R2 URLs; @Video1 auto-appended to prompt (D-24)
+  videoTranslationLanguage?: string;     // HeyGen Speed exact output_language enum value
   // Image-specific (undefined for video/avatar/upscale generations)
   imageAspectRatio?: string;  // e.g. "1:1" | "4:3" | "3:4" | "16:9" | "9:16"
   imageSize?: '2K' | '3K';   // Seedream output resolution; '2K' = 2048px (default), '3K' = 3072px

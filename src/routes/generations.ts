@@ -1189,17 +1189,28 @@ function presetSafeSerialization(item: {
   const p = (item.params ?? null) as Record<string, unknown> | null;
   const isPreset = Boolean(p?.preset_id);
   const isFormat = item.media_type === 'format' || Boolean(p?.structured);
+  const isVideoTranslation = p?.tool === 'video_translation';
   const formatParams = {
     ...(typeof p?.format_id === 'string' ? { format_id: p.format_id } : {}),
     ...(typeof p?.stage_label === 'string' ? { stage_label: p.stage_label } : {}),
   };
   return {
     media_type: item.media_type === 'faceswap' ? 'image' : item.media_type,
-    model: isPreset ? null : item.model,
+    model: isPreset || isVideoTranslation ? null : item.model,
     params: isPreset
       ? { preset_id: p!.preset_id, preset_input_upload_ids: p!.preset_input_upload_ids ?? [] }
       : isFormat
       ? formatParams
+      : isVideoTranslation
+      ? {
+          tool: 'video_translation',
+          output_language: p?.output_language,
+          source_duration_seconds: p?.source_duration_seconds,
+          duration: p?.duration,
+          resolution: p?.resolution,
+          aspect_ratio: p?.aspect_ratio,
+          audio_enabled: true,
+        }
       : item.params,
   };
 }

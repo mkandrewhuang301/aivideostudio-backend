@@ -14,6 +14,10 @@
 
 import { fal, ApiError } from '@fal-ai/client';
 import { ModelProvider, GenerationInput, DispatchResult, PredictionStatus } from './ModelProvider';
+import {
+  FAL_VIDEO_TRANSLATE_SPEED_MODEL,
+  isVideoTranslationLanguage,
+} from '../videoTranslation';
 
 export const FAL_KLING_V3_STANDARD_I2V_MODEL = 'fal-ai/kling-video/v3/standard/image-to-video' as const;
 export const FAL_IMAGE_BACKGROUND_REMOVAL_MODEL = 'pixelcut/background-removal' as const;
@@ -21,6 +25,7 @@ export const FAL_VIDEO_BACKGROUND_REMOVAL_MODEL = 'pixelcut/video-background-rem
 export const FAL_ASYNC_VIDEO_ENDPOINTS = [
   FAL_KLING_V3_STANDARD_I2V_MODEL,
   FAL_VIDEO_BACKGROUND_REMOVAL_MODEL,
+  FAL_VIDEO_TRANSLATE_SPEED_MODEL,
 ] as const;
 const SUPPORTED_FAL_ENDPOINTS = new Set<string>(FAL_ASYNC_VIDEO_ENDPOINTS);
 
@@ -167,6 +172,28 @@ export class FalProvider implements ModelProvider {
       });
       return {
         providerPredictionId: encodePredictionId(FAL_VIDEO_BACKGROUND_REMOVAL_MODEL, submitted.request_id),
+      };
+    }
+
+    if (input.model === FAL_VIDEO_TRANSLATE_SPEED_MODEL) {
+      const sourceVideoUrl = input.referenceVideos?.[0];
+      if (!sourceVideoUrl || input.referenceVideos?.length !== 1) {
+        throw new Error('Video translation requires exactly one source video');
+      }
+      if (!isVideoTranslationLanguage(input.videoTranslationLanguage)) {
+        throw new Error('Video translation requires a supported output language');
+      }
+      const submitted = await fal.queue.submit(FAL_VIDEO_TRANSLATE_SPEED_MODEL, {
+        input: {
+          video_url: sourceVideoUrl,
+          output_language: input.videoTranslationLanguage,
+          translate_audio_only: false,
+          enable_dynamic_duration: true,
+        },
+        webhookUrl,
+      });
+      return {
+        providerPredictionId: encodePredictionId(FAL_VIDEO_TRANSLATE_SPEED_MODEL, submitted.request_id),
       };
     }
 

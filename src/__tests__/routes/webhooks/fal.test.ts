@@ -134,6 +134,31 @@ describe('POST /webhooks/fal', () => {
     expect(archiveMock).not.toHaveBeenCalled();
   });
 
+  it('resolves the HeyGen endpoint and archives translated output as MP4', async () => {
+    getGenerationMock
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce({ ...generation, model: 'fal-ai/heygen/v2/translate/speed' });
+    archiveMock.mockResolvedValue('generations/gen-video-bg.mp4');
+
+    const res = await postWebhook({
+      request_id: 'req-video-bg',
+      status: 'OK',
+      payload: { video: { url: 'https://fal.media/translated.mp4' } },
+    });
+
+    expect(res.status).toBe(200);
+    expect(getGenerationMock).toHaveBeenNthCalledWith(
+      3,
+      'fal-ai/heygen/v2/translate/speed::req-video-bg',
+    );
+    expect(archiveMock).toHaveBeenCalledWith(
+      'https://fal.media/translated.mp4',
+      'gen-video-bg',
+      'video/mp4',
+    );
+  });
+
   it('quarantines and refunds a flagged transparent output without exposing completion', async () => {
     getGenerationMock
       .mockResolvedValueOnce(undefined)

@@ -28,6 +28,7 @@ import {
   falRunOmniI2v,
   falRunTts,
 } from '../../services/providers/FalProvider';
+import { FAL_VIDEO_TRANSLATE_SPEED_MODEL } from '../../services/videoTranslation';
 
 describe('FalProvider — Kling v3 Standard image-to-video', () => {
   beforeEach(() => jest.clearAllMocks());
@@ -121,6 +122,46 @@ describe('FalProvider — transparent video background removal', () => {
       mediaType: 'video',
       referenceVideos: [],
     }, 'https://api.example.com/webhooks/fal')).rejects.toThrow(/exactly one/);
+    expect(submitMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('FalProvider — HeyGen Speed video translation', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  it('maps the exact live-verified translation contract', async () => {
+    submitMock.mockResolvedValue({ request_id: 'req-translate-1' });
+    const provider = new FalProvider();
+
+    const result = await provider.dispatch({
+      prompt: '',
+      model: FAL_VIDEO_TRANSLATE_SPEED_MODEL,
+      mediaType: 'video',
+      referenceVideos: ['https://r2.example.com/source.mp4'],
+      videoTranslationLanguage: 'Vietnamese (Vietnam)',
+    }, 'https://api.example.com/webhooks/fal');
+
+    expect(submitMock).toHaveBeenCalledWith(FAL_VIDEO_TRANSLATE_SPEED_MODEL, {
+      input: {
+        video_url: 'https://r2.example.com/source.mp4',
+        output_language: 'Vietnamese (Vietnam)',
+        translate_audio_only: false,
+        enable_dynamic_duration: true,
+      },
+      webhookUrl: 'https://api.example.com/webhooks/fal',
+    });
+    expect(result.providerPredictionId).toBe(`${FAL_VIDEO_TRANSLATE_SPEED_MODEL}::req-translate-1`);
+  });
+
+  it('rejects language values outside the provider enum', async () => {
+    const provider = new FalProvider();
+    await expect(provider.dispatch({
+      prompt: '',
+      model: FAL_VIDEO_TRANSLATE_SPEED_MODEL,
+      mediaType: 'video',
+      referenceVideos: ['https://r2.example.com/source.mp4'],
+      videoTranslationLanguage: 'Vietnamese',
+    }, 'https://api.example.com/webhooks/fal')).rejects.toThrow(/supported output language/);
     expect(submitMock).not.toHaveBeenCalled();
   });
 });

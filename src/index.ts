@@ -30,6 +30,7 @@ import { ratesRouter } from './routes/rates';
 import { presetsRouter } from './routes/presets';
 import { formatsRouter } from './routes/formats';
 import { promptRouter } from './routes/prompt';
+import { videoTranslationRouter } from './routes/videoTranslation';
 
 // Eagerly initialize Firebase Admin at startup — prevents double-init on concurrent requests
 getFirebaseAdmin();
@@ -88,6 +89,7 @@ app.use('/api/formats', formatsRouter);
 
 app.use('/api', authMiddleware, banCheckMiddleware);
 app.use('/api/me', meRouter);
+app.use('/api/generations', videoTranslationRouter);
 app.use('/api/generations', generationsRouter);
 app.use('/api/reports', reportsRouter);
 app.use('/api/uploads', uploadsRouter);
