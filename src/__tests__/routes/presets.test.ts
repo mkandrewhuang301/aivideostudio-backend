@@ -60,6 +60,18 @@ describe('presets registry config', () => {
     expect(soonIds).not.toContain('gorilla-vlogs');
   });
 
+  it('keeps the Avatar Center teaser reachable under Video Effects', () => {
+    const avatarCenter = CLIENT_PRESETS.find((preset) => preset.preset_id === 'avatar-center');
+    const liveVideoEffects = CLIENT_PRESETS.filter(
+      (preset) => preset.section === 'video_effects' && preset.status === 'live',
+    );
+
+    expect(avatarCenter?.section).toBe('video_effects');
+    expect(avatarCenter?.sort_order).toBeGreaterThan(
+      Math.max(...liveVideoEffects.map((preset) => preset.sort_order)),
+    );
+  });
+
   it('CLIENT_PRESETS strips prompt_template from every row', () => {
     for (const preset of CLIENT_PRESETS) {
       expect(preset).not.toHaveProperty('prompt_template');

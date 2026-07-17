@@ -19,8 +19,10 @@ describe('formats registry config', () => {
       for (const field of serverOnlyFields) {
         expect(format).not.toHaveProperty(field);
       }
-      for (const style of format.style_grid) {
-        expect(style).not.toHaveProperty('anchor_r2_key');
+      if (format.status === 'live') {
+        for (const style of format.style_grid) {
+          expect(style).not.toHaveProperty('anchor_r2_key');
+        }
       }
     }
 
@@ -32,6 +34,7 @@ describe('formats registry config', () => {
 
   it('retains every field required by the client format sheet', () => {
     const explainer = CLIENT_FORMATS.find((format) => format.format_id === 'explainer');
+    if (!explainer || explainer.status !== 'live') throw new Error('live explainer missing');
 
     expect(explainer?.sheet.preparing_label).toBe('Writing your script…');
     expect(explainer?.sheet.description).toBeTruthy();
@@ -52,6 +55,7 @@ describe('formats registry config', () => {
 
   it('defines five strictly increasing fal-priced duration tiers', () => {
     const explainer = SERVER_FORMATS.find((format) => format.format_id === 'explainer');
+    if (!explainer || explainer.status !== 'live') throw new Error('live explainer missing');
     const tiers = explainer?.duration_tiers ?? [];
 
     expect(tiers).toHaveLength(5);
@@ -64,15 +68,35 @@ describe('formats registry config', () => {
 
   it('offers only the two aspect ratios supported by Omni', () => {
     const explainer = SERVER_FORMATS.find((format) => format.format_id === 'explainer');
+    if (!explainer || explainer.status !== 'live') throw new Error('live explainer missing');
     expect(explainer?.aspect_ratios).toEqual(['9:16', '16:9']);
   });
 
   it('supports formats-ready segment types while Explainer uses dialogue only', () => {
     const segmentTypes: FormatSegmentType[] = ['dialogue', 'vocab', 'drill'];
     const explainer = SERVER_FORMATS.find((format) => format.format_id === 'explainer');
+    if (!explainer || explainer.status !== 'live') throw new Error('live explainer missing');
 
     expect(segmentTypes).toEqual(['dialogue', 'vocab', 'drill']);
     expect(explainer?.script_template.segment_types_allowed).toEqual(['dialogue']);
     expect(explainer?.style_grid).toHaveLength(6);
+  });
+
+  it('publishes three presentation-only SOON teasers without pipeline or pricing fields', () => {
+    const teasers = CLIENT_FORMATS.filter((format) => format.status === 'soon');
+
+    expect(teasers.map((format) => format.format_id)).toEqual([
+      'daily-verse',
+      'spanish-lessons',
+      'history-reimagined',
+    ]);
+    for (const teaser of teasers) {
+      expect(teaser.title).toBeTruthy();
+      expect(teaser.subtitle).toBeTruthy();
+      expect(teaser.tile).toBeDefined();
+      expect(teaser).not.toHaveProperty('script_template');
+      expect(teaser).not.toHaveProperty('duration_tiers');
+      expect(teaser).not.toHaveProperty('style_grid');
+    }
   });
 });

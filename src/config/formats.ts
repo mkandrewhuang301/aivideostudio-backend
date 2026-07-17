@@ -64,7 +64,7 @@ export interface FormatSheetMeta {
   preparing_label: string;
 }
 
-export interface FormatDef {
+interface FormatSummaryDef {
   format_id: string;
   title: string;
   subtitle?: string;
@@ -73,6 +73,10 @@ export interface FormatDef {
   sort_order: number;
   status: 'live' | 'soon';
   tile: { poster_url?: string; loop_url?: string };
+}
+
+export interface FormatDef extends FormatSummaryDef {
+  status: 'live';
   /** SERVER-ONLY. System prompt template and allowed segment types for the script stage. */
   script_template: {
     system_prompt: string;
@@ -95,7 +99,14 @@ export interface FormatDef {
   sheet: FormatSheetMeta;
 }
 
-export const SERVER_FORMATS: FormatDef[] = [
+/** Presentation-only SOON row. Pipeline and pricing fields are deliberately impossible here. */
+export interface SoonFormatDef extends FormatSummaryDef {
+  status: 'soon';
+}
+
+export type AnyFormatDef = FormatDef | SoonFormatDef;
+
+export const SERVER_FORMATS: AnyFormatDef[] = [
   {
     format_id: 'explainer',
     title: 'AI Explainer',
@@ -202,13 +213,43 @@ HARD RULES:
       preparing_label: 'Writing your script…',
     },
   },
+  {
+    format_id: 'daily-verse',
+    title: 'Daily Verse',
+    subtitle: 'A daily scripture story, brought to life',
+    section: 'formats',
+    sort_order: 20,
+    status: 'soon',
+    tile: {},
+  },
+  {
+    format_id: 'spanish-lessons',
+    title: 'Spanish Lessons',
+    subtitle: 'Short visual lessons that make Spanish stick',
+    section: 'formats',
+    sort_order: 30,
+    status: 'soon',
+    tile: {},
+  },
+  {
+    format_id: 'history-reimagined',
+    title: 'History Reimagined',
+    subtitle: 'Cinematic stories that put you inside the past',
+    section: 'formats',
+    sort_order: 40,
+    status: 'soon',
+    tile: {},
+  },
 ];
 
+// Only live rows enter provider/billing resolution. SOON rows remain client-visible below.
 export const FORMATS_BY_ID: Record<string, FormatDef> = Object.fromEntries(
-  SERVER_FORMATS.map((format) => [format.format_id, format]),
+  SERVER_FORMATS
+    .filter((format): format is FormatDef => format.status === 'live')
+    .map((format) => [format.format_id, format]),
 );
 
-export type ClientFormatDef = Omit<
+export type ClientLiveFormatDef = Omit<
   FormatDef,
   | 'script_template'
   | 'image_model'
@@ -220,12 +261,17 @@ export type ClientFormatDef = Omit<
 > & {
   style_grid: Array<Omit<FormatStyleOption, 'anchor_r2_key'>>;
 };
+export type ClientFormatDef = ClientLiveFormatDef | SoonFormatDef;
 
 /**
  * Client-facing projection. Server prompt IP, provider routing, candidate count, and private R2
  * anchor keys are removed before a route serializer can touch the registry.
  */
 export const CLIENT_FORMATS: ClientFormatDef[] = SERVER_FORMATS.map((def) => {
+  if (def.status === 'soon') {
+    return def;
+  }
+
   const {
     script_template,
     image_model,

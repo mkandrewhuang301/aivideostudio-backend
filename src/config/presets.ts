@@ -17,7 +17,7 @@
 
 export const PRESETS_VERSION = 1;
 
-export type PresetSection = 'hero' | 'video_effects' | 'photo_effects' | 'avatar_center' | 'shows_vlogs';
+export type PresetSection = 'hero' | 'video_effects' | 'photo_effects' | 'shows_vlogs';
 export type PresetStatus = 'live' | 'soon';
 export type PresetBadge = 'NEW' | 'HOT';
 export type PresetMediaType = 'video' | 'image' | 'avatar' | 'upscale' | 'character_replace' | 'faceswap' | 'chain';
@@ -1036,8 +1036,9 @@ export const SERVER_PRESETS: PresetDef[] = [
     preset_id: 'avatar-center',
     title: 'Avatar Center',
     subtitle: 'Your AI twin — coming soon',
-    section: 'avatar_center',
-    sort_order: 1,
+    section: 'video_effects',
+    // Keep this SOON teaser after live tools so AI Influencer remains prominent.
+    sort_order: 99,
     status: 'soon',
     tile: placeholderTile('avatar-center'),
   },
