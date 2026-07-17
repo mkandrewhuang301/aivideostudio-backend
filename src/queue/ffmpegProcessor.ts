@@ -20,7 +20,7 @@ import { Upload } from '@aws-sdk/lib-storage';
 import { r2, R2_BUCKET } from '../storage/r2';
 import { getGenerationPresignedUrl } from '../services/archivalService';
 import { buildAssFile, buildTextOverlayAss } from '../services/assCaptionBuilder';
-import type { FfmpegJobData, ComposeSpec } from './ffmpegWorker';
+import type { FfmpegJobData, ComposeSpec, ExplainerComposeSpec } from './ffmpegWorker';
 
 const execFileAsync = promisify(execFile);
 
@@ -191,6 +191,62 @@ export function buildComposeArgs(input: BuildComposeArgsInput): string[] {
   return args;
 }
 
+export interface BuildExplainerComposeArgsInput {
+  spec: ExplainerComposeSpec;
+  clipPaths: string[];
+  narrationPath: string;
+  musicPath: string | null;
+  captionAssPath: string;
+  fontsDir: string;
+  outPath: string;
+}
+
+/**
+ * Pure argv builder for Explainer assembly. Scene clips are already animated by Omni; each input
+ * is trimmed to its measured narration duration, and only its video stream enters the graph.
+ */
+export function buildExplainerComposeArgs(input: BuildExplainerComposeArgsInput): string[] {
+  const { spec, clipPaths, narrationPath, musicPath, captionAssPath, fontsDir, outPath } = input;
+  const args: string[] = ['-y'];
+  const filterParts: string[] = [];
+
+  spec.clips.forEach((clip, i) => {
+    args.push('-t', String(clip.durationSeconds), '-i', clipPaths[i]);
+    filterParts.push(
+      `[${i}:v]scale=${spec.width}:${spec.height}:force_original_aspect_ratio=increase,crop=${spec.width}:${spec.height},setsar=1[v${i}]`,
+    );
+  });
+
+  const narrationInputIndex = spec.clips.length;
+  args.push('-i', narrationPath);
+
+  const musicInputIndex = narrationInputIndex + 1;
+  if (musicPath) {
+    args.push('-stream_loop', '-1', '-i', musicPath);
+  }
+
+  const concatInputs = spec.clips.map((_, i) => `[v${i}]`).join('');
+  filterParts.push(`${concatInputs}concat=n=${spec.clips.length}:v=1:a=0[vconcat]`);
+
+  let audioMap = `${narrationInputIndex}:a`;
+  if (musicPath) {
+    filterParts.push(`[${musicInputIndex}:a]volume=${spec.musicVolume}[bed]`);
+    filterParts.push(
+      `[${narrationInputIndex}:a][bed]amix=inputs=2:duration=first:dropout_transition=0[aout]`,
+    );
+    audioMap = '[aout]';
+  }
+
+  filterParts.push(`[vconcat]ass=filename=${captionAssPath}:fontsdir=${fontsDir}[vout]`);
+
+  // The complete graph is one execFile argv element (T-14-07); no shell command is constructed.
+  args.push('-filter_complex', filterParts.join(';'));
+  args.push('-map', '[vout]', '-map', audioMap);
+  args.push('-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', outPath);
+
+  return args;
+}
+
 /**
  * Downloads inputs, runs the mux or concat ffmpeg command, uploads the result to R2, and returns
  * the final r2Key (`generations/${generationId}.mp4`) plus, for mux ops, the preserved silent
@@ -271,6 +327,49 @@ export async function runFfmpegOp(data: FfmpegJobData): Promise<{ r2Key: string;
       // never depends on system fontconfig being present/configured (RESEARCH.md Pitfall 1).
       const fontsDir = path.resolve('assets/fonts');
       const args = buildComposeArgs({ spec, clipPaths, audioPaths, assPath, textOverlayAssPath, fontsDir, outPath });
+      await runFfmpeg(args);
+
+      const r2Key = `generations/${generationId}.mp4`;
+      await uploadFileToR2(outPath, r2Key);
+      return { r2Key };
+    } else if (op === 'explainer_compose') {
+      const spec = data.explainerCompose;
+      if (!spec) throw new Error('ffmpeg explainer_compose op requires data.explainerCompose');
+
+      const clipPaths: string[] = [];
+      for (let i = 0; i < spec.clips.length; i++) {
+        const clipPath = path.join(tempDir, `scene${i}.mp4`);
+        await downloadR2KeyToFile(spec.clips[i].r2Key, clipPath);
+        clipPaths.push(clipPath);
+      }
+
+      const narrationPath = path.join(tempDir, 'narration.wav');
+      await downloadR2KeyToFile(spec.narrationR2Key, narrationPath);
+
+      let musicPath: string | null = null;
+      if (spec.musicR2Key) {
+        musicPath = path.join(tempDir, 'music.wav');
+        await downloadR2KeyToFile(spec.musicR2Key, musicPath);
+      }
+
+      const captionAssPath = path.join(tempDir, 'captions.ass');
+      const captionAssContents = buildAssFile(
+        spec.captionCues,
+        spec.captionStyle,
+        { width: spec.width, height: spec.height },
+      );
+      await writeFile(captionAssPath, captionAssContents, 'utf-8');
+
+      const fontsDir = path.resolve('assets/fonts');
+      const args = buildExplainerComposeArgs({
+        spec,
+        clipPaths,
+        narrationPath,
+        musicPath,
+        captionAssPath,
+        fontsDir,
+        outPath,
+      });
       await runFfmpeg(args);
 
       const r2Key = `generations/${generationId}.mp4`;
