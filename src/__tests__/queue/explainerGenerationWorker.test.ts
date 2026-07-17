@@ -87,6 +87,7 @@ import {
   markFailed,
   markCompleted,
   mergeGenerationParams,
+  classifyFailureReason,
 } from '../../services/generationService';
 import { refundCredits } from '../../services/creditService';
 import { scanForCsam } from '../../services/hiveService';
@@ -148,10 +149,11 @@ function candidateUrl(sceneIndex: number, candidateIndex: number): string {
 }
 
 function resetHappyPath(): void {
-  jest.clearAllMocks();
+  jest.resetAllMocks();
   ffmpegAdd.mockResolvedValue(undefined);
   (markProcessing as jest.Mock).mockResolvedValue(true);
   (markFailed as jest.Mock).mockResolvedValue(true);
+  (classifyFailureReason as jest.Mock).mockReturnValue('generic_error');
   (refundCredits as jest.Mock).mockResolvedValue(undefined);
   (mergeGenerationParams as jest.Mock).mockResolvedValue(undefined);
   (buildGroundingText as jest.Mock).mockResolvedValue('grounded facts');
@@ -172,7 +174,9 @@ function resetHappyPath(): void {
   (concatWavBuffers as jest.Mock).mockReturnValue(Buffer.from('combined wav'));
   (uploadBufferToR2 as jest.Mock).mockResolvedValue(undefined);
   (getWordTimings as jest.Mock).mockResolvedValue(GLOBAL_WORDS);
-  (generateMusicBed as jest.Mock).mockResolvedValue({ r2Key: 'generations/gen-explainer-1.music.wav' });
+  (generateMusicBed as jest.Mock).mockImplementation((mood: string) => Promise.resolve(
+    mood === 'none' ? null : { r2Key: 'generations/gen-explainer-1.music.wav' },
+  ));
   (getGenerationPresignedUrl as jest.Mock).mockImplementation((key: string) => Promise.resolve(signedUrlFor(key)));
   global.fetch = jest.fn().mockResolvedValue({
     ok: true,

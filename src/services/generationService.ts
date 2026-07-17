@@ -319,6 +319,21 @@ export async function createGeneration(row: NewGeneration): Promise<{ id: string
   return created;
 }
 
+/**
+ * Prediction-id-free pending -> processing transition for in-process orchestrator jobs.
+ * The guarded update makes a worker that starts after the reaper has already refunded the row a
+ * no-op, preventing both provider spend and a second refund.
+ */
+export async function markProcessing(generationId: string): Promise<boolean> {
+  const result = await db.execute(sql`
+    UPDATE generations
+    SET status = 'processing'
+    WHERE id = ${generationId}::uuid AND status = 'pending'
+    RETURNING id
+  `);
+  return (result.rows?.length ?? 0) > 0;
+}
+
 export async function attachPredictionId(generationId: string, predictionId: string): Promise<void> {
   await db.execute(sql`
     UPDATE generations

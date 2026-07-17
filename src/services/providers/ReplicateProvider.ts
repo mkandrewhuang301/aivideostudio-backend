@@ -112,6 +112,41 @@ export async function generateKeyframeFromPhotos(
   return archiveToR2(outputUrl, outputKeyArg, 'image/png');
 }
 
+/**
+ * Generates one synchronous gpt-image-2 scene candidate with Andrew's frozen style anchor.
+ * Candidate generation is intentionally cheap and repeatable; the worker vision-picks one result
+ * before making the single expensive Omni call for the scene.
+ */
+export async function generateStyledStill(
+  visualPrompt: string,
+  styleAnchorUrl: string,
+  imageModel: string,
+  outputKey: string,
+): Promise<string> {
+  const qualityByModel: Record<string, string> = {
+    'openai/gpt-image-2-high': 'high',
+    'openai/gpt-image-2-medium': 'medium',
+    'openai/gpt-image-2-low': 'low',
+    'openai/gpt-image-2': 'high',
+  };
+  const quality = qualityByModel[imageModel];
+  if (!quality) throw new Error(`Unsupported styled-still model: ${imageModel}`);
+
+  const output = (await replicate.run('openai/gpt-image-2', {
+    input: {
+      prompt: visualPrompt,
+      input_images: [styleAnchorUrl],
+      aspect_ratio: '9:16',
+      quality,
+    },
+  })) as unknown;
+  const outputUrl = Array.isArray(output) ? output[0] : output;
+  if (typeof outputUrl !== 'string' || !outputUrl) {
+    throw new Error('openai/gpt-image-2 returned no output image');
+  }
+  return archiveToR2(outputUrl, outputKey, 'image/png');
+}
+
 export class ReplicateProvider implements ModelProvider {
   async dispatch(input: GenerationInput, webhookUrl: string): Promise<DispatchResult> {
     let replicateInput: Record<string, unknown>;
