@@ -33,8 +33,9 @@ jest.mock('../../../config', () => ({
   getReplicateWebhookUrl: jest.fn(() => 'https://mock.example.com/webhooks/replicate'),
 }));
 
+const mockValidateWebhook = jest.fn();
 jest.mock('replicate', () => ({
-  validateWebhook: jest.fn(),
+  validateWebhook: mockValidateWebhook,
 }));
 
 const mockHiveScanQueueAdd = jest.fn();
@@ -80,6 +81,7 @@ jest.mock('../../../services/providers/ReplicateProvider', () => ({
   ReplicateProvider: jest.fn().mockImplementation(() => ({
     dispatch: jest.fn(),
   })),
+  validateReplicateWebhook: mockValidateWebhook,
 }));
 
 jest.mock('../../../storage/r2', () => ({
