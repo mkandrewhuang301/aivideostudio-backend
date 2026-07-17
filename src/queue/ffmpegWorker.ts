@@ -33,7 +33,7 @@ const connectionOptions = {
   enableReadyCheck: false,
 };
 
-export type FfmpegOp = 'mux' | 'concat' | 'compose';
+export type FfmpegOp = 'mux' | 'concat' | 'compose' | 'explainer_compose';
 
 // Phase 13 (Edit Studio) — 'compose' job type contract. Defines the shape the export pipeline
 // (plans 06/07) dispatches into the queue; this plan only defines the contract, it does NOT
@@ -95,6 +95,25 @@ export interface ComposeSpec {
   captionStyle: ComposeCaptionStyle;
 }
 
+export interface ExplainerClipSpec {
+  /** Omni-animated scene clip produced by the Explainer orchestrator. */
+  r2Key: string;
+  /** Real narration-stem duration for this scene; compose trims the clip to this exact value. */
+  durationSeconds: number;
+}
+
+export interface ExplainerComposeSpec {
+  width: number;
+  height: number;
+  fps: number;
+  clips: ExplainerClipSpec[];
+  narrationR2Key: string;
+  musicR2Key: string | null;
+  musicVolume: number;
+  captionCues: ComposeCaptionCue[];
+  captionStyle: ComposeCaptionStyle;
+}
+
 export interface FfmpegJobData {
   generationId: string;
   userId: string;
@@ -107,6 +126,8 @@ export interface FfmpegJobData {
   mediaType: 'video';
   /** Required for op:'compose' (plan 06 implements the worker branch that consumes this). */
   compose?: ComposeSpec;
+  /** Required for op:'explainer_compose'. */
+  explainerCompose?: ExplainerComposeSpec;
 }
 
 export const ffmpegQueue = new Queue<FfmpegJobData>(QUEUE_NAME, {
