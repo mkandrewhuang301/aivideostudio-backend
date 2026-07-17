@@ -29,6 +29,7 @@ import { termsRouter } from './routes/terms';
 import { ratesRouter } from './routes/rates';
 import { presetsRouter } from './routes/presets';
 import { formatsRouter } from './routes/formats';
+import { charactersRouter } from './routes/characters';
 import { promptRouter } from './routes/prompt';
 import { videoTranslationRouter } from './routes/videoTranslation';
 
@@ -86,6 +87,7 @@ app.use('/api/webhooks/revenuecat', revenueCatWebhookRouter);
 // public like ratesRouter, per 09.1-01-PLAN.md's explicit /api/presets mount instruction.
 app.use('/api/presets', presetsRouter);
 app.use('/api/formats', formatsRouter);
+app.use('/api/characters', charactersRouter);
 
 app.use('/api', authMiddleware, banCheckMiddleware);
 app.use('/api/me', meRouter);
