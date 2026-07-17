@@ -115,7 +115,12 @@ import request from 'supertest';
 import { generationsRouter } from '../../routes/generations';
 import { db } from '../../db/client';
 import { deductCredits, refundCredits } from '../../services/creditService';
-import { createGeneration, markFailed } from '../../services/generationService';
+import {
+  createGeneration,
+  listGenerations,
+  markFailed,
+} from '../../services/generationService';
+import { getGenerationPresignedUrl } from '../../services/archivalService';
 import { explainerGenerationQueue } from '../../queue/explainerGenerationQueue';
 import { promptModerationMiddleware } from '../../middleware/promptModeration';
 
@@ -345,5 +350,78 @@ describe('POST /api/generations — format', () => {
     expect(refundCredits).toHaveBeenCalledWith(
       'user-owned', 470, 'dispatch-failure-gen-enqueue-fail',
     );
+  });
+});
+
+describe('GET /api/generations — format serialization', () => {
+  const formatRow = {
+    id: 'gen-format-complete',
+    user_id: 'user-owned',
+    status: 'completed',
+    media_type: 'format',
+    r2_key: 'generations/gen-format-complete.mp4',
+    created_at: new Date('2026-07-17T12:00:00Z'),
+    completed_at: new Date('2026-07-17T12:02:00Z'),
+    prompt: 'Why do leaves change color?',
+    model: '',
+    cost_credits: 470,
+    replicate_prediction_id: null,
+    params: {
+      format_id: 'explainer',
+      stage_label: 'Rendering…',
+      structured: {
+        audioStems: [{
+          r2Key: 'generations/gen-format-complete.narration.wav',
+          sourceType: 'narration',
+        }],
+        captionCues: [{
+          startSeconds: 0,
+          endSeconds: 1,
+          words: [{ text: 'Leaves', startSeconds: 0, endSeconds: 1 }],
+        }],
+      },
+    },
+  };
+
+  it('strips structured stems/cues and raw R2 keys while preserving the completed public row', async () => {
+    (listGenerations as jest.Mock).mockResolvedValue([formatRow]);
+    (getGenerationPresignedUrl as jest.Mock).mockResolvedValue('https://r2.example.com/final-video');
+
+    const res = await request(app).get('/api/generations');
+
+    expect(res.status).toBe(200);
+    const item = res.body.items[0];
+    expect(item.id).toBe('gen-format-complete');
+    expect(item.status).toBe('completed');
+    expect(item.video_url).toBe('https://r2.example.com/final-video');
+    expect(item.params).toEqual({ format_id: 'explainer', stage_label: 'Rendering…' });
+    const serialized = JSON.stringify(item);
+    expect(serialized).not.toContain('structured');
+    expect(serialized).not.toContain('audioStems');
+    expect(serialized).not.toContain('narration.wav');
+  });
+
+  it('allows only format_id and stage_label through for an in-progress format row', async () => {
+    (listGenerations as jest.Mock).mockResolvedValue([{
+      ...formatRow,
+      id: 'gen-format-processing',
+      status: 'processing',
+      r2_key: null,
+      completed_at: null,
+      params: {
+        ...formatRow.params,
+        stage_label: 'Animating…',
+        internal_debug: 'must-not-leak',
+      },
+    }]);
+
+    const res = await request(app).get('/api/generations');
+
+    expect(res.status).toBe(200);
+    expect(res.body.items[0].video_url).toBeNull();
+    expect(res.body.items[0].params).toEqual({
+      format_id: 'explainer',
+      stage_label: 'Animating…',
+    });
   });
 });

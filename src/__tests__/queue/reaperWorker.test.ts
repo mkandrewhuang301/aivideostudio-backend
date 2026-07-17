@@ -143,6 +143,30 @@ describe('reapOrphanedJobs', () => {
     expect(mockMarkRefunded).toHaveBeenCalledWith('gen-2');
     expect(mockRefundCredits).not.toHaveBeenCalled();
   });
+
+  it('keeps the 5-minute non-format window but selects format rows only after 90 minutes', async () => {
+    mockDbExecute.mockResolvedValueOnce({
+      // Represents the database returning a format row older than the query's 90-minute cutoff.
+      rows: [
+        {
+          id: 'format-pending-over-90',
+          user_id: 'user-format',
+          cost_credits: 470,
+          replicate_prediction_id: null,
+          media_type: 'format',
+        },
+      ],
+    });
+    mockMarkRefunded.mockResolvedValueOnce(true);
+
+    await reapOrphanedJobs();
+
+    const sqlText = extractSql(mockDbExecute.mock.calls[0][0]);
+    expect(sqlText).toMatch(/created_at < now\(\) - interval '5 minutes'/);
+    expect(sqlText).toMatch(/media_type != 'format'/);
+    expect(sqlText).toMatch(/created_at < now\(\) - interval '90 minutes'/);
+    expect(mockMarkRefunded).toHaveBeenCalledWith('format-pending-over-90');
+  });
 });
 
 // ─── reapStalledJobs ────────────────────────────────────────────────────────
@@ -350,6 +374,31 @@ describe('reapStalledJobs', () => {
 
     expect(mockMarkRefunded).toHaveBeenCalledWith('gen-9');
     expect(mockRefundCredits).not.toHaveBeenCalled();
+  });
+
+  it('keeps the 30-minute non-format window but selects format rows only after 90 minutes', async () => {
+    mockDbExecute.mockResolvedValueOnce({
+      // Represents the database returning a format row older than the query's 90-minute cutoff.
+      rows: [
+        {
+          id: 'format-processing-over-90',
+          user_id: 'user-format',
+          cost_credits: 470,
+          replicate_prediction_id: null,
+          model: '',
+          media_type: 'format',
+        },
+      ],
+    });
+    mockMarkRefunded.mockResolvedValueOnce(true);
+
+    await reapStalledJobs();
+
+    const sqlText = extractSql(mockDbExecute.mock.calls[0][0]);
+    expect(sqlText).toMatch(/created_at < now\(\) - interval '30 minutes'/);
+    expect(sqlText).toMatch(/media_type != 'format'/);
+    expect(sqlText).toMatch(/created_at < now\(\) - interval '90 minutes'/);
+    expect(mockMarkRefunded).toHaveBeenCalledWith('format-processing-over-90');
   });
 });
 
