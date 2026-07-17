@@ -9,6 +9,24 @@ import { Upload } from '@aws-sdk/lib-storage';
 import { Readable } from 'node:stream';
 import { r2, R2_BUCKET } from '../storage/r2';
 
+/** Uploads already-downloaded provider media under an explicit R2 key. */
+export async function uploadBufferToR2(
+  buffer: Buffer,
+  r2Key: string,
+  contentType: string,
+): Promise<void> {
+  const upload = new Upload({
+    client: r2,
+    params: {
+      Bucket: R2_BUCKET,
+      Key: r2Key,
+      Body: buffer,
+      ContentType: contentType,
+    },
+  });
+  await upload.done();
+}
+
 export async function archiveToR2(
   outputUrl: string,
   generationId: string,
@@ -62,16 +80,7 @@ export async function archiveBase64ToR2(
   const key = `generations/${generationId}.${ext}`;
   const buffer = Buffer.from(base64Data, 'base64');
 
-  const upload = new Upload({
-    client: r2,
-    params: {
-      Bucket: R2_BUCKET,
-      Key: key,
-      Body: buffer,
-      ContentType: contentType,
-    },
-  });
-  await upload.done();
+  await uploadBufferToR2(buffer, key, contentType);
 
   return key;
 }

@@ -30,6 +30,71 @@ export function decodePredictionId(providerPredictionId: string): { endpointId: 
   return { endpointId: providerPredictionId.slice(0, sep), requestId: providerPredictionId.slice(sep + 2) };
 }
 
+type OmniI2vInput = {
+  prompt: string;
+  image_url: string;
+  aspect_ratio: '9:16' | '16:9';
+  duration: number;
+};
+
+type TtsInput = {
+  prompt: string;
+  voice: string;
+  output_format: 'wav';
+};
+
+type LyriaInput = {
+  prompt: string;
+  negative_prompt: string;
+};
+
+function falFailure(label: string, error: unknown): never {
+  const rawStatus = error && typeof error === 'object' && 'status' in error
+    ? (error as { status?: unknown }).status
+    : undefined;
+  const status = typeof rawStatus === 'number' || typeof rawStatus === 'string'
+    ? String(rawStatus)
+    : 'unknown';
+  const safeError = new Error(`Fal ${label} failed (${status})`);
+  Object.assign(safeError, { status });
+  throw safeError;
+}
+
+async function falSubscribeForUrl(
+  label: string,
+  resultPromise: Promise<{ data?: unknown }>,
+  outputField: 'audio' | 'video',
+): Promise<string> {
+  let result: { data?: unknown };
+  try {
+    result = await resultPromise;
+  } catch (error) {
+    falFailure(label, error);
+  }
+
+  const data = result.data as Record<string, unknown> | undefined;
+  const file = data?.[outputField] as { url?: unknown } | undefined;
+  if (typeof file?.url !== 'string' || file.url.length === 0) {
+    throw new Error(`Fal ${label} returned no output (completed)`);
+  }
+  return file.url;
+}
+
+/** Blocking Omni i2v call. The caller must archive the expiring provider URL immediately. */
+export async function falRunOmniI2v(modelId: string, input: OmniI2vInput): Promise<string> {
+  return falSubscribeForUrl('Omni i2v', fal.subscribe(modelId, { input }), 'video');
+}
+
+/** Blocking Gemini TTS call. The caller must archive the expiring provider URL immediately. */
+export async function falRunTts(modelId: string, input: TtsInput): Promise<string> {
+  return falSubscribeForUrl('Gemini TTS', fal.subscribe(modelId, { input }), 'audio');
+}
+
+/** Blocking Lyria2 call. The caller must archive the expiring provider URL immediately. */
+export async function falRunLyria(modelId: string, input: LyriaInput): Promise<string> {
+  return falSubscribeForUrl('Lyria2', fal.subscribe(modelId, { input }), 'audio');
+}
+
 export class FalProvider implements ModelProvider {
   async dispatch(input: GenerationInput, webhookUrl: string): Promise<DispatchResult> {
     if (input.model !== FAL_KLING_V3_STANDARD_I2V_MODEL) {
