@@ -60,6 +60,28 @@ export function computeGrokImagineCost(durationSeconds: number): number {
   return Math.ceil(durationSeconds * GROK_IMAGINE_CREDITS_PER_SEC);
 }
 
+// ─── fal.ai Kling v3 Standard (image-to-video, optional native audio) ─────────
+// Exact endpoint: fal-ai/kling-video/v3/standard/image-to-video.
+// Live pricing verified from fal on 2026-07-15: $0.084/sec audio-off; $0.126/sec audio-on.
+export const FAL_KLING_V3_STANDARD_I2V_MODEL = 'fal-ai/kling-video/v3/standard/image-to-video' as const;
+export const SUPPORTED_FAL_KLING_MODELS = [FAL_KLING_V3_STANDARD_I2V_MODEL] as const;
+export const FAL_KLING_V3_STANDARD_RATES = { audioOff: 0.084, audioOn: 0.126 } as const;
+
+export function resolveFalKlingV3Duration(requested: number | 'auto'): number {
+  if (requested === 'auto') return 5;
+  if (!Number.isInteger(requested) || requested < 3 || requested > 15) {
+    throw new Error('duration must be an integer between 3 and 15 seconds');
+  }
+  return requested;
+}
+
+export function computeFalKlingV3Cost(durationSeconds: number, audioEnabled: boolean): number {
+  const rate = audioEnabled ? FAL_KLING_V3_STANDARD_RATES.audioOn : FAL_KLING_V3_STANDARD_RATES.audioOff;
+  // Decimal rates such as 0.084 can land microscopically above an exact cent boundary in IEEE-754
+  // (5 * 0.084 * 100 -> 42.00000000000001). Remove only that representation noise before ceil.
+  return Math.ceil(durationSeconds * rate * CENTS_PER_DOLLAR - 1e-9);
+}
+
 // 09.3 D-02: config-driven swap point for the Seedance content_policy/copyright fallback
 // (webhooks/replicate.ts) — always the first (and only, today) entry in SUPPORTED_GROK_MODELS.
 export const PERMISSIVE_I2V_MODEL = SUPPORTED_GROK_MODELS[0];
@@ -242,25 +264,17 @@ export function computeFaceswapCost(): number {
   return IMAGE_MODEL_COSTS['openai/gpt-image-2-medium'];
 }
 
-// ─── Kling v3 Motion Control (dispatched via FalProvider, 2026-07-15) ──────────
+// ─── Kling v3 Motion Control (STANDALONE, Plan 09.6-03) ────────────────────────
 // kwaivgi/kling-v3-motion-control: transfers motion from a reference driver video onto a
-// reference character image (std 720p / pro 1080p). Same logical model id as the original
-// Plan 09.6-03 Replicate integration — only AI Influencer Pro's 3rd pipeline stage
-// (influencerProWorker.ts) consumes it, and as of 2026-07-15 that one call site dispatches via
-// FalProvider.ts instead of ReplicateProvider.ts (Fal is roughly HALF the cost for this preset's
-// audio-on config — see below). ReplicateProvider.ts's own Kling v3 branch is left in place,
-// unused by any live call site, in case a future consumer wants it back.
-//
-// Rates below are FAL's pricing (not Replicate's — this table moved providers with the dispatch
-// call, 2026-07-15, live-verified via https://fal.ai/models/fal-ai/kling-video/v3/standard/motion-control
-// and .../pro/motion-control): std = $0.126/sec with audio on (the ONLY config AI Influencer Pro
-// ever requests — keep_original_sound is always true), pro = $0.168/sec (audio setting doesn't
-// change Pro's rate per fal.ai's pricing page). For reference, Replicate's own current pricing
-// for the equivalent audio-on configs is roughly DOUBLE this (std-audio $0.252/sec, pro-audio
-// $0.336/sec, per Replicate's live dashboard 2026-07-15) — that gap is why this moved to Fal.
+// reference character image (std 720p / pro 1080p). Dispatched via ReplicateProvider.ts; only
+// AI Influencer Pro's 3rd pipeline stage (influencerProWorker.ts) consumes it, always with
+// keep_original_sound: true (audio on) and mode: 'std'.
+// Rates below are Replicate's real current per-second pricing for the audio-on variant of each
+// tier (live-verified via Replicate's own dashboard, 2026-07-15) — the table's prior $0.07/$0.12
+// values were stale against Replicate's own current pricing (unrelated to any Fal comparison).
 export const KLING_MOTION_RATE: Record<'std' | 'pro', number> = {
-  std: 0.126, // $/sec (Fal, audio on)
-  pro: 0.168, // $/sec (Fal)
+  std: 0.252, // $/sec (Replicate, standard-audio)
+  pro: 0.336, // $/sec (Replicate, pro-audio)
 };
 
 export const SUPPORTED_KLING_MOTION_MODELS = ['kwaivgi/kling-v3-motion-control'] as const;
@@ -275,7 +289,7 @@ export function computeKlingMotionControlCost(durationSeconds: number, mode: 'st
 // 3-step pipeline: ffmpeg frame extract (free, local compute, no provider cost) -> Wan 2.7 Image
 // composite (character photo + extracted frame -> single flat-cost still) -> Kling v3 Motion
 // Control transferring the ORIGINAL video's motion onto the composite. Uses Kling's 'std' mode
-// (720p, $0.07/sec) deliberately, NOT its 'pro' mode (2026-07-13, user-clarified) — this preset's
+// (720p, $0.252/sec with audio) deliberately, NOT its 'pro' mode (2026-07-13, user-clarified) — this preset's
 // "Pro" tier means the 3-step compositing PIPELINE itself (vs. Standard's single-shot Wan 2.2
 // Animate Replace), not Kling's own internal quality flag; the two "pro" labels are unrelated and
 // picking Kling's cheaper std tier avoids conflating them. Billed as: real (clamped) video

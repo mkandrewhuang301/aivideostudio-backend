@@ -44,10 +44,18 @@ jest.mock('../../services/archivalService', () => ({
 }));
 
 const mockGetStatus = jest.fn();
+const mockGetFalStatus = jest.fn();
 
 jest.mock('../../services/providers/ReplicateProvider', () => ({
   ReplicateProvider: jest.fn().mockImplementation(() => ({
     getStatus: mockGetStatus,
+  })),
+}));
+
+jest.mock('../../services/providers/FalProvider', () => ({
+  FAL_KLING_V3_STANDARD_I2V_MODEL: 'fal-ai/kling-video/v3/standard/image-to-video',
+  FalProvider: jest.fn().mockImplementation(() => ({
+    getStatus: mockGetFalStatus,
   })),
 }));
 
@@ -148,6 +156,33 @@ describe('reapStalledJobs', () => {
     const sqlText = extractSql(mockDbExecute.mock.calls[0][0]);
     expect(sqlText).toMatch(/'processing'/);
     expect(sqlText).toMatch(/interval '30 minutes'/);
+    expect(sqlText).toMatch(/model/);
+  });
+
+  it('routes only regular fal Kling v3 rows to FalProvider while Motion Control stays on Replicate', async () => {
+    mockDbExecute.mockResolvedValueOnce({
+      rows: [
+        {
+          id: 'gen-fal', user_id: 'user-fal', cost_credits: 63,
+          replicate_prediction_id: 'fal-ai/kling-video/v3/standard/image-to-video::req-1',
+          model: 'fal-ai/kling-video/v3/standard/image-to-video',
+        },
+        {
+          id: 'gen-motion', user_id: 'user-motion', cost_credits: 129,
+          replicate_prediction_id: 'replicate-motion-1',
+          model: 'kwaivgi/kling-v3-motion-control',
+        },
+      ],
+    });
+    mockGetFalStatus.mockResolvedValueOnce({ status: 'processing' });
+    mockGetStatus.mockResolvedValueOnce({ status: 'processing' });
+
+    await reapStalledJobs();
+
+    expect(mockGetFalStatus).toHaveBeenCalledWith(
+      'fal-ai/kling-video/v3/standard/image-to-video::req-1',
+    );
+    expect(mockGetStatus).toHaveBeenCalledWith('replicate-motion-1');
   });
 
   it('archives to R2, scans for CSAM, and marks completed when Replicate reports succeeded', async () => {

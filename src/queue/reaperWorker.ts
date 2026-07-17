@@ -14,7 +14,7 @@ import { refundCredits } from '../services/creditService';
 import { archiveToR2 } from '../services/archivalService';
 import { scanForCsam } from '../services/hiveService';
 import { ReplicateProvider } from '../services/providers/ReplicateProvider';
-import { FalProvider } from '../services/providers/FalProvider';
+import { FalProvider, FAL_KLING_V3_STANDARD_I2V_MODEL } from '../services/providers/FalProvider';
 import { config } from '../config';
 
 const QUEUE_NAME = 'generation-reaper';
@@ -30,12 +30,8 @@ export const reaperQueue = new Queue(QUEUE_NAME, { connection: connectionOptions
 const replicateProvider = new ReplicateProvider();
 const falProvider = new FalProvider();
 
-// 2026-07-15: Kling v3 Motion Control's stalled-job reconciliation must call FalProvider, not
-// ReplicateProvider — its provider_prediction_id is a Fal composite id (endpointId::requestId),
-// which ReplicateProvider.getStatus() would send straight to Replicate's API and 404 on.
-// Every other model still reconciles via Replicate, unchanged.
 function providerFor(model: string) {
-  return model === 'kwaivgi/kling-v3-motion-control' ? falProvider : replicateProvider;
+  return model === FAL_KLING_V3_STANDARD_I2V_MODEL ? falProvider : replicateProvider;
 }
 
 interface ReapableRow {
@@ -106,7 +102,7 @@ export async function reapStalledJobs(): Promise<void> {
         if (refunded) await refundCredits(row.user_id, row.cost_credits, row.replicate_prediction_id);
         console.log(`[reaper] Stalled generation ${row.id} reconciled as ${prediction.status}, refunded`);
       } else {
-        console.log(`[reaper] Stalled generation ${row.id} still ${prediction.status} on Replicate; leaving as-is`);
+        console.log(`[reaper] Stalled generation ${row.id} still ${prediction.status}; leaving as-is`);
       }
     } catch (err) {
       console.error(`[reaper] Error reconciling stalled generation ${row.id}:`, err);

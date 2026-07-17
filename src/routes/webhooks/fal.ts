@@ -1,7 +1,7 @@
 // src/routes/webhooks/fal.ts
-// Fal.ai webhook handler — completion callback for FalProvider.ts's Kling v3 Motion Control
-// dispatch (AI Influencer Pro's 3rd pipeline stage, influencerProWorker.ts). A deliberately
-// smaller sibling of webhooks/replicate.ts: no retry/postprocess-mux/face-upload-cleanup paths,
+// Fal.ai webhook handler — completion callback for FalProvider.ts's regular Kling v3 Standard
+// image-to-video dispatch. A deliberately smaller sibling of webhooks/replicate.ts: no
+// retry/postprocess-mux/face-upload-cleanup paths,
 // since this generation type doesn't use any of those (unlike the generic Replicate path, which
 // backs many different presets).
 //
@@ -26,7 +26,7 @@ import {
 import { refundCredits } from '../../services/creditService';
 import { sendGenerationComplete } from '../../services/apnsService';
 import { deleteRawFaceUploads } from '../../services/uploadCleanup';
-import { encodePredictionId, KLING_ENDPOINTS } from '../../services/providers/FalProvider';
+import { encodePredictionId, FAL_KLING_V3_STANDARD_I2V_MODEL } from '../../services/providers/FalProvider';
 import { db } from '../../db/client';
 import { sql } from 'drizzle-orm';
 
@@ -37,15 +37,8 @@ async function fetchDeviceToken(userId: string): Promise<string | null> {
   return (userRows.rows?.[0] as { apns_device_token: string | null } | undefined)?.apns_device_token ?? null;
 }
 
-// AI Influencer Pro's worker always dispatches 'std'; try that encoding first, then 'pro' as a
-// fallback — the webhook payload/headers don't carry which tier a request_id belongs to, only
-// the bare request_id, so both encodings are tried against getGenerationByPredictionId.
 async function resolveGeneration(requestId: string): Promise<GenerationByPredictionRow | undefined> {
-  for (const tier of ['std', 'pro'] as const) {
-    const generation = await getGenerationByPredictionId(encodePredictionId(KLING_ENDPOINTS[tier], requestId));
-    if (generation) return generation;
-  }
-  return undefined;
+  return getGenerationByPredictionId(encodePredictionId(FAL_KLING_V3_STANDARD_I2V_MODEL, requestId));
 }
 
 falWebhookRouter.post('/', async (req: Request, res: Response) => {

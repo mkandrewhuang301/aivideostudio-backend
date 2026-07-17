@@ -1,8 +1,8 @@
 // src/__tests__/queue/influencerProWorker.test.ts
 // Tests for processInfluencerProGeneration — AI Influencer Pro tier's 3-step pipeline (frame
-// extract -> Wan 2.7 composite (Replicate) -> Kling v3 Motion Control (Fal, since 2026-07-15)).
-// No live Redis/ffmpeg/Replicate/Fal required — every stage's dependency is mocked; logic is
-// tested via the exported processor function, mirroring chainGenerationWorker.test.ts's approach.
+// extract -> Wan 2.7 composite -> Kling v3 Motion Control). No live Redis/ffmpeg/Replicate
+// required — every stage's dependency is mocked; logic is tested via the exported processor
+// function, mirroring chainGenerationWorker.test.ts's approach.
 
 jest.mock('bullmq', () => ({
   Queue: jest.fn().mockImplementation(() => ({ add: jest.fn(), close: jest.fn() })),
@@ -25,7 +25,6 @@ jest.mock('../../config', () => ({
     hiveScanEnabled: true,
   },
   getReplicateWebhookUrl: jest.fn(() => 'https://mock.example.com/webhooks/replicate'),
-  getFalWebhookUrl: jest.fn(() => 'https://mock.example.com/webhooks/fal'),
 }));
 
 jest.mock('../../services/frameExtractor', () => ({
@@ -34,10 +33,7 @@ jest.mock('../../services/frameExtractor', () => ({
 
 jest.mock('../../services/providers/ReplicateProvider', () => ({
   generateKeyframeFromPhotos: jest.fn(),
-}));
-
-jest.mock('../../services/providers/FalProvider', () => ({
-  FalProvider: jest.fn().mockImplementation(() => ({
+  ReplicateProvider: jest.fn().mockImplementation(() => ({
     dispatch: jest.fn(),
   })),
 }));
@@ -55,16 +51,15 @@ jest.mock('../../services/generationService', () => ({
 jest.mock('../../services/creditService', () => ({ refundCredits: jest.fn() }));
 
 import { extractVideoFrame } from '../../services/frameExtractor';
-import { generateKeyframeFromPhotos } from '../../services/providers/ReplicateProvider';
-import { FalProvider } from '../../services/providers/FalProvider';
+import { generateKeyframeFromPhotos, ReplicateProvider } from '../../services/providers/ReplicateProvider';
 import { getGenerationPresignedUrl } from '../../services/archivalService';
 import { attachPredictionId, markFailed } from '../../services/generationService';
 import { refundCredits } from '../../services/creditService';
 import { processInfluencerProGeneration } from '../../queue/influencerProWorker';
 import type { InfluencerProGenerationJob } from '../../queue/influencerProQueue';
 
-const MockedFalProvider = FalProvider as jest.MockedClass<typeof FalProvider>;
-const providerInstance = MockedFalProvider.mock.results[0]?.value as { dispatch: jest.Mock };
+const MockedReplicateProvider = ReplicateProvider as jest.MockedClass<typeof ReplicateProvider>;
+const providerInstance = MockedReplicateProvider.mock.results[0]?.value as { dispatch: jest.Mock };
 const dispatchMock = providerInstance.dispatch;
 
 const JOB: InfluencerProGenerationJob = {
@@ -107,7 +102,7 @@ describe('processInfluencerProGeneration', () => {
     expect(dispatchMock).toHaveBeenCalledTimes(1);
     const [input] = dispatchMock.mock.calls[0]!;
     expect(input.model).toBe('kwaivgi/kling-v3-motion-control');
-    // mediaType stays 'video' for row/client-render consistency — FalProvider only branches on
+    // mediaType deliberately 'video', not 'character_replace' — ReplicateProvider branches on
     // `model`, not mediaType (unlike ReplicateProvider, which this dispatch used to go through).
     expect(input.mediaType).toBe('video');
     expect(input.klingMotionImage).toBe('https://r2.example.com/composite-signed');
@@ -155,7 +150,7 @@ describe('processInfluencerProGeneration', () => {
     (getGenerationPresignedUrl as jest.Mock)
       .mockResolvedValueOnce('https://r2.example.com/frame-signed')
       .mockResolvedValueOnce('https://r2.example.com/composite-signed');
-    dispatchMock.mockRejectedValue(new Error('Fal dispatch failed'));
+    dispatchMock.mockRejectedValue(new Error('Replicate dispatch failed'));
 
     await processInfluencerProGeneration(JOB);
 

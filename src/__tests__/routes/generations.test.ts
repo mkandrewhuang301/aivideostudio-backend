@@ -32,6 +32,7 @@ jest.mock('../../config', () => ({
     hiveScanEnabled: true,
   },
   getReplicateWebhookUrl: jest.fn(() => 'https://mock.example.com/webhooks/replicate'),
+  getFalWebhookUrl: jest.fn(() => 'https://mock.example.com/webhooks/fal'),
 }));
 
 jest.mock('../../db/client', () => ({
@@ -59,6 +60,8 @@ jest.mock('../../services/generationService', () => ({
   computeUpscalerCost: jest.fn(),
   computeImageUpscaleCost: jest.fn(),
   computeGrokImagineCost: jest.fn(),
+  computeFalKlingV3Cost: jest.fn(),
+  resolveFalKlingV3Duration: jest.fn(),
   computeHappyHorseCost: jest.fn(),
   resolveHappyHorseDuration: jest.fn(),
   computeFaceswapCost: jest.fn(),
@@ -84,6 +87,7 @@ jest.mock('../../services/generationService', () => ({
   SUPPORTED_UPSCALER_MODELS: ['bytedance/video-upscaler'],
   SUPPORTED_IMAGE_UPSCALE_MODELS: ['recraft-ai/recraft-crisp-upscale'],
   SUPPORTED_GROK_MODELS: ['xai/grok-imagine-video-1.5'],
+  SUPPORTED_FAL_KLING_MODELS: ['fal-ai/kling-video/v3/standard/image-to-video'],
   SUPPORTED_HAPPYHORSE_MODELS: ['alibaba/happyhorse-1.1'],
   SUPPORTED_FACESWAP_MODELS: ['openai/gpt-image-2-medium'],
   computeCharacterReplaceCost: jest.fn(),
@@ -104,6 +108,12 @@ jest.mock('../../services/providers/ReplicateProvider', () => {
     })),
   };
 });
+
+jest.mock('../../services/providers/FalProvider', () => ({
+  FalProvider: jest.fn().mockImplementation(() => ({
+    dispatch: jest.fn(),
+  })),
+}));
 
 // generateImageEditWithMask/generateFaceswap moved to openaiGenerationWorker.ts (09.2-13, D-C) —
 // mocked here only so tests can assert the route NEVER calls them directly anymore (moved to the
@@ -163,6 +173,8 @@ import {
   computeUpscalerCost,
   computeImageUpscaleCost,
   computeGrokImagineCost,
+  computeFalKlingV3Cost,
+  resolveFalKlingV3Duration,
   computeHappyHorseCost,
   resolveHappyHorseDuration,
   computeFaceswapCost,
@@ -180,11 +192,15 @@ import { generateImageWithOpenAI, generateImageEditWithMask, generateFaceswap } 
 import { openaiGenerationQueue } from '../../queue/openaiGenerationQueue';
 import { chainGenerationQueue } from '../../queue/chainGenerationQueue';
 import { ReplicateProvider } from '../../services/providers/ReplicateProvider';
+import { FalProvider } from '../../services/providers/FalProvider';
 import { db } from '../../db/client';
 
 const MockedReplicateProvider = ReplicateProvider as jest.MockedClass<typeof ReplicateProvider>;
 const providerInstance = MockedReplicateProvider.mock.results[0]?.value as { dispatch: jest.Mock };
 const dispatchMock = providerInstance.dispatch;
+const MockedFalProvider = FalProvider as jest.MockedClass<typeof FalProvider>;
+const falProviderInstance = MockedFalProvider.mock.results[0]?.value as { dispatch: jest.Mock };
+const falDispatchMock = falProviderInstance.dispatch;
 
 const app = express();
 app.use(express.json());
@@ -342,6 +358,71 @@ describe('POST /api/generations — Grok Imagine (image-to-video)', () => {
     expect(res.status).toBe(400);
     expect(res.body.code).toBe('INVALID_RESOLUTION');
     expect(dispatchMock).not.toHaveBeenCalled();
+  });
+});
+
+// ─── POST /api/generations — fal Kling v3 Standard image-to-video ────────────
+
+describe('POST /api/generations — fal Kling v3 Standard image-to-video', () => {
+  const KLING_BODY = {
+    prompt: 'slow cinematic push-in [Image1]',
+    model: 'fal-ai/kling-video/v3/standard/image-to-video',
+    duration: 5,
+    resolution: '720p' as const,
+    aspect_ratio: '9:16',
+    audio_enabled: true,
+    reference_images: ['https://example.com/start.png'],
+  };
+
+  it('requires exactly one start image before deduction or dispatch', async () => {
+    const res = await request(app).post('/api/generations').send({ ...KLING_BODY, reference_images: [] });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_INPUT');
+    expect(deductCredits).not.toHaveBeenCalled();
+    expect(falDispatchMock).not.toHaveBeenCalled();
+  });
+
+  it('prices audio-on, strips the composer token, and dispatches only through FalProvider', async () => {
+    (resolveFalKlingV3Duration as jest.Mock).mockReturnValue(5);
+    (computeFalKlingV3Cost as jest.Mock).mockReturnValue(63);
+    (deductCredits as jest.Mock).mockResolvedValue(true);
+    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-fal-kling-1' });
+    falDispatchMock.mockResolvedValue({
+      providerPredictionId: 'fal-ai/kling-video/v3/standard/image-to-video::req-1',
+    });
+    (attachPredictionId as jest.Mock).mockResolvedValue(undefined);
+
+    const res = await request(app).post('/api/generations').send(KLING_BODY);
+
+    expect(res.status).toBe(200);
+    expect(resolveFalKlingV3Duration).toHaveBeenCalledWith(5);
+    expect(computeFalKlingV3Cost).toHaveBeenCalledWith(5, true);
+    expect(deductCredits).toHaveBeenCalledWith('test-user-id', 63);
+    expect(dispatchMock).not.toHaveBeenCalled();
+    expect(falDispatchMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: KLING_BODY.model,
+        prompt: 'slow cinematic push-in',
+        durationSeconds: 5,
+        audioEnabled: true,
+        referenceImages: KLING_BODY.reference_images,
+      }),
+      'https://mock.example.com/webhooks/fal',
+    );
+  });
+
+  it('prices audio-off independently', async () => {
+    (resolveFalKlingV3Duration as jest.Mock).mockReturnValue(5);
+    (computeFalKlingV3Cost as jest.Mock).mockReturnValue(42);
+    (deductCredits as jest.Mock).mockResolvedValue(true);
+    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-fal-kling-2' });
+    falDispatchMock.mockResolvedValue({ providerPredictionId: 'fal-model::req-2' });
+
+    const res = await request(app).post('/api/generations').send({ ...KLING_BODY, audio_enabled: false });
+
+    expect(res.status).toBe(200);
+    expect(computeFalKlingV3Cost).toHaveBeenCalledWith(5, false);
   });
 });
 
@@ -1110,7 +1191,7 @@ describe('POST /api/generations — presets', () => {
     );
   });
 
-  it('polaroid: two image slots mapped onto reference_images in order', async () => {
+  it('polaroid: bundled examples precede childhood/adulthood uploads and bills GPT Image 2 medium', async () => {
     mockUploadRows([
       { id: 'upload-p1', r2_key: 'uploads/test-user-id/p1.jpg' },
       { id: 'upload-p2', r2_key: 'uploads/test-user-id/p2.jpg' },
@@ -1128,9 +1209,25 @@ describe('POST /api/generations — presets', () => {
 
     expect(res.status).toBe(200);
     expect(dispatchMock.mock.calls[0][0].referenceImages).toEqual([
+      'https://r2.example.com/signed/preset-assets/polaroid/references/example-1.png',
+      'https://r2.example.com/signed/preset-assets/polaroid/references/example-2.png',
       'https://r2.example.com/signed/uploads/test-user-id/p1.jpg',
       'https://r2.example.com/signed/uploads/test-user-id/p2.jpg',
     ]);
+    expect(computeImageCostCredits).toHaveBeenCalledWith('openai/gpt-image-2-medium');
+    expect(createGeneration).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cost_credits: 5,
+        params: expect.objectContaining({
+          preset_id: 'polaroid',
+          preset_input_upload_ids: ['upload-p1', 'upload-p2'],
+        }),
+      }),
+    );
+    expect(dispatchMock.mock.calls[0][0].prompt).toContain('image 3 is the person as a child');
+    expect(dispatchMock.mock.calls[0][0].prompt).toContain('image 4 is the same person as an adult');
+    expect(dispatchMock.mock.calls[0][0].prompt).toContain('chest-up and waist-up compositions');
+    expect(dispatchMock.mock.calls[0][0].prompt).toContain('smirk or smile with their teeth showing');
   });
 
   it('animate-old-photo: video path, fixed duration from the preset max_seconds cap (no user duration slot)', async () => {

@@ -3,7 +3,7 @@
 // credit costs client-side without hardcoding values in the app bundle.
 
 import { Router } from 'express';
-import { MODEL_RATES, CENTS_PER_DOLLAR, IMAGE_MODEL_COSTS, DREAMACTOR_RATE, VIDEO_UPSCALER_RATES, GROK_IMAGINE_CREDITS_PER_SEC } from '../services/generationService';
+import { MODEL_RATES, CENTS_PER_DOLLAR, IMAGE_MODEL_COSTS, DREAMACTOR_RATE, VIDEO_UPSCALER_RATES, GROK_IMAGINE_CREDITS_PER_SEC, FAL_KLING_V3_STANDARD_RATES, KLING_MOTION_RATE } from '../services/generationService';
 
 export const ratesRouter = Router();
 
@@ -41,5 +41,10 @@ ratesRouter.get('/', (_req, res) => {
     dreamactorRate: dreamactorCreditRate,
     upscalerRates: upscalerCreditRates,
     grokImagineRate: GROK_IMAGINE_CREDITS_PER_SEC, // already in credits, flat — no conversion multiply
+    falKlingV3StandardRates: {
+      audioOff: FAL_KLING_V3_STANDARD_RATES.audioOff * CENTS_PER_DOLLAR,
+      audioOn: FAL_KLING_V3_STANDARD_RATES.audioOn * CENTS_PER_DOLLAR,
+    },
+    klingMotionStandardRate: KLING_MOTION_RATE.std * CENTS_PER_DOLLAR,
   });
 });

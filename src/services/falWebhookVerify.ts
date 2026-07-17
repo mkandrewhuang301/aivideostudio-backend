@@ -1,7 +1,7 @@
 // src/services/falWebhookVerify.ts
 // Fal.ai webhook signature verification — ED25519 + JWKS, a completely different scheme from
 // Replicate's shared-secret HMAC (validateWebhook() from the `replicate` package). Live-verified
-// 2026-07-15 against https://fal.ai/docs/model-apis/model-endpoints/webhooks:
+// 2026-07-15 against https://fal.ai/docs/documentation/model-apis/inference/webhooks:
 //   Headers: X-Fal-Webhook-Request-Id, X-Fal-Webhook-User-Id, X-Fal-Webhook-Timestamp (unix
 //   seconds), X-Fal-Webhook-Signature (hex-encoded).
 //   Message to verify = requestId + "\n" + userId + "\n" + timestamp + "\n" + sha256(rawBody)-hex.

@@ -23,6 +23,8 @@ import {
   computeFaceswapCost,
   computeHappyHorseCost,
   resolveHappyHorseDuration,
+  computeFalKlingV3Cost,
+  resolveFalKlingV3Duration,
   SUPPORTED_IMAGE_UPSCALE_MODELS,
   SUPPORTED_CHARACTER_REPLACE_MODELS,
   SUPPORTED_FACESWAP_MODELS,
@@ -140,6 +142,24 @@ describe('computeHappyHorseCost + resolveHappyHorseDuration', () => {
   });
 });
 
+describe('fal Kling v3 Standard cost + duration', () => {
+  it('charges the live audio-on rate: ceil(5 * $0.126 * 100) = 63 credits', () => {
+    expect(computeFalKlingV3Cost(5, true)).toBe(63);
+  });
+
+  it('charges the live audio-off rate: ceil(5 * $0.084 * 100) = 42 credits', () => {
+    expect(computeFalKlingV3Cost(5, false)).toBe(42);
+  });
+
+  it('accepts integer durations 3...15 and rejects values outside that range', () => {
+    expect(resolveFalKlingV3Duration(3)).toBe(3);
+    expect(resolveFalKlingV3Duration(15)).toBe(15);
+    expect(() => resolveFalKlingV3Duration(2)).toThrow(/between 3 and 15/);
+    expect(() => resolveFalKlingV3Duration(16)).toThrow(/between 3 and 15/);
+    expect(() => resolveFalKlingV3Duration(5.5)).toThrow(/between 3 and 15/);
+  });
+});
+
 // ─── computeCostCredits ───────────────────────────────────────────────────────
 
 describe('computeCostCredits', () => {
@@ -188,9 +208,9 @@ describe('cents-rule cost functions (verified, not re-broken)', () => {
     expect(SUPPORTED_CHARACTER_REPLACE_MODELS).toContain('wan-video/wan-2.2-animate-replace');
   });
 
-  it('computeCharacterReplaceProCost(5s) == Kling std via Fal (12.6c/sec, NOT pro — the pipeline itself is "Pro") + Wan 2.7 flat (3) == 66 credits', () => {
+  it('computeCharacterReplaceProCost(5s) == Kling std (25.2c/sec, NOT pro — the pipeline itself is "Pro") + Wan 2.7 flat (3) == 129 credits', () => {
     expect(computeCharacterReplaceProCost(5)).toBe(computeKlingMotionControlCost(5, 'std') + 3);
-    expect(computeCharacterReplaceProCost(5)).toBe(66);
+    expect(computeCharacterReplaceProCost(5)).toBe(129);
   });
 
   it('computeCharacterReplaceProCost always costs more than Standard tier at the same duration', () => {

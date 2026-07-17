@@ -60,8 +60,8 @@ export function getReplicateWebhookUrl(): string {
   return `${normalizedBase}/webhooks/replicate`;
 }
 
-// FalProvider's one live consumer (influencerProWorker.ts's Kling v3 stage) sends this so Fal's
-// queue calls back at a distinct route from Replicate's — mirrors getReplicateWebhookUrl() above.
+// Fal-backed regular Kling v3 image-to-video sends this so Fal's queue calls back at a distinct
+// route from Replicate's — mirrors getReplicateWebhookUrl() above.
 export function getFalWebhookUrl(): string {
   const baseUrl = config.publicBaseUrl.trim().replace(/^["']|["']$/g, '');
   const normalizedBase = baseUrl.startsWith('http') ? baseUrl : `https://${baseUrl}`;

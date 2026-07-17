@@ -18,6 +18,8 @@ import {
   computeUpscalerCost,
   computeImageUpscaleCost,
   computeGrokImagineCost,
+  computeFalKlingV3Cost,
+  resolveFalKlingV3Duration,
   computeHappyHorseCost,
   resolveHappyHorseDuration,
   computeCharacterReplaceCost,
@@ -37,19 +39,21 @@ import {
   SUPPORTED_UPSCALER_MODELS,
   SUPPORTED_IMAGE_UPSCALE_MODELS,
   SUPPORTED_GROK_MODELS,
+  SUPPORTED_FAL_KLING_MODELS,
   SUPPORTED_HAPPYHORSE_MODELS,
   SUPPORTED_CHARACTER_REPLACE_MODELS,
   SUPPORTED_FACESWAP_MODELS,
   type SupportedModel,
 } from '../services/generationService';
 import { ReplicateProvider } from '../services/providers/ReplicateProvider';
+import { FalProvider } from '../services/providers/FalProvider';
 import { refundCredits } from '../services/creditService';
 import { classifyFailureReason, markFailed } from '../services/generationService';
 import { getGenerationPresignedUrl, getUploadPresignedUrl } from '../services/archivalService';
 import { openaiGenerationQueue } from '../queue/openaiGenerationQueue';
 import { chainGenerationQueue } from '../queue/chainGenerationQueue';
 import { influencerProQueue } from '../queue/influencerProQueue';
-import { getReplicateWebhookUrl } from '../config';
+import { getFalWebhookUrl, getReplicateWebhookUrl } from '../config';
 import type { GenerationInput } from '../services/providers/ModelProvider';
 import { db } from '../db/client';
 import { referenceUploads } from '../db/schema';
@@ -57,7 +61,8 @@ import { eq, inArray, and, sql } from 'drizzle-orm';
 
 export const generationsRouter = Router();
 
-const provider = new ReplicateProvider();
+const replicateProvider = new ReplicateProvider();
+const falProvider = new FalProvider();
 
 // Shared by the Seedance fallthrough and the Grok Imagine branch below.
 const VALID_VIDEO_ASPECT_RATIOS = ['16:9', '9:16', '1:1', '4:3', '3:4'];
@@ -497,6 +502,47 @@ function prepareCost(req: Request, res: Response, next: NextFunction): void {
     return;
   }
 
+  // fal.ai Kling v3 Standard image-to-video — exactly one start image, 3...15 seconds, optional
+  // native audio. The start image defines framing, so fal exposes no resolution/aspect input.
+  if (model && (SUPPORTED_FAL_KLING_MODELS as readonly string[]).includes(model)) {
+    const refImages: string[] = Array.isArray(reference_images)
+      ? reference_images.filter((u: unknown) => typeof u === 'string')
+      : [];
+    if (refImages.length !== 1) {
+      res.status(400).json({ error: 'Kling v3 Standard requires exactly one reference image.', code: 'INVALID_INPUT' });
+      return;
+    }
+    let durationSeconds: number;
+    try {
+      durationSeconds = resolveFalKlingV3Duration(duration);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message, code: 'INVALID_DURATION' });
+      return;
+    }
+    const audioEnabled = audio_enabled !== false;
+    const cost = computeFalKlingV3Cost(durationSeconds, audioEnabled);
+    const refUploadIds: string[] = Array.isArray(reference_upload_ids)
+      ? reference_upload_ids.filter((id: unknown) => typeof id === 'string')
+      : [];
+    // Composer reference chips use [Image1] tokens for Seedance. Kling receives the image in a
+    // dedicated start_image_url field, so remove that transport-only token from its text prompt.
+    const directPrompt = (prompt as string).replace(/\s*\[Image1\]\s*/g, ' ').trim();
+    req.body.cost_credits = cost;
+    req._resolved = {
+      prompt: directPrompt,
+      model,
+      mediaType: 'video',
+      durationSeconds,
+      resolution: '720p', // client display metadata only; fal's Standard endpoint has no selector
+      audioEnabled,
+      cost,
+      referenceImages: refImages,
+      refUploadIds: refUploadIds.length > 0 ? refUploadIds : undefined,
+    };
+    next();
+    return;
+  }
+
   // Alibaba HappyHorse 1.1 — text-to-video (0 images) OR single-image image-to-video (1 image).
   // Per-resolution pricing, native always-on audio (no toggle), duration 3–15. Uses an `images`
   // array (no [ImageN] token injection). v1: reject 2+ images (2–9 reference-to-video deferred).
@@ -871,7 +917,9 @@ generationsRouter.post('/', promptModerationMiddleware, presetResolver, prepareC
       return;
     }
 
-    const webhookUrl = getReplicateWebhookUrl();
+    const usesFal = (SUPPORTED_FAL_KLING_MODELS as readonly string[]).includes(resolved.model);
+    const webhookUrl = usesFal ? getFalWebhookUrl() : getReplicateWebhookUrl();
+    const dispatchProvider = usesFal ? falProvider : replicateProvider;
     console.log(`[generations] webhookUrl="${webhookUrl}"`);
     const input: GenerationInput = {
       prompt: resolved.prompt,
@@ -913,7 +961,7 @@ generationsRouter.post('/', promptModerationMiddleware, presetResolver, prepareC
 
     let providerPredictionId: string;
     try {
-      ({ providerPredictionId } = await provider.dispatch(input, webhookUrl));
+      ({ providerPredictionId } = await dispatchProvider.dispatch(input, webhookUrl));
     } catch (dispatchError) {
       const errMsg = dispatchError instanceof Error ? dispatchError.message : String(dispatchError);
       const isRateLimit = errMsg.includes('429') || errMsg.toLowerCase().includes('throttled');
