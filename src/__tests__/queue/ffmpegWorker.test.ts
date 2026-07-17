@@ -23,16 +23,23 @@ jest.mock('../../config', () => ({
     apnsTeamId: 'mock', apnsBundleId: 'mock', replicateApiToken: 'mock-token',
     hiveApiKey: 'mock-hive-key', publicBaseUrl: 'https://mock.example.com',
     port: 3000, nodeEnv: 'test',
+    hiveScanEnabled: true,
   },
 }));
 
 jest.mock('../../services/generationService', () => ({
   markCompleted: jest.fn(),
   markFailed: jest.fn(),
+  markQuarantined: jest.fn(),
   mergeGenerationParams: jest.fn(),
 }));
 jest.mock('../../services/creditService', () => ({ refundCredits: jest.fn() }));
 jest.mock('../../services/apnsService', () => ({ sendGenerationComplete: jest.fn() }));
+jest.mock('../../services/hiveService', () => ({ scanForCsam: jest.fn() }));
+const hiveScanAdd = jest.fn();
+jest.mock('../../queue/hiveScanWorker', () => ({
+  hiveScanQueue: { add: hiveScanAdd },
+}));
 jest.mock('../../db/client', () => ({ db: { execute: jest.fn() } }));
 // 09.3-02: real download/ffmpeg-spawn/R2-upload I/O lives in ffmpegProcessor.ts (the single seam
 // ffmpegWorker.ts calls through) — mocked here so this suite never touches a live ffmpeg binary,
@@ -40,9 +47,15 @@ jest.mock('../../db/client', () => ({ db: { execute: jest.fn() } }));
 // NOT invent this mock path, leaving the internal shape to this plan.
 jest.mock('../../queue/ffmpegProcessor', () => ({ runFfmpegOp: jest.fn() }));
 
-import { markCompleted, markFailed, mergeGenerationParams } from '../../services/generationService';
+import {
+  markCompleted,
+  markFailed,
+  markQuarantined,
+  mergeGenerationParams,
+} from '../../services/generationService';
 import { refundCredits } from '../../services/creditService';
 import { sendGenerationComplete } from '../../services/apnsService';
+import { scanForCsam } from '../../services/hiveService';
 import { db } from '../../db/client';
 import { runFfmpegOp } from '../../queue/ffmpegProcessor';
 // FFMPEG_ATTEMPTS mirrors HIVE_SCAN_ATTEMPTS's role: the queue's defaultJobOptions.attempts,
@@ -67,9 +80,12 @@ beforeEach(() => {
   (db.execute as jest.Mock).mockResolvedValue({ rows: [{ apns_device_token: 'token-abc' }] });
   (markCompleted as jest.Mock).mockResolvedValue(true);
   (markFailed as jest.Mock).mockResolvedValue(true);
+  (markQuarantined as jest.Mock).mockResolvedValue(true);
   (mergeGenerationParams as jest.Mock).mockResolvedValue(undefined);
   (refundCredits as jest.Mock).mockResolvedValue(undefined);
   (sendGenerationComplete as jest.Mock).mockResolvedValue(undefined);
+  (scanForCsam as jest.Mock).mockResolvedValue({ flagged: false });
+  hiveScanAdd.mockResolvedValue(undefined);
   (runFfmpegOp as jest.Mock).mockResolvedValue({
     r2Key: `generations/${JOB_DATA.generationId}.mp4`,
     masterR2Key: `generations/${JOB_DATA.generationId}.silent.mp4`,
@@ -77,6 +93,61 @@ beforeEach(() => {
 });
 
 describe('processFfmpegJob', () => {
+  it('scans the archived final output before preserving the existing completion path', async () => {
+    await processFfmpegJob(JOB_DATA);
+
+    const finalKey = `generations/${JOB_DATA.generationId}.mp4`;
+    expect(scanForCsam).toHaveBeenCalledWith(finalKey);
+    expect((scanForCsam as jest.Mock).mock.invocationCallOrder[0]).toBeLessThan(
+      (markCompleted as jest.Mock).mock.invocationCallOrder[0],
+    );
+    expect(markCompleted).toHaveBeenCalledWith(JOB_DATA.generationId, finalKey);
+    expect(mergeGenerationParams).toHaveBeenCalledWith(JOB_DATA.generationId, {
+      silent_master_r2_key: `generations/${JOB_DATA.generationId}.silent.mp4`,
+      applied_audio_r2_key: JOB_DATA.audioR2Key,
+    });
+    expect(sendGenerationComplete).toHaveBeenCalledWith('token-abc', JOB_DATA.generationId, 'video');
+  });
+
+  it('quarantines and refunds a flagged final output exactly once without completing or pushing', async () => {
+    (scanForCsam as jest.Mock).mockResolvedValueOnce({ flagged: true });
+
+    await processFfmpegJob(JOB_DATA);
+
+    expect(markQuarantined).toHaveBeenCalledTimes(1);
+    expect(markQuarantined).toHaveBeenCalledWith(JOB_DATA.generationId);
+    expect(refundCredits).toHaveBeenCalledTimes(1);
+    expect(refundCredits).toHaveBeenCalledWith(
+      JOB_DATA.userId,
+      JOB_DATA.costCredits,
+      `csam-quarantine-ffmpeg-${JOB_DATA.generationId}`,
+    );
+    expect(markCompleted).not.toHaveBeenCalled();
+    expect(mergeGenerationParams).not.toHaveBeenCalled();
+    expect(sendGenerationComplete).not.toHaveBeenCalled();
+    expect(hiveScanAdd).not.toHaveBeenCalled();
+  });
+
+  it('queues the existing Hive retry job on scan error and never completes unscanned output', async () => {
+    (scanForCsam as jest.Mock).mockRejectedValueOnce(new Error('Hive unavailable'));
+
+    await processFfmpegJob(JOB_DATA);
+
+    expect(hiveScanAdd).toHaveBeenCalledTimes(1);
+    expect(hiveScanAdd).toHaveBeenCalledWith('scan', {
+      generationId: JOB_DATA.generationId,
+      r2Key: `generations/${JOB_DATA.generationId}.mp4`,
+      userId: JOB_DATA.userId,
+      costCredits: JOB_DATA.costCredits,
+      mediaType: 'video',
+    });
+    expect(markCompleted).not.toHaveBeenCalled();
+    expect(markQuarantined).not.toHaveBeenCalled();
+    expect(refundCredits).not.toHaveBeenCalled();
+    expect(mergeGenerationParams).not.toHaveBeenCalled();
+    expect(sendGenerationComplete).not.toHaveBeenCalled();
+  });
+
   it('mux success: marks completed with the final muxed r2 key and sends a video completion push (SC1)', async () => {
     await processFfmpegJob(JOB_DATA);
 
