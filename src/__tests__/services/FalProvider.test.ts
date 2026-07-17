@@ -1,9 +1,11 @@
 const submitMock = jest.fn();
 const statusMock = jest.fn();
 const resultMock = jest.fn();
+const subscribeMock = jest.fn();
 
 jest.mock('@fal-ai/client', () => ({
   fal: {
+    subscribe: subscribeMock,
     queue: {
       submit: submitMock,
       status: statusMock,
@@ -19,6 +21,9 @@ import {
   FalProvider,
   FAL_KLING_V3_STANDARD_I2V_MODEL,
   encodePredictionId,
+  falRunLyria,
+  falRunOmniI2v,
+  falRunTts,
 } from '../../services/providers/FalProvider';
 
 describe('FalProvider — Kling v3 Standard image-to-video', () => {
@@ -77,5 +82,66 @@ describe('FalProvider — Kling v3 Standard image-to-video', () => {
     const provider = new FalProvider();
     await expect(provider.getStatus('fal-ai/other-model::req-3')).rejects.toThrow(/Unsupported Fal endpoint/);
     expect(statusMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('FalProvider — blocking Explainer media calls', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  it('returns plain provider URLs from the live-verified output fields', async () => {
+    subscribeMock
+      .mockResolvedValueOnce({ data: { video: { url: 'https://fal.media/scene.mp4' } }, requestId: 'omni-1' })
+      .mockResolvedValueOnce({ data: { audio: { url: 'https://fal.media/voice.wav' } }, requestId: 'tts-1' })
+      .mockResolvedValueOnce({ data: { audio: { url: 'https://fal.media/music.wav' } }, requestId: 'lyria-1' });
+
+    await expect(falRunOmniI2v('custom/omni', {
+      prompt: 'subtle motion',
+      image_url: 'https://r2.example.com/still.png',
+      aspect_ratio: '9:16',
+      duration: 4,
+    })).resolves.toBe('https://fal.media/scene.mp4');
+    await expect(falRunTts('custom/tts', {
+      prompt: 'Narration',
+      voice: 'Kore',
+      output_format: 'wav',
+    })).resolves.toBe('https://fal.media/voice.wav');
+    await expect(falRunLyria('custom/lyria', {
+      prompt: 'ambient instrumental',
+      negative_prompt: 'vocals',
+    })).resolves.toBe('https://fal.media/music.wav');
+
+    expect(subscribeMock).toHaveBeenNthCalledWith(1, 'custom/omni', {
+      input: {
+        prompt: 'subtle motion',
+        image_url: 'https://r2.example.com/still.png',
+        aspect_ratio: '9:16',
+        duration: 4,
+      },
+    });
+  });
+
+  it('throws a credential-safe label and status for provider failures', async () => {
+    const providerError = Object.assign(new Error('FAL_KEY=super-secret request body'), { status: 401 });
+    subscribeMock.mockRejectedValue(providerError);
+
+    let thrown: unknown;
+    try {
+      await falRunTts('custom/tts', { prompt: 'Narration', voice: 'Kore', output_format: 'wav' });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as Error).message).toBe('Fal Gemini TTS failed (401)');
+    expect((thrown as Error).message).not.toContain('super-secret');
+  });
+
+  it('throws a short status-bearing error when a completed call has no output URL', async () => {
+    subscribeMock.mockResolvedValue({ data: {}, requestId: 'req-without-output' });
+
+    await expect(falRunLyria('custom/lyria', {
+      prompt: 'ambient instrumental',
+      negative_prompt: 'vocals',
+    })).rejects.toThrow('Fal Lyria2 returned no output (completed)');
   });
 });
