@@ -40,6 +40,7 @@ export async function archiveToR2(
   // Derive file extension from content type
   const ext =
     contentType === 'video/mp4' ? 'mp4' :
+    contentType === 'video/quicktime' ? 'mov' :
     contentType === 'image/webp' ? 'webp' :
     contentType === 'image/png'  ? 'png'  :
     'jpg';  // default for image/jpeg and any unknown image type

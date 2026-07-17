@@ -14,7 +14,11 @@ import { refundCredits } from '../services/creditService';
 import { archiveToR2 } from '../services/archivalService';
 import { scanForCsam } from '../services/hiveService';
 import { ReplicateProvider } from '../services/providers/ReplicateProvider';
-import { FalProvider, FAL_KLING_V3_STANDARD_I2V_MODEL } from '../services/providers/FalProvider';
+import {
+  FalProvider,
+  falVideoOutputContentType,
+  isFalAsyncVideoModel,
+} from '../services/providers/FalProvider';
 import { config } from '../config';
 
 const QUEUE_NAME = 'generation-reaper';
@@ -31,7 +35,7 @@ const replicateProvider = new ReplicateProvider();
 const falProvider = new FalProvider();
 
 function providerFor(model: string) {
-  return model === FAL_KLING_V3_STANDARD_I2V_MODEL ? falProvider : replicateProvider;
+  return isFalAsyncVideoModel(model) ? falProvider : replicateProvider;
 }
 
 interface ReapableRow {
@@ -82,7 +86,11 @@ export async function reapStalledJobs(): Promise<void> {
       const prediction = await providerFor(row.model).getStatus(row.replicate_prediction_id);
 
       if (prediction.status === 'succeeded' && prediction.outputUrl) {
-        const r2Key = await archiveToR2(prediction.outputUrl, row.id);
+        const r2Key = await archiveToR2(
+          prediction.outputUrl,
+          row.id,
+          isFalAsyncVideoModel(row.model) ? falVideoOutputContentType(row.model) : 'video/mp4',
+        );
 
         let hiveFlagged = false;
         if (config.hiveScanEnabled) {

@@ -54,6 +54,12 @@ jest.mock('../../services/providers/ReplicateProvider', () => ({
 
 jest.mock('../../services/providers/FalProvider', () => ({
   FAL_KLING_V3_STANDARD_I2V_MODEL: 'fal-ai/kling-video/v3/standard/image-to-video',
+  isFalAsyncVideoModel: jest.fn((model: string) => [
+    'fal-ai/kling-video/v3/standard/image-to-video',
+    'pixelcut/video-background-removal',
+  ].includes(model)),
+  falVideoOutputContentType: jest.fn((model: string) =>
+    model === 'pixelcut/video-background-removal' ? 'video/quicktime' : 'video/mp4'),
   FalProvider: jest.fn().mockImplementation(() => ({
     getStatus: mockGetFalStatus,
   })),
@@ -209,6 +215,35 @@ describe('reapStalledJobs', () => {
     expect(mockGetStatus).toHaveBeenCalledWith('replicate-motion-1');
   });
 
+  it('reconciles Pixelcut transparent video through fal and preserves the QuickTime container', async () => {
+    mockDbExecute.mockResolvedValueOnce({
+      rows: [{
+        id: 'gen-alpha', user_id: 'user-alpha', cost_credits: 9,
+        replicate_prediction_id: 'pixelcut/video-background-removal::req-alpha',
+        model: 'pixelcut/video-background-removal',
+      }],
+    });
+    mockGetFalStatus.mockResolvedValueOnce({
+      status: 'succeeded',
+      outputUrl: 'https://fal.media/cutout.mov',
+    });
+    mockArchiveToR2.mockResolvedValueOnce('generations/gen-alpha.mov');
+    mockScanForCsam.mockResolvedValueOnce({ flagged: false });
+    mockMarkCompleted.mockResolvedValueOnce(true);
+
+    await reapStalledJobs();
+
+    expect(mockGetFalStatus).toHaveBeenCalledWith(
+      'pixelcut/video-background-removal::req-alpha',
+    );
+    expect(mockArchiveToR2).toHaveBeenCalledWith(
+      'https://fal.media/cutout.mov',
+      'gen-alpha',
+      'video/quicktime',
+    );
+    expect(mockMarkCompleted).toHaveBeenCalledWith('gen-alpha', 'generations/gen-alpha.mov');
+  });
+
   it('archives to R2, scans for CSAM, and marks completed when Replicate reports succeeded', async () => {
     mockDbExecute.mockResolvedValueOnce({
       rows: [
@@ -226,7 +261,11 @@ describe('reapStalledJobs', () => {
     await reapStalledJobs();
 
     expect(mockGetStatus).toHaveBeenCalledWith('pred-3');
-    expect(mockArchiveToR2).toHaveBeenCalledWith('https://replicate.delivery/output.mp4', 'gen-3');
+    expect(mockArchiveToR2).toHaveBeenCalledWith(
+      'https://replicate.delivery/output.mp4',
+      'gen-3',
+      'video/mp4',
+    );
     expect(mockScanForCsam).toHaveBeenCalledWith('generations/gen-3.mp4');
     expect(mockMarkCompleted).toHaveBeenCalledWith('gen-3', 'generations/gen-3.mp4');
     expect(mockMarkRefunded).not.toHaveBeenCalled();

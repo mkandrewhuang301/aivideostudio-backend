@@ -96,6 +96,9 @@ jest.mock('../../queue/influencerProQueue', () => ({
 jest.mock('../../queue/explainerGenerationQueue', () => ({
   explainerGenerationQueue: { add: jest.fn() },
 }));
+jest.mock('../../queue/falImageToolQueue', () => ({
+  falImageToolQueue: { add: jest.fn() },
+}));
 
 jest.mock('../../middleware/presetResolver', () => ({
   presetResolver: jest.fn((_req: unknown, _res: unknown, next: () => void) => next()),

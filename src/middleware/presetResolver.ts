@@ -25,6 +25,7 @@ import { getUploadPresignedUrl } from '../services/archivalService';
 import { SERVER_PRESETS, type PresetDef } from '../config/presets';
 import { PERMISSIVE_I2V_MODEL } from '../services/generationService';
 import { expandScript } from '../services/openaiScriptService';
+import { FAL_VIDEO_BACKGROUND_REMOVAL_MODEL } from '../services/providers/FalProvider';
 
 const PRESETS_BY_ID: Record<string, PresetDef> = Object.fromEntries(
   SERVER_PRESETS.map((def) => [def.preset_id, def]),
@@ -305,15 +306,21 @@ export async function presetResolver(req: Request, res: Response, next: NextFunc
         break;
       }
       case 'video': {
-        // Animate Old Photo — image-to-video, fixed short duration (no user-selectable duration
-        // slot in the schema); use the preset's declared max_seconds as the actual duration.
-        // Character vlogger (09.3 D-05): character_asset (bundled canonical character still) goes
-        // FIRST in reference_images, ahead of any user upload slots.
-        req.body.reference_images = def.character_asset
-          ? [def.character_asset, ...slotUrls.filter(Boolean)]
-          : slotUrls;
-        req.body.duration = maxSeconds ?? 5;
-        req.body.resolution = '720p';
+        if (def.model === FAL_VIDEO_BACKGROUND_REMOVAL_MODEL) {
+          // Pixelcut receives a video URL, not an image-to-video reference. Frame-count probing
+          // and authoritative billing happen in prepareCost after this owned upload is resolved.
+          req.body.reference_videos = slotUrls.filter(Boolean);
+        } else {
+          // Animate Old Photo — image-to-video, fixed short duration (no user-selectable duration
+          // slot in the schema); use the preset's declared max_seconds as the actual duration.
+          // Character vlogger (09.3 D-05): character_asset (bundled canonical character still)
+          // goes FIRST in reference_images, ahead of any user upload slots.
+          req.body.reference_images = def.character_asset
+            ? [def.character_asset, ...slotUrls.filter(Boolean)]
+            : slotUrls;
+          req.body.duration = maxSeconds ?? 5;
+          req.body.resolution = '720p';
+        }
         break;
       }
       default:

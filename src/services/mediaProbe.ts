@@ -39,6 +39,19 @@ interface FfprobeStream {
   side_data_list?: FfprobeStreamSideData[];
 }
 
+interface FfprobeFrameStream {
+  nb_read_frames?: string;
+  nb_frames?: string;
+  avg_frame_rate?: string;
+  r_frame_rate?: string;
+  duration?: string;
+}
+
+interface FfprobeFrameJson {
+  streams?: FfprobeFrameStream[];
+  format?: { duration?: string };
+}
+
 interface FfprobeJson {
   streams?: FfprobeStream[];
   format?: { duration?: string };
@@ -107,4 +120,59 @@ export async function probeVideoMeta(input: string): Promise<ProbedVideoMeta> {
 export async function probeDurationSeconds(input: string): Promise<number | null> {
   const { durationSeconds } = await probeVideoMeta(input);
   return durationSeconds;
+}
+
+function parsePositiveNumber(value: string | undefined): number | null {
+  if (value == null) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function parseFrameRate(value: string | undefined): number | null {
+  if (!value) return null;
+  const [numeratorRaw, denominatorRaw] = value.split('/');
+  const numerator = Number(numeratorRaw);
+  const denominator = denominatorRaw == null ? 1 : Number(denominatorRaw);
+  if (!Number.isFinite(numerator) || !Number.isFinite(denominator) || numerator <= 0 || denominator <= 0) {
+    return null;
+  }
+  return numerator / denominator;
+}
+
+/**
+ * Counts a video's actual decoded frames for frame-metered provider billing. `-count_frames`
+ * makes `nb_read_frames` authoritative when the container does not publish `nb_frames`; the
+ * fps × duration fallback is used only when neither count is available. Unlike
+ * `probeVideoMeta`, a failure is intentionally surfaced as `null` so callers can reject before
+ * deducting credits instead of billing from an estimate.
+ */
+export async function probeVideoFrameCount(input: string): Promise<number | null> {
+  try {
+    const { stdout } = await execFileAsync('ffprobe', [
+      '-v', 'error',
+      '-count_frames',
+      '-select_streams', 'v:0',
+      '-show_entries',
+      'stream=nb_read_frames,nb_frames,avg_frame_rate,r_frame_rate,duration:format=duration',
+      '-of', 'json',
+      input,
+    ]);
+
+    const parsed = JSON.parse(stdout) as FfprobeFrameJson;
+    const stream = parsed.streams?.[0];
+    const countedFrames = parsePositiveNumber(stream?.nb_read_frames)
+      ?? parsePositiveNumber(stream?.nb_frames);
+    if (countedFrames != null && Number.isInteger(countedFrames)) return countedFrames;
+
+    const frameRate = parseFrameRate(stream?.avg_frame_rate)
+      ?? parseFrameRate(stream?.r_frame_rate);
+    const duration = parsePositiveNumber(stream?.duration)
+      ?? parsePositiveNumber(parsed.format?.duration);
+    if (frameRate == null || duration == null) return null;
+
+    return Math.ceil(frameRate * duration - 1e-3);
+  } catch (err) {
+    console.error('[mediaProbe] probeVideoFrameCount failed (returning null):', err);
+    return null;
+  }
 }

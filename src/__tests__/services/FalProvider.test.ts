@@ -21,6 +21,7 @@ import {
   FalProvider,
   FAL_IMAGE_BACKGROUND_REMOVAL_MODEL,
   FAL_KLING_V3_STANDARD_I2V_MODEL,
+  FAL_VIDEO_BACKGROUND_REMOVAL_MODEL,
   encodePredictionId,
   falRunImageBackgroundRemoval,
   falRunLyria,
@@ -84,6 +85,43 @@ describe('FalProvider — Kling v3 Standard image-to-video', () => {
     const provider = new FalProvider();
     await expect(provider.getStatus('fal-ai/other-model::req-3')).rejects.toThrow(/Unsupported Fal endpoint/);
     expect(statusMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('FalProvider — transparent video background removal', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  it('maps one source video to the live-verified transparent ProRes 4444 contract', async () => {
+    submitMock.mockResolvedValue({ request_id: 'req-video-bg-1' });
+    const provider = new FalProvider();
+
+    const result = await provider.dispatch({
+      prompt: '',
+      model: FAL_VIDEO_BACKGROUND_REMOVAL_MODEL,
+      mediaType: 'video',
+      referenceVideos: ['https://r2.example.com/source.mp4'],
+    }, 'https://api.example.com/webhooks/fal');
+
+    expect(submitMock).toHaveBeenCalledWith(FAL_VIDEO_BACKGROUND_REMOVAL_MODEL, {
+      input: {
+        video_url: 'https://r2.example.com/source.mp4',
+        background: 'transparent',
+        output_format: 'mov_proresks',
+      },
+      webhookUrl: 'https://api.example.com/webhooks/fal',
+    });
+    expect(result.providerPredictionId).toBe(`${FAL_VIDEO_BACKGROUND_REMOVAL_MODEL}::req-video-bg-1`);
+  });
+
+  it('rejects a missing or multiple source-video contract before submit', async () => {
+    const provider = new FalProvider();
+    await expect(provider.dispatch({
+      prompt: '',
+      model: FAL_VIDEO_BACKGROUND_REMOVAL_MODEL,
+      mediaType: 'video',
+      referenceVideos: [],
+    }, 'https://api.example.com/webhooks/fal')).rejects.toThrow(/exactly one/);
+    expect(submitMock).not.toHaveBeenCalled();
   });
 });
 

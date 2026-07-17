@@ -74,6 +74,24 @@ describe('archiveToR2', () => {
     expect(key).toBe('generations/gen-789.png');
   });
 
+  it('archives QuickTime alpha video under a .mov key', async () => {
+    (global.fetch as jest.Mock).mockResolvedValue({
+      ok: true,
+      body: fakeWebStreamFrom('fake-prores-alpha-bytes'),
+    });
+
+    const key = await archiveToR2(
+      'https://fal.media/cutout.mov',
+      'gen-mov',
+      'video/quicktime',
+    );
+
+    const uploadArgs = mockUploadCtor.mock.calls[0][0];
+    expect(uploadArgs.params.Key).toBe('generations/gen-mov.mov');
+    expect(uploadArgs.params.ContentType).toBe('video/quicktime');
+    expect(key).toBe('generations/gen-mov.mov');
+  });
+
   it('throws and never constructs an Upload when fetch resolves with a non-ok status', async () => {
     (global.fetch as jest.Mock).mockResolvedValue({
       ok: false,

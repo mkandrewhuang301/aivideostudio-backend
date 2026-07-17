@@ -12,7 +12,7 @@ jest.mock('child_process', () => ({
   execFile: (...args: unknown[]) => mockExecFile(...args),
 }));
 
-import { probeVideoMeta, probeDurationSeconds } from '../../services/mediaProbe';
+import { probeVideoMeta, probeDurationSeconds, probeVideoFrameCount } from '../../services/mediaProbe';
 
 function mockExecFileOnce(impl: (cb: (err: unknown, result: { stdout: string; stderr: string }) => void) => void) {
   mockExecFile.mockImplementationOnce((_file: string, _args: string[], cb: (err: unknown, result: { stdout: string; stderr: string }) => void) => {
@@ -171,5 +171,57 @@ describe('probeDurationSeconds', () => {
     mockExecFileOnce((cb) => cb(new Error('ffprobe: command not found'), { stdout: '', stderr: '' }));
 
     await expect(probeDurationSeconds('/tmp/some-video.mp4')).resolves.toBeNull();
+  });
+});
+
+describe('probeVideoFrameCount', () => {
+  it('uses decoded nb_read_frames as the authoritative frame count', async () => {
+    mockExecFileOnce((cb) => cb(null, {
+      stdout: JSON.stringify({
+        streams: [{ nb_read_frames: '301', nb_frames: '300', avg_frame_rate: '30000/1001', duration: '10.01' }],
+        format: { duration: '10.01' },
+      }),
+      stderr: '',
+    }));
+
+    await expect(probeVideoFrameCount('/tmp/clip.mp4')).resolves.toBe(301);
+    expect(mockExecFile.mock.calls[0][1]).toEqual([
+      '-v', 'error',
+      '-count_frames',
+      '-select_streams', 'v:0',
+      '-show_entries',
+      'stream=nb_read_frames,nb_frames,avg_frame_rate,r_frame_rate,duration:format=duration',
+      '-of', 'json',
+      '/tmp/clip.mp4',
+    ]);
+  });
+
+  it('falls back to container nb_frames when decoded count is unavailable', async () => {
+    mockExecFileOnce((cb) => cb(null, {
+      stdout: JSON.stringify({ streams: [{ nb_frames: '60' }] }),
+      stderr: '',
+    }));
+
+    await expect(probeVideoFrameCount('https://r2.example.com/clip')).resolves.toBe(60);
+  });
+
+  it('falls back to frame-rate times duration when the container publishes no count', async () => {
+    mockExecFileOnce((cb) => cb(null, {
+      stdout: JSON.stringify({
+        streams: [{ avg_frame_rate: '30000/1001' }],
+        format: { duration: '2.002' },
+      }),
+      stderr: '',
+    }));
+
+    await expect(probeVideoFrameCount('/tmp/no-count.mp4')).resolves.toBe(60);
+  });
+
+  it('returns null on invalid metadata or ffprobe failure', async () => {
+    mockExecFileOnce((cb) => cb(null, { stdout: JSON.stringify({ streams: [{}] }), stderr: '' }));
+    await expect(probeVideoFrameCount('/tmp/no-video.mp4')).resolves.toBeNull();
+
+    mockExecFileOnce((cb) => cb(new Error('ffprobe failed'), { stdout: '', stderr: '' }));
+    await expect(probeVideoFrameCount('/tmp/broken.mp4')).resolves.toBeNull();
   });
 });

@@ -17,7 +17,20 @@ import { ModelProvider, GenerationInput, DispatchResult, PredictionStatus } from
 
 export const FAL_KLING_V3_STANDARD_I2V_MODEL = 'fal-ai/kling-video/v3/standard/image-to-video' as const;
 export const FAL_IMAGE_BACKGROUND_REMOVAL_MODEL = 'pixelcut/background-removal' as const;
-const SUPPORTED_FAL_ENDPOINTS = new Set<string>([FAL_KLING_V3_STANDARD_I2V_MODEL]);
+export const FAL_VIDEO_BACKGROUND_REMOVAL_MODEL = 'pixelcut/video-background-removal' as const;
+export const FAL_ASYNC_VIDEO_ENDPOINTS = [
+  FAL_KLING_V3_STANDARD_I2V_MODEL,
+  FAL_VIDEO_BACKGROUND_REMOVAL_MODEL,
+] as const;
+const SUPPORTED_FAL_ENDPOINTS = new Set<string>(FAL_ASYNC_VIDEO_ENDPOINTS);
+
+export function isFalAsyncVideoModel(model: string): boolean {
+  return SUPPORTED_FAL_ENDPOINTS.has(model);
+}
+
+export function falVideoOutputContentType(model: string): 'video/mp4' | 'video/quicktime' {
+  return model === FAL_VIDEO_BACKGROUND_REMOVAL_MODEL ? 'video/quicktime' : 'video/mp4';
+}
 
 export function encodePredictionId(endpointId: string, requestId: string): string {
   return `${endpointId}::${requestId}`;
@@ -113,31 +126,51 @@ export async function falRunImageBackgroundRemoval(imageUrl: string): Promise<st
 
 export class FalProvider implements ModelProvider {
   async dispatch(input: GenerationInput, webhookUrl: string): Promise<DispatchResult> {
-    if (input.model !== FAL_KLING_V3_STANDARD_I2V_MODEL) {
-      throw new Error(`FalProvider does not support model: ${input.model}`);
+    if (input.model === FAL_KLING_V3_STANDARD_I2V_MODEL) {
+      const startImageUrl = input.referenceImages?.[0];
+      if (!startImageUrl) throw new Error('Kling v3 Standard image-to-video requires one start image');
+      if (!Number.isInteger(input.durationSeconds) || input.durationSeconds! < 3 || input.durationSeconds! > 15) {
+        throw new Error('Kling v3 Standard duration must be an integer between 3 and 15 seconds');
+      }
+      const duration = String(input.durationSeconds) as
+        | '3' | '4' | '5' | '6' | '7' | '8' | '9' | '10' | '11' | '12' | '13' | '14' | '15';
+
+      const submitted = await fal.queue.submit(FAL_KLING_V3_STANDARD_I2V_MODEL, {
+        input: {
+          start_image_url: startImageUrl,
+          duration,
+          generate_audio: input.audioEnabled ?? true,
+          ...(input.prompt.trim() ? { prompt: input.prompt.trim() } : {}),
+        },
+        webhookUrl,
+      });
+
+      return {
+        providerPredictionId: encodePredictionId(FAL_KLING_V3_STANDARD_I2V_MODEL, submitted.request_id),
+      };
     }
 
-    const startImageUrl = input.referenceImages?.[0];
-    if (!startImageUrl) throw new Error('Kling v3 Standard image-to-video requires one start image');
-    if (!Number.isInteger(input.durationSeconds) || input.durationSeconds! < 3 || input.durationSeconds! > 15) {
-      throw new Error('Kling v3 Standard duration must be an integer between 3 and 15 seconds');
+    if (input.model === FAL_VIDEO_BACKGROUND_REMOVAL_MODEL) {
+      const sourceVideoUrl = input.referenceVideos?.[0];
+      if (!sourceVideoUrl || input.referenceVideos?.length !== 1) {
+        throw new Error('Video background removal requires exactly one source video');
+      }
+      const submitted = await fal.queue.submit(FAL_VIDEO_BACKGROUND_REMOVAL_MODEL, {
+        input: {
+          video_url: sourceVideoUrl,
+          background: 'transparent',
+          // Wave-0 live result: transparent mov_h265 is rejected by Pixelcut. ProRes 4444 is
+          // the endpoint's supported iOS-native alpha format.
+          output_format: 'mov_proresks',
+        },
+        webhookUrl,
+      });
+      return {
+        providerPredictionId: encodePredictionId(FAL_VIDEO_BACKGROUND_REMOVAL_MODEL, submitted.request_id),
+      };
     }
-    const duration = String(input.durationSeconds) as
-      | '3' | '4' | '5' | '6' | '7' | '8' | '9' | '10' | '11' | '12' | '13' | '14' | '15';
 
-    const submitted = await fal.queue.submit(FAL_KLING_V3_STANDARD_I2V_MODEL, {
-      input: {
-        start_image_url: startImageUrl,
-        duration,
-        generate_audio: input.audioEnabled ?? true,
-        ...(input.prompt.trim() ? { prompt: input.prompt.trim() } : {}),
-      },
-      webhookUrl,
-    });
-
-    return {
-      providerPredictionId: encodePredictionId(FAL_KLING_V3_STANDARD_I2V_MODEL, submitted.request_id),
-    };
+    throw new Error(`FalProvider does not support model: ${input.model}`);
   }
 
   async getStatus(providerPredictionId: string): Promise<PredictionStatus> {

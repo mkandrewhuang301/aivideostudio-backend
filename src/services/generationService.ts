@@ -82,6 +82,19 @@ export function computeFalKlingV3Cost(durationSeconds: number, audioEnabled: boo
   return Math.ceil(durationSeconds * rate * CENTS_PER_DOLLAR - 1e-9);
 }
 
+// ─── Pixelcut transparent video background removal (frame-metered) ───────────
+// Live pricing verified 2026-07-17: $0.022 per 30 source frames. Cents rule rounds each provider
+// unit up to 3 credits; source frames are probed server-side before credit deduction.
+export const FAL_VIDEO_BACKGROUND_REMOVAL_MODEL = 'pixelcut/video-background-removal' as const;
+export const VIDEO_BACKGROUND_REMOVAL_CREDITS_PER_30_FRAMES = 3;
+
+export function computeVideoBackgroundRemovalCost(frameCount: number): number {
+  if (!Number.isInteger(frameCount) || frameCount <= 0) {
+    throw new Error('frame count must be a positive integer');
+  }
+  return Math.ceil(frameCount / 30) * VIDEO_BACKGROUND_REMOVAL_CREDITS_PER_30_FRAMES;
+}
+
 // 09.3 D-02: config-driven swap point for the Seedance content_policy/copyright fallback
 // (webhooks/replicate.ts) — always the first (and only, today) entry in SUPPORTED_GROK_MODELS.
 export const PERMISSIVE_I2V_MODEL = SUPPORTED_GROK_MODELS[0];

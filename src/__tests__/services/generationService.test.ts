@@ -24,6 +24,7 @@ import {
   computeHappyHorseCost,
   resolveHappyHorseDuration,
   computeFalKlingV3Cost,
+  computeVideoBackgroundRemovalCost,
   computeImageCostCredits,
   resolveFalKlingV3Duration,
   SUPPORTED_IMAGE_UPSCALE_MODELS,
@@ -166,6 +167,20 @@ describe('fal image tool cost', () => {
   it('charges the cents-rule Pixelcut price and allows the model', () => {
     expect(SUPPORTED_IMAGE_MODELS).toContain('pixelcut/background-removal');
     expect(computeImageCostCredits('pixelcut/background-removal')).toBe(2);
+  });
+});
+
+describe('fal video background removal cost', () => {
+  it('charges 3 credits per started block of 30 source frames', () => {
+    expect(computeVideoBackgroundRemovalCost(1)).toBe(3);
+    expect(computeVideoBackgroundRemovalCost(30)).toBe(3);
+    expect(computeVideoBackgroundRemovalCost(31)).toBe(6);
+    expect(computeVideoBackgroundRemovalCost(60)).toBe(6);
+  });
+
+  it('rejects unresolved or fractional frame counts', () => {
+    expect(() => computeVideoBackgroundRemovalCost(0)).toThrow(/positive integer/);
+    expect(() => computeVideoBackgroundRemovalCost(29.97)).toThrow(/positive integer/);
   });
 });
 

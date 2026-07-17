@@ -64,7 +64,8 @@ export interface PresetInputSchema {
 
 export type PresetCost =
   | { type: 'flat'; credits: number }
-  | { type: 'per_second'; credits_per_sec: number; max_seconds?: number };
+  | { type: 'per_second'; credits_per_sec: number; max_seconds?: number }
+  | { type: 'per_30_frames'; credits_per_unit: number };
 
 export interface PresetTile {
   poster_url: string;
@@ -489,6 +490,33 @@ export const SERVER_PRESETS: PresetDef[] = [
     tile: placeholderTile('vfx-pack'),
   },
   {
+    // fal Tools: transparent-sticker video cutout. Pixelcut meters source frames rather than
+    // seconds, so the backend probes the owned upload before credit deduction and charges one
+    // 3-credit unit per started block of 30 frames. The live endpoint rejects transparent HEVC;
+    // mov_proresks (ProRes 4444) is the verified iOS-native alpha-bearing output.
+    preset_id: 'remove-background-video',
+    title: 'Remove Background',
+    subtitle: 'Transparent video sticker',
+    section: 'video_effects',
+    sort_order: 8,
+    status: 'live',
+    badge: 'NEW',
+    media_type: 'video',
+    model: 'pixelcut/video-background-removal',
+    prompt_template: '',
+    input_schema: {
+      slots: [{ kind: 'video', label: 'Video', source: 'any' }],
+    },
+    cost: { type: 'per_30_frames', credits_per_unit: 3 },
+    sheet: {
+      description: 'Remove the background and turn your subject into a transparent video sticker.',
+      aspect_label: 'Matches your video',
+      duration_label: 'Matches your video',
+      resolution_label: 'Transparent MOV',
+    },
+    tile: placeholderTile('remove-background-video'),
+  },
+  {
     // Korean Baseball Fan Cam (09.6 D-02, FINAL 2026-07-12): SINGLE-SHOT — selfie straight into
     // HappyHorse 1.1 (no GPT-Image-2 compositor step; dropped for the generate-then-reupload
     // latency hit). The stadium-fancam illusion rides entirely on prompt strength (the reference
@@ -502,7 +530,7 @@ export const SERVER_PRESETS: PresetDef[] = [
     title: 'Korean Baseball Fan Cam',
     subtitle: 'You, in the stands',
     section: 'video_effects',
-    sort_order: 8,
+    sort_order: 9,
     status: 'live',
     badge: 'NEW',
     media_type: 'video',
@@ -541,7 +569,7 @@ export const SERVER_PRESETS: PresetDef[] = [
     title: 'Marlon Motion Transfer',
     subtitle: 'Step into the clip',
     section: 'video_effects',
-    sort_order: 9,
+    sort_order: 10,
     status: 'live',
     badge: 'HOT',
     media_type: 'character_replace',
@@ -578,7 +606,7 @@ export const SERVER_PRESETS: PresetDef[] = [
     title: 'You vs You',
     subtitle: 'Face your next opponent',
     section: 'video_effects',
-    sort_order: 10,
+    sort_order: 11,
     status: 'live',
     badge: 'HOT',
     media_type: 'chain',

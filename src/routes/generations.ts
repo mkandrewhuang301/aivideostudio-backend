@@ -21,6 +21,7 @@ import {
   computeGrokImagineCost,
   computeFalKlingV3Cost,
   resolveFalKlingV3Duration,
+  computeVideoBackgroundRemovalCost,
   computeHappyHorseCost,
   resolveHappyHorseDuration,
   computeCharacterReplaceCost,
@@ -47,7 +48,12 @@ import {
   type SupportedModel,
 } from '../services/generationService';
 import { ReplicateProvider } from '../services/providers/ReplicateProvider';
-import { FalProvider, FAL_IMAGE_BACKGROUND_REMOVAL_MODEL } from '../services/providers/FalProvider';
+import {
+  FalProvider,
+  FAL_IMAGE_BACKGROUND_REMOVAL_MODEL,
+  FAL_VIDEO_BACKGROUND_REMOVAL_MODEL,
+  isFalAsyncVideoModel,
+} from '../services/providers/FalProvider';
 import { refundCredits } from '../services/creditService';
 import { classifyFailureReason, markFailed } from '../services/generationService';
 import { getGenerationPresignedUrl, getUploadPresignedUrl } from '../services/archivalService';
@@ -62,6 +68,7 @@ import { db } from '../db/client';
 import { referenceUploads } from '../db/schema';
 import { eq, inArray, and, sql } from 'drizzle-orm';
 import type { FormatDef, FormatDurationTier } from '../config/formats';
+import { probeVideoFrameCount } from '../services/mediaProbe';
 
 export const generationsRouter = Router();
 
@@ -83,6 +90,7 @@ interface ResolvedGenerationRequest {
   referenceImages?: string[];
   referenceVideos?: string[];
   refUploadIds?: string[];
+  sourceFrameCount?: number;
   // Image-only
   imageAspectRatio?: string;
   imageQuality?: 'high' | 'medium' | 'low';
@@ -197,7 +205,7 @@ function logReferenceUrlDiagnostics(label: string, urls: string[] | undefined): 
 
 // Step 1: validate + resolve duration/cost, attach cost_credits to req.body so
 // creditCheckMiddleware (mounted next) can read it per its existing contract.
-function prepareCost(req: Request, res: Response, next: NextFunction): void {
+async function prepareCost(req: Request, res: Response, next: NextFunction): Promise<void> {
   const {
     prompt,
     model,
@@ -245,7 +253,16 @@ function prepareCost(req: Request, res: Response, next: NextFunction): void {
   // have an empty prompt_template) — only image/video/grok branches require one.
   const allowsPromptlessImageTool =
     media_type === 'image' && model === FAL_IMAGE_BACKGROUND_REMOVAL_MODEL;
-  if (!allowsPromptlessImageTool && media_type !== 'avatar' && media_type !== 'upscale' && media_type !== 'character_replace' && media_type !== 'faceswap' && media_type !== 'chain' && (!prompt || typeof prompt !== 'string')) {
+  const allowsPromptlessVideoTool =
+    media_type === 'video' && model === FAL_VIDEO_BACKGROUND_REMOVAL_MODEL;
+  const allowsPromptlessMediaType = [
+    'avatar',
+    'upscale',
+    'character_replace',
+    'faceswap',
+    'chain',
+  ].includes(media_type);
+  if (!allowsPromptlessImageTool && !allowsPromptlessVideoTool && !allowsPromptlessMediaType && (!prompt || typeof prompt !== 'string')) {
     res.status(400).json({ error: 'prompt is required', code: 'INVALID_PROMPT' });
     return;
   }
@@ -499,6 +516,53 @@ function prepareCost(req: Request, res: Response, next: NextFunction): void {
       // Magic Editor (09.2-08): presetResolver sets req.body.mask_url when preset_id ===
       // 'magic-editor' — its presence (not the model id) is what routes dispatch inline below.
       ...(typeof req.body?.mask_url === 'string' ? { maskUrl: req.body.mask_url } : {}),
+    };
+    next();
+    return;
+  }
+
+  // Pixelcut transparent video cutout — the provider meters source FRAMES, not seconds. Probe
+  // the owned/presigned source before creditCheckMiddleware runs; a failed probe rejects without
+  // deducting anything rather than charging from client metadata or a duration estimate.
+  if (model === FAL_VIDEO_BACKGROUND_REMOVAL_MODEL) {
+    // This branch invokes ffprobe server-side, so never accept a client-supplied URL directly.
+    // The preset resolver ownership-checks a reference_uploads id and produces the fresh R2 URL.
+    if (req._preset?.preset_id !== 'remove-background-video') {
+      res.status(400).json({
+        error: 'Video background removal must use the registered preset upload flow.',
+        code: 'INVALID_INPUT',
+      });
+      return;
+    }
+    const refVideos: string[] = Array.isArray(reference_videos)
+      ? reference_videos.filter((u: unknown) => typeof u === 'string')
+      : [];
+    if (refVideos.length !== 1) {
+      res.status(400).json({
+        error: 'Video background removal requires exactly one source video.',
+        code: 'INVALID_INPUT',
+      });
+      return;
+    }
+
+    const frameCount = await probeVideoFrameCount(refVideos[0]);
+    if (frameCount == null) {
+      res.status(422).json({
+        error: 'We could not read this video\'s frame count. Try a different file.',
+        code: 'MEDIA_PROBE_FAILED',
+      });
+      return;
+    }
+
+    const cost = computeVideoBackgroundRemovalCost(frameCount);
+    req.body.cost_credits = cost;
+    req._resolved = {
+      prompt: '',
+      model,
+      mediaType: 'video',
+      cost,
+      referenceVideos: refVideos,
+      sourceFrameCount: frameCount,
     };
     next();
     return;
@@ -806,6 +870,7 @@ generationsRouter.post('/', promptModerationMiddleware, presetResolver, formatRe
         : {
             resolution: resolved.resolution,
             duration: resolved.durationSeconds,
+            source_frame_count: resolved.sourceFrameCount,
             aspect_ratio: resolved.aspectRatio,
             audio_enabled: resolved.audioEnabled,
             has_reference: ((resolved.referenceImages?.length ?? 0) + (resolved.referenceVideos?.length ?? 0)) > 0,
@@ -1031,7 +1096,7 @@ generationsRouter.post('/', promptModerationMiddleware, presetResolver, formatRe
       return;
     }
 
-    const usesFal = (SUPPORTED_FAL_KLING_MODELS as readonly string[]).includes(resolved.model);
+    const usesFal = isFalAsyncVideoModel(resolved.model);
     const webhookUrl = usesFal ? getFalWebhookUrl() : getReplicateWebhookUrl();
     const dispatchProvider = usesFal ? falProvider : replicateProvider;
     console.log(`[generations] webhookUrl="${webhookUrl}"`);

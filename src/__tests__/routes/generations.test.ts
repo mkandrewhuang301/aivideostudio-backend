@@ -68,6 +68,7 @@ jest.mock('../../services/generationService', () => ({
   computeImageUpscaleCost: jest.fn(),
   computeGrokImagineCost: jest.fn(),
   computeFalKlingV3Cost: jest.fn(),
+  computeVideoBackgroundRemovalCost: jest.fn(),
   resolveFalKlingV3Duration: jest.fn(),
   computeHappyHorseCost: jest.fn(),
   resolveHappyHorseDuration: jest.fn(),
@@ -118,9 +119,18 @@ jest.mock('../../services/providers/ReplicateProvider', () => {
 
 jest.mock('../../services/providers/FalProvider', () => ({
   FAL_IMAGE_BACKGROUND_REMOVAL_MODEL: 'pixelcut/background-removal',
+  FAL_VIDEO_BACKGROUND_REMOVAL_MODEL: 'pixelcut/video-background-removal',
+  isFalAsyncVideoModel: jest.fn((model: string) => [
+    'fal-ai/kling-video/v3/standard/image-to-video',
+    'pixelcut/video-background-removal',
+  ].includes(model)),
   FalProvider: jest.fn().mockImplementation(() => ({
     dispatch: jest.fn(),
   })),
+}));
+
+jest.mock('../../services/mediaProbe', () => ({
+  probeVideoFrameCount: jest.fn(),
 }));
 
 // generateImageEditWithMask/generateFaceswap moved to openaiGenerationWorker.ts (09.2-13, D-C) —
@@ -202,6 +212,7 @@ import {
   computeImageUpscaleCost,
   computeGrokImagineCost,
   computeFalKlingV3Cost,
+  computeVideoBackgroundRemovalCost,
   resolveFalKlingV3Duration,
   computeHappyHorseCost,
   resolveHappyHorseDuration,
@@ -223,6 +234,7 @@ import { chainGenerationQueue } from '../../queue/chainGenerationQueue';
 import { ReplicateProvider } from '../../services/providers/ReplicateProvider';
 import { FalProvider } from '../../services/providers/FalProvider';
 import { db } from '../../db/client';
+import { probeVideoFrameCount } from '../../services/mediaProbe';
 
 const MockedReplicateProvider = ReplicateProvider as jest.MockedClass<typeof ReplicateProvider>;
 const providerInstance = MockedReplicateProvider.mock.results[0]?.value as { dispatch: jest.Mock };
@@ -452,6 +464,24 @@ describe('POST /api/generations — fal Kling v3 Standard image-to-video', () =>
 
     expect(res.status).toBe(200);
     expect(computeFalKlingV3Cost).toHaveBeenCalledWith(5, false);
+  });
+});
+
+// ─── POST /api/generations — Pixelcut transparent video cutout ──────────────
+
+describe('POST /api/generations — video background removal', () => {
+  it('rejects a raw client URL so server-side ffprobe can only reach owned preset uploads', async () => {
+    const res = await request(app).post('/api/generations').send({
+      prompt: '',
+      model: 'pixelcut/video-background-removal',
+      media_type: 'video',
+      reference_videos: ['http://127.0.0.1/internal'],
+    });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_INPUT');
+    expect(probeVideoFrameCount).not.toHaveBeenCalled();
+    expect(deductCredits).not.toHaveBeenCalled();
   });
 });
 
@@ -1238,6 +1268,72 @@ describe('POST /api/generations — presets', () => {
     });
     expect(dispatchMock).not.toHaveBeenCalled();
     expect(falDispatchMock).not.toHaveBeenCalled();
+  });
+
+  it('remove-background-video: resolves the owned video, probes it pre-billing, and dispatches fal', async () => {
+    mockUploadRows([{ id: 'upload-video-cutout', r2_key: 'uploads/test-user-id/cutout.mp4' }]);
+    (probeVideoFrameCount as jest.Mock).mockResolvedValue(90);
+    (computeVideoBackgroundRemovalCost as jest.Mock).mockReturnValue(9);
+    (deductCredits as jest.Mock).mockResolvedValue(true);
+    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-video-cutout-preset' });
+    falDispatchMock.mockResolvedValue({
+      providerPredictionId: 'pixelcut/video-background-removal::req-preset-1',
+    });
+    (attachPredictionId as jest.Mock).mockResolvedValue(undefined);
+
+    const res = await request(app).post('/api/generations').send({
+      preset_id: 'remove-background-video',
+      preset_input_upload_ids: ['upload-video-cutout'],
+    });
+
+    const signedVideo = 'https://r2.example.com/signed/uploads/test-user-id/cutout.mp4';
+    expect(res.status).toBe(200);
+    expect(probeVideoFrameCount).toHaveBeenCalledWith(signedVideo);
+    expect(computeVideoBackgroundRemovalCost).toHaveBeenCalledWith(90);
+    expect(createGeneration).toHaveBeenCalledWith(expect.objectContaining({
+      media_type: 'video',
+      model: 'pixelcut/video-background-removal',
+      cost_credits: 9,
+      params: expect.objectContaining({
+        preset_id: 'remove-background-video',
+        preset_input_upload_ids: ['upload-video-cutout'],
+        source_frame_count: 90,
+      }),
+    }));
+    expect(falDispatchMock).toHaveBeenCalledWith(
+      expect.objectContaining({ referenceVideos: [signedVideo] }),
+      'https://mock.example.com/webhooks/fal',
+    );
+    expect(dispatchMock).not.toHaveBeenCalled();
+  });
+
+  it('remove-background-video: rejects an unreadable owned upload before billing', async () => {
+    mockUploadRows([{ id: 'upload-video-broken', r2_key: 'uploads/test-user-id/broken.mp4' }]);
+    (probeVideoFrameCount as jest.Mock).mockResolvedValue(null);
+
+    const res = await request(app).post('/api/generations').send({
+      preset_id: 'remove-background-video',
+      preset_input_upload_ids: ['upload-video-broken'],
+    });
+
+    expect(res.status).toBe(422);
+    expect(res.body.code).toBe('MEDIA_PROBE_FAILED');
+    expect(deductCredits).not.toHaveBeenCalled();
+    expect(falDispatchMock).not.toHaveBeenCalled();
+  });
+
+  it('remove-background-video: rejects a missing owned upload before probing or billing', async () => {
+    mockUploadRows([]);
+
+    const res = await request(app).post('/api/generations').send({
+      preset_id: 'remove-background-video',
+      preset_input_upload_ids: ['missing-upload'],
+    });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_INPUT');
+    expect(probeVideoFrameCount).not.toHaveBeenCalled();
+    expect(deductCredits).not.toHaveBeenCalled();
   });
 
   it('enhancer-video: overwrites model to bytedance/video-upscaler, bills computeUpscalerCost from the real duration', async () => {

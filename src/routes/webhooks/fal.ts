@@ -1,6 +1,6 @@
 // src/routes/webhooks/fal.ts
-// Fal.ai webhook handler — completion callback for FalProvider.ts's regular Kling v3 Standard
-// image-to-video dispatch. A deliberately smaller sibling of webhooks/replicate.ts: no
+// Fal.ai webhook handler — completion callback for FalProvider.ts's async video endpoints.
+// A deliberately smaller sibling of webhooks/replicate.ts: no
 // retry/postprocess-mux/face-upload-cleanup paths,
 // since this generation type doesn't use any of those (unlike the generic Replicate path, which
 // backs many different presets).
@@ -26,7 +26,11 @@ import {
 import { refundCredits } from '../../services/creditService';
 import { sendGenerationComplete } from '../../services/apnsService';
 import { deleteRawFaceUploads } from '../../services/uploadCleanup';
-import { encodePredictionId, FAL_KLING_V3_STANDARD_I2V_MODEL } from '../../services/providers/FalProvider';
+import {
+  encodePredictionId,
+  FAL_ASYNC_VIDEO_ENDPOINTS,
+  falVideoOutputContentType,
+} from '../../services/providers/FalProvider';
 import { db } from '../../db/client';
 import { sql } from 'drizzle-orm';
 
@@ -38,7 +42,13 @@ async function fetchDeviceToken(userId: string): Promise<string | null> {
 }
 
 async function resolveGeneration(requestId: string): Promise<GenerationByPredictionRow | undefined> {
-  return getGenerationByPredictionId(encodePredictionId(FAL_KLING_V3_STANDARD_I2V_MODEL, requestId));
+  // Fal's callback carries request_id but not endpoint_id. Prediction IDs are stored as
+  // "<endpoint>::<request>", so resolve against the small provider allowlist.
+  for (const endpointId of FAL_ASYNC_VIDEO_ENDPOINTS) {
+    const generation = await getGenerationByPredictionId(encodePredictionId(endpointId, requestId));
+    if (generation) return generation;
+  }
+  return undefined;
 }
 
 falWebhookRouter.post('/', async (req: Request, res: Response) => {
@@ -91,7 +101,7 @@ falWebhookRouter.post('/', async (req: Request, res: Response) => {
       }
 
       const [r2Key, deviceToken] = await Promise.all([
-        archiveToR2(outputUrl, generation.id, 'video/mp4'),
+        archiveToR2(outputUrl, generation.id, falVideoOutputContentType(generation.model)),
         fetchDeviceToken(generation.user_id),
       ]);
 

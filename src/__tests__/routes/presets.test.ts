@@ -15,7 +15,7 @@ describe('presets registry config', () => {
     expect(typeof PRESETS_VERSION).toBe('number');
   });
 
-  it('includes all 23 live presets, including the fal photo background-removal tool', () => {
+  it('includes all 24 live presets, including both fal background-removal tools', () => {
     const liveIds = SERVER_PRESETS.filter((p) => p.status === 'live').map((p) => p.preset_id);
     expect(liveIds.sort()).toEqual(
       [
@@ -31,6 +31,7 @@ describe('presets registry config', () => {
         'faceswap',
         'magic-editor',
         'remove-background-photo',
+        'remove-background-video',
         'gorilla-vlogs',
         'viral-motions',
         'camera-moves',
@@ -56,6 +57,20 @@ describe('presets registry config', () => {
       cost: { type: 'flat', credits: 2 },
     });
     expect(preset?.input_schema?.slots).toHaveLength(1);
+  });
+
+  it('publishes transparent video removal with frame-metered pricing and one video slot', () => {
+    const preset = SERVER_PRESETS.find((row) => row.preset_id === 'remove-background-video');
+    expect(preset).toMatchObject({
+      status: 'live',
+      section: 'video_effects',
+      media_type: 'video',
+      model: 'pixelcut/video-background-removal',
+      cost: { type: 'per_30_frames', credits_per_unit: 3 },
+    });
+    expect(preset?.input_schema?.slots).toEqual([
+      expect.objectContaining({ kind: 'video' }),
+    ]);
   });
 
   it('includes the SOON rows (registry-driven, not hardcoded UI — D-04)', () => {
