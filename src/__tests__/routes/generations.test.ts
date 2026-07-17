@@ -44,6 +44,13 @@ jest.mock('../../db/client', () => ({
         where: jest.fn().mockResolvedValue([]),
       })),
     })),
+    // Magic Editor's presetResolver branch tags the mask upload's `kind` via db.update(...).set(...).where(...)
+    // after resolving mask_upload_id (2026-07-13 fix keeping masks out of the @-mention reference list).
+    update: jest.fn(() => ({
+      set: jest.fn(() => ({
+        where: jest.fn().mockResolvedValue(undefined),
+      })),
+    })),
   },
 }));
 

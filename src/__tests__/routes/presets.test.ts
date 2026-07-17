@@ -179,12 +179,12 @@ describe('presets registry config', () => {
     }
   });
 
-  it('GPT-Image-2 presets only offer aspect ratios Replicate actually accepts (1:1, 3:2, 2:3)', () => {
+  it('GPT-Image-2 presets only offer aspect ratios the live gpt-image-2 schema accepts', () => {
     const gptPresets = SERVER_PRESETS.filter((p) => p.model === 'openai/gpt-image-2-medium');
     expect(gptPresets.length).toBeGreaterThan(0);
     for (const preset of gptPresets) {
       for (const ratio of preset.sheet?.aspect_ratios ?? []) {
-        expect(['1:1', '3:2', '2:3']).toContain(ratio);
+        expect(['1:1', '3:2', '2:3', '16:9', '9:16', 'auto']).toContain(ratio);
       }
     }
   });
