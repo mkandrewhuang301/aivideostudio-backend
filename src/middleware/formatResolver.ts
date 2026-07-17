@@ -13,9 +13,19 @@ import { db } from '../db/client';
 import { referenceUploads } from '../db/schema';
 
 const MAX_ATTACHMENTS = 3;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function invalidAttachment(res: Response): void {
   res.status(400).json({ error: 'Invalid attachment', code: 'INVALID_ATTACHMENT' });
+}
+
+declare global {
+  namespace Express {
+    interface Request {
+      /** Unforgeable-by-JSON marker proving formatResolver produced the __format_* body fields. */
+      _formatResolved?: true;
+    }
+  }
 }
 
 export async function formatResolver(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -93,7 +103,7 @@ export async function formatResolver(req: Request, res: Response, next: NextFunc
   const attachmentIds = (rawAttachmentIds ?? []) as unknown[];
   if (
     attachmentIds.length > MAX_ATTACHMENTS
-    || attachmentIds.some((id) => typeof id !== 'string' || id.length === 0)
+    || attachmentIds.some((id) => typeof id !== 'string' || !UUID_PATTERN.test(id))
   ) {
     invalidAttachment(res);
     return;
@@ -140,6 +150,7 @@ export async function formatResolver(req: Request, res: Response, next: NextFunc
       attachments: resolvedAttachments,
       sourceUrl,
     };
+    req._formatResolved = true;
     next();
   } catch (err) {
     console.error('[formatResolver] Error resolving format:', err);

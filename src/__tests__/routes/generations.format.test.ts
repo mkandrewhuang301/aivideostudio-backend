@@ -141,6 +141,11 @@ const BASE_BODY = {
   model: 'client/cheap-model',
 };
 
+const OTHER_USER_UPLOAD_ID = '11111111-1111-4111-8111-111111111111';
+const OWNED_IMAGE_ID = '22222222-2222-4222-8222-222222222222';
+const OWNED_PDF_ID = '33333333-3333-4333-8333-333333333333';
+const OWNED_VIDEO_ID = '44444444-4444-4444-8444-444444444444';
+
 function mockAttachmentRows(rows: Array<{ id: string; r2Key: string; mimeType: string }>): void {
   (db.select as jest.Mock).mockReturnValueOnce({
     from: jest.fn(() => ({
@@ -233,6 +238,31 @@ describe('POST /api/generations — format', () => {
     expect(explainerGenerationQueue.add).not.toHaveBeenCalled();
   });
 
+  it('rejects client-injected format descriptors when formatResolver did not resolve a format id', async () => {
+    const res = await request(app).post('/api/generations').send({
+      media_type: 'format',
+      prompt: 'attempt descriptor injection',
+      cost_credits: 1,
+      __format_def: { format_id: 'forged' },
+      __format_tier: { seconds: 30, scene_count: 1, credits: 1 },
+      __format_inputs: {
+        style_id: 'forged',
+        topic: 'attempt descriptor injection',
+        voice_id: 'forged',
+        music: 'none',
+        aspectRatio: '9:16',
+        attachments: [],
+        sourceUrl: null,
+      },
+    });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_INPUT');
+    expect(deductCredits).not.toHaveBeenCalled();
+    expect(createGeneration).not.toHaveBeenCalled();
+    expect(explainerGenerationQueue.add).not.toHaveBeenCalled();
+  });
+
   it('forwards a valid non-default aspect ratio and defaults an omitted ratio from the format row', async () => {
     (createGeneration as jest.Mock)
       .mockResolvedValueOnce({ id: 'gen-wide' })
@@ -254,7 +284,7 @@ describe('POST /api/generations — format', () => {
     mockAttachmentRows([]); // another user's id cannot resolve through the ownership predicate
     const idor = await request(app).post('/api/generations').send({
       ...BASE_BODY,
-      attachment_ids: ['other-user-upload'],
+      attachment_ids: [OTHER_USER_UPLOAD_ID],
     });
     const tooMany = await request(app).post('/api/generations').send({
       ...BASE_BODY,
@@ -265,19 +295,29 @@ describe('POST /api/generations — format', () => {
     expect(idor.body.code).toBe('INVALID_ATTACHMENT');
     expect(tooMany.status).toBe(400);
     expect(tooMany.body.code).toBe('INVALID_ATTACHMENT');
+
+    mockAttachmentRows([
+      { id: OWNED_VIDEO_ID, r2Key: 'uploads/user-owned/source.mp4', mimeType: 'video/mp4' },
+    ]);
+    const unsupportedMime = await request(app).post('/api/generations').send({
+      ...BASE_BODY,
+      attachment_ids: [OWNED_VIDEO_ID],
+    });
+    expect(unsupportedMime.status).toBe(400);
+    expect(unsupportedMime.body.code).toBe('INVALID_ATTACHMENT');
     expect(deductCredits).not.toHaveBeenCalled();
     expect(createGeneration).not.toHaveBeenCalled();
   });
 
   it('resolves owned attachment ids to trusted R2 key/MIME pairs and normalizes the source URL', async () => {
     mockAttachmentRows([
-      { id: 'owned-image', r2Key: 'uploads/user-owned/source.png', mimeType: 'image/png' },
-      { id: 'owned-pdf', r2Key: 'uploads/user-owned/source.pdf', mimeType: 'application/pdf' },
+      { id: OWNED_IMAGE_ID, r2Key: 'uploads/user-owned/source.png', mimeType: 'image/png' },
+      { id: OWNED_PDF_ID, r2Key: 'uploads/user-owned/source.pdf', mimeType: 'application/pdf' },
     ]);
 
     const res = await request(app).post('/api/generations').send({
       ...BASE_BODY,
-      attachment_ids: ['owned-image', 'owned-pdf'],
+      attachment_ids: [OWNED_IMAGE_ID, OWNED_PDF_ID],
       source_url: 'https://example.com/research',
     });
 

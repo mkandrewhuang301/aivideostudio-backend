@@ -10,6 +10,7 @@ import { promptModerationMiddleware } from '../middleware/promptModeration';
 import { celebrityCheckMiddleware } from '../middleware/celebrityCheck';
 import { inputMediaGate } from '../middleware/inputMediaGate';
 import { presetResolver } from '../middleware/presetResolver';
+import { formatResolver } from '../middleware/formatResolver';
 import {
   resolveDurationSeconds,
   computeCostCredits,
@@ -52,12 +53,14 @@ import { classifyFailureReason, markFailed } from '../services/generationService
 import { getGenerationPresignedUrl, getUploadPresignedUrl } from '../services/archivalService';
 import { openaiGenerationQueue } from '../queue/openaiGenerationQueue';
 import { chainGenerationQueue } from '../queue/chainGenerationQueue';
+import { explainerGenerationQueue } from '../queue/explainerGenerationQueue';
 import { influencerProQueue } from '../queue/influencerProQueue';
 import { getFalWebhookUrl, getReplicateWebhookUrl } from '../config';
 import type { GenerationInput } from '../services/providers/ModelProvider';
 import { db } from '../db/client';
 import { referenceUploads } from '../db/schema';
 import { eq, inArray, and, sql } from 'drizzle-orm';
+import type { FormatDef, FormatDurationTier } from '../config/formats';
 
 export const generationsRouter = Router();
 
@@ -70,7 +73,7 @@ const VALID_VIDEO_ASPECT_RATIOS = ['16:9', '9:16', '1:1', '4:3', '3:4'];
 interface ResolvedGenerationRequest {
   prompt: string;
   model: string;
-  mediaType: 'video' | 'image' | 'avatar' | 'upscale' | 'character_replace' | 'faceswap' | 'chain';
+  mediaType: 'video' | 'image' | 'avatar' | 'upscale' | 'character_replace' | 'faceswap' | 'chain' | 'format';
   // Video-only
   durationSeconds?: number;
   resolution?: '480p' | '720p' | '1080p' | '4k';
@@ -115,6 +118,16 @@ interface ResolvedGenerationRequest {
   // (UVU's sole 9.6 consumer). No dispatch consumer yet (Plan 05 adds the worker).
   chainInputImages?: string[];
   cost: number;
+}
+
+interface ResolvedFormatInputs {
+  style_id: string;
+  topic: string;
+  voice_id: string;
+  music: string;
+  aspectRatio: string;
+  attachments: Array<{ r2Key: string; mimeType: string }>;
+  sourceUrl: string | null;
 }
 
 declare global {
@@ -231,6 +244,28 @@ function prepareCost(req: Request, res: Response, next: NextFunction): void {
   // have an empty prompt_template) — only image/video/grok branches require one.
   if (media_type !== 'avatar' && media_type !== 'upscale' && media_type !== 'character_replace' && media_type !== 'faceswap' && media_type !== 'chain' && (!prompt || typeof prompt !== 'string')) {
     res.status(400).json({ error: 'prompt is required', code: 'INVALID_PROMPT' });
+    return;
+  }
+
+  if (media_type === 'format') {
+    const tier = req.body.__format_tier as FormatDurationTier | undefined;
+    const formatDef = req.body.__format_def as FormatDef | undefined;
+    const inputs = req.body.__format_inputs as ResolvedFormatInputs | undefined;
+    if (req._formatResolved !== true || !tier || !formatDef || !inputs) {
+      res.status(400).json({ error: 'Missing format descriptor', code: 'INVALID_INPUT' });
+      return;
+    }
+    // Cost comes ENTIRELY from the server format registry's matched duration tier — the client's
+    // cost, model, and media type values are never read (T-14-COST, mirrors T-09.6-09).
+    const cost = tier.credits;
+    req.body.cost_credits = cost;
+    req._resolved = {
+      prompt: inputs.topic,
+      model: '',
+      mediaType: 'format',
+      cost,
+    };
+    next();
     return;
   }
 
@@ -705,7 +740,7 @@ function prepareCost(req: Request, res: Response, next: NextFunction): void {
   next();
 }
 
-generationsRouter.post('/', promptModerationMiddleware, presetResolver, prepareCost, celebrityCheckMiddleware, inputMediaGate, creditCheckMiddleware, async (req: Request, res: Response) => {
+generationsRouter.post('/', promptModerationMiddleware, presetResolver, formatResolver, prepareCost, celebrityCheckMiddleware, inputMediaGate, creditCheckMiddleware, async (req: Request, res: Response) => {
   if (!req.user?.dbUserId) {
     res.status(401).json({ error: 'Not authenticated' });
     return;
@@ -738,7 +773,15 @@ generationsRouter.post('/', promptModerationMiddleware, presetResolver, prepareC
     }
 
     const params =
-      resolved.mediaType === 'image'
+      resolved.mediaType === 'format'
+        ? {
+            format_id: req.body.format_id,
+            style_id: (req.body.__format_inputs as ResolvedFormatInputs).style_id,
+            duration_seconds: (req.body.__format_tier as FormatDurationTier).seconds,
+            voice_id: (req.body.__format_inputs as ResolvedFormatInputs).voice_id,
+            music: (req.body.__format_inputs as ResolvedFormatInputs).music,
+          }
+        : resolved.mediaType === 'image'
         ? { aspect_ratio: resolved.imageAspectRatio ?? '1:1' }
         : resolved.mediaType === 'avatar'
         ? { avatar_image: resolved.avatarImage, avatar_driving_video: resolved.avatarDrivingVideo, estimated_duration: resolved.durationSeconds }
@@ -795,6 +838,37 @@ generationsRouter.post('/', promptModerationMiddleware, presetResolver, prepareC
       cost_credits: resolved.cost,
       media_type: resolved.mediaType,
     });
+
+    if (resolved.mediaType === 'format') {
+      const inputs = req.body.__format_inputs as ResolvedFormatInputs;
+      const tier = req.body.__format_tier as FormatDurationTier;
+      try {
+        await explainerGenerationQueue.add('generate', {
+          generationId,
+          userId: req.user.dbUserId,
+          cost: resolved.cost,
+          formatId: req.body.format_id,
+          topic: inputs.topic,
+          styleId: inputs.style_id,
+          voiceId: inputs.voice_id,
+          music: inputs.music,
+          sceneCount: tier.scene_count,
+          durationSeconds: tier.seconds,
+          aspectRatio: inputs.aspectRatio,
+          attachments: inputs.attachments,
+          sourceUrl: inputs.sourceUrl,
+        });
+      } catch (err) {
+        console.error(`[generations] Failed to enqueue explainer job for ${generationId}:`, err);
+        await markFailed(generationId, 'generic_error');
+        await refundCredits(req.user.dbUserId, resolved.cost, `dispatch-failure-${generationId}`);
+        res.status(502).json({ error: 'Generation service unavailable. Credits have been refunded.' });
+        return;
+      }
+
+      res.status(200).json({ generation_id: generationId, status: 'processing' });
+      return;
+    }
 
     // Chained-job primitive (09.6, D-01/D-05, T-09.6-11/T-09.6-12): the SOLE 9.6 consumer is You
     // vs You (UVU). Credits are already deducted (creditCheckMiddleware, mounted before this

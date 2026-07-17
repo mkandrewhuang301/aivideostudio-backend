@@ -146,6 +146,20 @@ jest.mock('../../queue/chainGenerationQueue', () => ({
   },
 }));
 
+// 14-06: generations.ts imports the Explainer queue for format requests. Keep the legacy route
+// suite isolated from Redis; format enqueue behavior has dedicated coverage next door.
+jest.mock('../../queue/explainerGenerationQueue', () => ({
+  explainerGenerationQueue: {
+    add: jest.fn().mockResolvedValue(undefined),
+  },
+}));
+
+jest.mock('../../queue/influencerProQueue', () => ({
+  influencerProQueue: {
+    add: jest.fn().mockResolvedValue(undefined),
+  },
+}));
+
 jest.mock('../../services/apnsService', () => ({
   sendGenerationComplete: jest.fn().mockResolvedValue(undefined),
 }));
