@@ -1083,11 +1083,18 @@ function presetSafeSerialization(item: {
 }): { media_type: string; model: string | null; params: unknown } {
   const p = (item.params ?? null) as Record<string, unknown> | null;
   const isPreset = Boolean(p?.preset_id);
+  const isFormat = item.media_type === 'format' || Boolean(p?.structured);
+  const formatParams = {
+    ...(typeof p?.format_id === 'string' ? { format_id: p.format_id } : {}),
+    ...(typeof p?.stage_label === 'string' ? { stage_label: p.stage_label } : {}),
+  };
   return {
     media_type: item.media_type === 'faceswap' ? 'image' : item.media_type,
     model: isPreset ? null : item.model,
     params: isPreset
       ? { preset_id: p!.preset_id, preset_input_upload_ids: p!.preset_input_upload_ids ?? [] }
+      : isFormat
+      ? formatParams
       : item.params,
   };
 }

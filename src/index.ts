@@ -16,6 +16,7 @@ import { scheduleYearlyGrant } from './queue/yearlyGrantWorker';
 import './queue/hiveScanWorker';
 import './queue/openaiGenerationWorker';
 import './queue/chainGenerationWorker';
+import './queue/explainerGenerationWorker';
 import './queue/influencerProWorker';
 import './queue/ffmpegWorker';
 import { banCheckMiddleware } from './middleware/banCheck';

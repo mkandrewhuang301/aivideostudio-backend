@@ -47,6 +47,9 @@ export async function reapOrphanedJobs(): Promise<void> {
     SELECT id, user_id, cost_credits, replicate_prediction_id
     FROM generations
     WHERE status = 'pending' AND created_at < now() - interval '5 minutes'
+      -- Explainer is a queued, multi-stage Omni pipeline and may legitimately wait/run far
+      -- longer; non-format rows retain the original five-minute orphan window byte-for-byte.
+      AND (media_type != 'format' OR created_at < now() - interval '90 minutes')
   `);
 
   for (const row of (result.rows ?? []) as unknown as ReapableRow[]) {
@@ -63,6 +66,9 @@ export async function reapStalledJobs(): Promise<void> {
     SELECT id, user_id, cost_credits, replicate_prediction_id, model
     FROM generations
     WHERE status = 'processing' AND created_at < now() - interval '30 minutes'
+      -- Explainer's sequential TTS/stills/vision/Omni stages can exceed 30 minutes; non-format
+      -- rows retain the original stalled-job window byte-for-byte.
+      AND (media_type != 'format' OR created_at < now() - interval '90 minutes')
   `);
 
   for (const row of (result.rows ?? []) as unknown as ReapableRow[]) {
