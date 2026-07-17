@@ -26,6 +26,7 @@ import { privacyRouter } from './routes/privacy';
 import { termsRouter } from './routes/terms';
 import { ratesRouter } from './routes/rates';
 import { presetsRouter } from './routes/presets';
+import { formatsRouter } from './routes/formats';
 import { promptRouter } from './routes/prompt';
 
 // Eagerly initialize Firebase Admin at startup — prevents double-init on concurrent requests
@@ -81,6 +82,7 @@ app.use('/api/webhooks/revenuecat', revenueCatWebhookRouter);
 // (Express matches middleware by registration order, not path nesting depth) so it stays
 // public like ratesRouter, per 09.1-01-PLAN.md's explicit /api/presets mount instruction.
 app.use('/api/presets', presetsRouter);
+app.use('/api/formats', formatsRouter);
 
 app.use('/api', authMiddleware, banCheckMiddleware);
 app.use('/api/me', meRouter);
