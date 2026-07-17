@@ -82,6 +82,9 @@ export interface ComposeCaptionStyle {
   color: string;
   highlightColor: string;
   position: 'top' | 'middle' | 'bottom';
+  /** Item 3: optional continuous vertical anchor (0..1, box center) — see
+   * assCaptionBuilder.ts's CaptionStyle.yOffsetNorm doc comment for the full contract. */
+  yOffsetNorm?: number;
 }
 
 export interface ComposeSpec {

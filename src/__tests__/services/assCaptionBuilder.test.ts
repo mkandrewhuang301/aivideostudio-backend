@@ -7,7 +7,14 @@
 // binary or file I/O is exercised here, buildAssFile/escapeAssText/hexToAssColor are pure string
 // builders.
 
-import { buildAssFile, buildTextOverlayAss, escapeAssText, hexToAssColor } from '../../services/assCaptionBuilder';
+import {
+  buildAssFile,
+  buildTextOverlayAss,
+  escapeAssText,
+  hexToAssColor,
+  resolveCaptionYOffsetNorm,
+  CAPTION_POSITION_PRESETS,
+} from '../../services/assCaptionBuilder';
 
 describe('escapeAssText', () => {
   it('strips braces and backslashes so no raw ASS control character survives', () => {
@@ -105,7 +112,12 @@ describe('buildAssFile', () => {
 
     const ass = buildAssFile(cues, style, canvas);
     const dialogueLine = ass.split('\n').find((l: string) => l.startsWith('Dialogue:')) as string;
-    const withoutKaraokeTags = dialogueLine.replace(/\{\\k\d+\}/g, '');
+    // Item 3: every Dialogue line now also carries a fixed (non-user-controlled) `{\an5\pos(...)}`
+    // positioning tag ahead of the karaoke tags — strip that too before asserting no OTHER control
+    // characters (i.e. none from user-authored word text) survive.
+    const withoutKaraokeTags = dialogueLine
+      .replace(/\{\\an5\\pos\(\d+,\d+\)\}/, '')
+      .replace(/\{\\k\d+\}/g, '');
     expect(withoutKaraokeTags).not.toMatch(/[{}\\]/);
   });
 
@@ -114,6 +126,46 @@ describe('buildAssFile', () => {
     const styleLine = ass.split('\n').find((l: string) => l.startsWith('Style: Caption,')) as string;
     expect(styleLine).toContain(hexToAssColor(style.highlightColor));
     expect(styleLine).toContain(hexToAssColor(style.color));
+  });
+
+  // Item 3 (Andrew review, 2026-07-17): drag-to-reposition the caption block — a non-default
+  // yOffsetNorm must change the emitted ASS positioning, and both renderers (this builder + iOS's
+  // CaptionOverlayView) must resolve the SAME anchor for a given style.
+  describe('yOffsetNorm (item 3 — caption block vertical drag)', () => {
+    it('emits \\an5\\pos at the box CENTER (canvas width/2, yOffsetNorm*canvas height) when yOffsetNorm is set', () => {
+      const ass = buildAssFile(
+        [{ startSeconds: 0, endSeconds: 1, words: [{ text: 'Hi', startSeconds: 0, endSeconds: 1 }] }],
+        { ...style, yOffsetNorm: 0.3 },
+        canvas,
+      );
+      const dialogueLine = ass.split('\n').find((l: string) => l.startsWith('Dialogue:')) as string;
+      expect(dialogueLine).toContain(`\\an5\\pos(${Math.round(canvas.width / 2)},${Math.round(0.3 * canvas.height)})`);
+    });
+
+    it('a non-default yOffsetNorm changes the emitted ASS positioning vs. the position-preset default', () => {
+      const cues = [{ startSeconds: 0, endSeconds: 1, words: [{ text: 'Hi', startSeconds: 0, endSeconds: 1 }] }];
+      const defaultAss = buildAssFile(cues, style, canvas); // style.position === 'bottom', no yOffsetNorm
+      const draggedAss = buildAssFile(cues, { ...style, yOffsetNorm: 0.2 }, canvas);
+      const defaultLine = defaultAss.split('\n').find((l: string) => l.startsWith('Dialogue:')) as string;
+      const draggedLine = draggedAss.split('\n').find((l: string) => l.startsWith('Dialogue:')) as string;
+      expect(draggedLine).not.toBe(defaultLine);
+      expect(draggedLine).toContain(`\\pos(${Math.round(canvas.width / 2)},${Math.round(0.2 * canvas.height)})`);
+    });
+
+    it('falls back to CAPTION_POSITION_PRESETS[position] when yOffsetNorm is absent', () => {
+      expect(resolveCaptionYOffsetNorm({ ...style, position: 'top' })).toBe(CAPTION_POSITION_PRESETS.top);
+      expect(resolveCaptionYOffsetNorm({ ...style, position: 'middle' })).toBe(CAPTION_POSITION_PRESETS.middle);
+      expect(resolveCaptionYOffsetNorm({ ...style, position: 'bottom' })).toBe(CAPTION_POSITION_PRESETS.bottom);
+    });
+
+    it('prefers yOffsetNorm over position when both are present', () => {
+      expect(resolveCaptionYOffsetNorm({ ...style, position: 'top', yOffsetNorm: 0.75 })).toBe(0.75);
+    });
+
+    it('clamps an out-of-range yOffsetNorm defensively (route validation is the primary guard)', () => {
+      expect(resolveCaptionYOffsetNorm({ ...style, yOffsetNorm: 1.5 })).toBe(1);
+      expect(resolveCaptionYOffsetNorm({ ...style, yOffsetNorm: -0.5 })).toBe(0);
+    });
   });
 });
 

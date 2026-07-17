@@ -72,19 +72,6 @@ function formatAssTimestamp(seconds: number): string {
   return `${hours}:${pad2(mins)}:${pad2(secs)}.${pad2(centiseconds)}`;
 }
 
-/** ASS numpad alignment values libass expects in the Style line's Alignment field. */
-function alignmentForPosition(position: 'top' | 'middle' | 'bottom'): number {
-  switch (position) {
-    case 'top':
-      return 8; // top-center
-    case 'middle':
-      return 5; // middle-center
-    case 'bottom':
-    default:
-      return 2; // bottom-center
-  }
-}
-
 export interface CaptionWord {
   text: string;
   startSeconds: number;
@@ -105,6 +92,33 @@ export interface CaptionStyle {
    * what `\k` sweeps Secondary -> Primary into as each word's karaoke duration elapses. */
   highlightColor: string;
   position: 'top' | 'middle' | 'bottom';
+  /** Item 3 (Andrew review, 2026-07-17): optional continuous vertical anchor, 0..1, of the caption
+   * block's CENTER — same "box CENTER, matching SwiftUI .position(...) semantics" convention
+   * TextOverlaySpec.yNorm below already documents. When present this is the source of truth for
+   * vertical placement (drag-to-reposition on the preview); when absent, `position` resolves to
+   * one of CAPTION_POSITION_PRESETS via resolveCaptionYOffsetNorm. Validated to [0,1] server-side
+   * in routes/projects.ts's PATCH handler. iOS's CaptionOverlayView MUST resolve the identical
+   * value via the identical preset numbers — see that file's matching doc comment — so the live
+   * drag preview and the burned export never disagree. */
+  yOffsetNorm?: number;
+}
+
+/** Fallback vertical-center anchors for the legacy top/middle/bottom picker, used only when
+ * `CaptionStyle.yOffsetNorm` is absent (e.g. a project whose caption style predates this field).
+ * MUST match CaptionOverlayView.swift's `presetYOffsetNorm` numbers exactly. */
+export const CAPTION_POSITION_PRESETS: Record<'top' | 'middle' | 'bottom', number> = {
+  top: 0.12,
+  middle: 0.5,
+  bottom: 0.88,
+};
+
+/** Resolves the effective vertical-center anchor (0..1) for a caption style: `yOffsetNorm` if set
+ * (clamped defensively even though the route already validates it), else the position preset. */
+export function resolveCaptionYOffsetNorm(style: CaptionStyle): number {
+  if (typeof style.yOffsetNorm === 'number' && Number.isFinite(style.yOffsetNorm)) {
+    return Math.min(1, Math.max(0, style.yOffsetNorm));
+  }
+  return CAPTION_POSITION_PRESETS[style.position] ?? CAPTION_POSITION_PRESETS.bottom;
 }
 
 export interface CaptionCanvas {
@@ -122,7 +136,6 @@ export interface CaptionCanvas {
  * section (no Dialogue lines) — this must never throw.
  */
 export function buildAssFile(cues: CaptionCue[], style: CaptionStyle, canvas: CaptionCanvas): string {
-  const alignment = alignmentForPosition(style.position);
   // PrimaryColour = already-swept/active fill (highlight); SecondaryColour = pre-sweep base color
   // — this is exactly how `\k` sweeps Secondary -> Primary as playback crosses each word.
   const primaryColour = hexToAssColor(style.highlightColor);
@@ -131,6 +144,15 @@ export function buildAssFile(cues: CaptionCue[], style: CaptionStyle, canvas: Ca
   // Semi-transparent black background pill per 13-UI-SPEC.md's default Caption Style contract
   // (BorderStyle=3 renders BackColour as an opaque box behind the text, not just an outline).
   const backColour = '&H80000000';
+
+  // Item 3: every Dialogue line below carries an explicit `\an5\pos(x,y)` override (box-CENTER
+  // anchor, same convention buildTextOverlayAss already uses), so the Style row's Alignment field
+  // is inert dead weight left at 5 (middle-center) for documentation only — MarginL/R/V likewise
+  // no longer determine vertical placement, but MarginL/R are KEPT at their prior 10/10 values
+  // because ASS still uses them to compute wrap width even under `\pos` override, and changing
+  // that would regress existing multi-word wrap behavior, which is out of this item's scope.
+  const centerX = Math.round(canvas.width / 2);
+  const centerY = Math.round(resolveCaptionYOffsetNorm(style) * canvas.height);
 
   const scriptInfoLines = [
     '[Script Info]',
@@ -152,7 +174,7 @@ export function buildAssFile(cues: CaptionCue[], style: CaptionStyle, canvas: Ca
     // our bundled assets/fonts/Inter-Bold.ttf (confirmed: `fontselect: (Inter, 400, 0) ->
     // Inter-Bold, 0, Inter-Bold`). Bold weight (400 base + Bold=0 below is the ASS bold-toggle,
     // unrelated to font selection) comes from this being the only style in the bundled font file.
-    `Style: Caption,Inter,${style.fontSize},${primaryColour},${secondaryColour},${outlineColour},${backColour},0,0,0,0,100,100,0,0,3,0,0,${alignment},10,10,10,1`,
+    `Style: Caption,Inter,${style.fontSize},${primaryColour},${secondaryColour},${outlineColour},${backColour},0,0,0,0,100,100,0,0,3,0,0,5,10,10,10,1`,
     '',
   ];
 
@@ -162,12 +184,13 @@ export function buildAssFile(cues: CaptionCue[], style: CaptionStyle, canvas: Ca
   ];
 
   const dialogueLines = cues.map((cue) => {
-    const text = cue.words
+    const words = cue.words
       .map((word) => {
         const durationCentiseconds = Math.max(0, Math.round((word.endSeconds - word.startSeconds) * 100));
         return `{\\k${durationCentiseconds}}${escapeAssText(word.text)}`;
       })
       .join(' ');
+    const text = `{\\an5\\pos(${centerX},${centerY})}${words}`;
     const start = formatAssTimestamp(cue.startSeconds);
     const end = formatAssTimestamp(cue.endSeconds);
     return `Dialogue: 0,${start},${end},Caption,,0,0,0,,${text}`;

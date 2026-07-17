@@ -262,6 +262,18 @@ projectsRouter.patch('/:id', async (req: Request, res: Response) => {
     res.status(400).json({ error: 'Invalid caption_style.position' });
     return;
   }
+  // Item 3 (Andrew review, 2026-07-17): the drag-to-reposition caption block writes this
+  // continuous vertical anchor — same [0,1] range as text overlay's x_norm/y_norm (T-13-32).
+  if (
+    caption_style !== undefined &&
+    caption_style?.yOffsetNorm !== undefined &&
+    (typeof caption_style.yOffsetNorm !== 'number' ||
+      caption_style.yOffsetNorm < 0 ||
+      caption_style.yOffsetNorm > 1)
+  ) {
+    res.status(400).json({ error: 'caption_style.yOffsetNorm must be between 0 and 1' });
+    return;
+  }
 
   try {
     const updated = await updateProject(req.params.id as string, req.user.dbUserId, {
