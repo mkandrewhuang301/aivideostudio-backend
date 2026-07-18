@@ -102,6 +102,37 @@ describe('GET /api/me', () => {
     expect(res.status).toBe(200);
     expect(res.body.has_face_consent).toBe(false);
   });
+
+  // Paywall tiers (paywall-tiers-plan.md item 5): tier + parallel_limit derived from
+  // entitlement_level, so the client can label locked models/surface concurrency without
+  // hardcoding the tier ladder.
+  it('returns tier and parallel_limit derived from entitlement_level (pro -> 2)', async () => {
+    mockGetUserWithBalance.mockResolvedValue({ ...BALANCE_STUB, entitlement_level: 'pro' });
+    const app = buildApp(AUTHED_USER);
+    const res = await request(app).get('/api/me');
+
+    expect(res.status).toBe(200);
+    expect(res.body.tier).toBe('pro');
+    expect(res.body.parallel_limit).toBe(2);
+  });
+
+  it('returns tier and parallel_limit derived from entitlement_level (creator -> 4)', async () => {
+    mockGetUserWithBalance.mockResolvedValue({ ...BALANCE_STUB, entitlement_level: 'creator' });
+    const app = buildApp(AUTHED_USER);
+    const res = await request(app).get('/api/me');
+
+    expect(res.body.tier).toBe('creator');
+    expect(res.body.parallel_limit).toBe(4);
+  });
+
+  it('returns tier: null and parallel_limit: null when entitlement_level is NULL', async () => {
+    mockGetUserWithBalance.mockResolvedValue({ ...BALANCE_STUB, entitlement_level: null });
+    const app = buildApp(AUTHED_USER);
+    const res = await request(app).get('/api/me');
+
+    expect(res.body.tier).toBeNull();
+    expect(res.body.parallel_limit).toBeNull();
+  });
 });
 
 // ─── PATCH /api/me/device-token ───────────────────────────────────────────────

@@ -6,6 +6,7 @@ import { Router, Request, Response } from 'express';
 import { getUserWithBalance } from '../services/creditService';
 import { db } from '../db/client';
 import { sql } from 'drizzle-orm';
+import { CONCURRENCY_LIMIT, isTier } from '../config/tiers';
 
 export const meRouter = Router();
 
@@ -25,12 +26,20 @@ meRouter.get('/', async (req: Request, res: Response) => {
       (consentRow?.rows?.[0] as { face_consent_at: string | null } | undefined)?.face_consent_at
     );
 
+    // Paywall tiers (paywall-tiers-plan.md item 5): expose the resolved tier + its concurrency
+    // cap so the client can label locked models/surface "X in progress" without hardcoding the
+    // tier ladder. NULL entitlement_level (no active subscription) -> tier/parallel_limit null;
+    // the hard-paywall gate (entitlementGate) already blocks generation in that state server-side.
+    const tier = isTier(balance.entitlement_level) ? balance.entitlement_level : null;
+
     res.status(200).json({
       user: req.user,
       credits_balance: balance.credits_balance,
       subscription_allotment: balance.subscription_allotment,
       active_topup_balance: balance.active_topup_balance,
       entitlement_level: balance.entitlement_level,
+      tier,
+      parallel_limit: tier ? CONCURRENCY_LIMIT[tier] : null,
       has_face_consent: hasFaceConsent,
     });
   } catch (error) {

@@ -4,6 +4,7 @@
 
 import { Router } from 'express';
 import { MODEL_RATES, CENTS_PER_DOLLAR, IMAGE_MODEL_COSTS, DREAMACTOR_RATE, VIDEO_UPSCALER_RATES, GROK_IMAGINE_CREDITS_PER_SEC, FAL_KLING_V3_STANDARD_RATES, KLING_MOTION_RATE } from '../services/generationService';
+import { MODEL_MIN_TIER, CONCURRENCY_LIMIT } from '../config/tiers';
 
 export const ratesRouter = Router();
 
@@ -46,5 +47,10 @@ ratesRouter.get('/', (_req, res) => {
       audioOn: FAL_KLING_V3_STANDARD_RATES.audioOn * CENTS_PER_DOLLAR,
     },
     klingMotionStandardRate: KLING_MOTION_RATE.std * CENTS_PER_DOLLAR,
+    // Paywall tiers (paywall-tiers-plan.md item 5): premium-model minimum tier map, so the client
+    // can label locked models (follow-up UI work — not built here). Models absent from this map
+    // require only 'basic'. Additive/non-breaking.
+    modelMinTier: MODEL_MIN_TIER,
+    concurrencyLimit: CONCURRENCY_LIMIT,
   });
 });
