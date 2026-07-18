@@ -206,6 +206,9 @@ jest.mock('../../middleware/celebrityCheck', () => ({
 jest.mock('../../middleware/entitlementGate', () => ({
   entitlementGate: jest.fn((_req: unknown, _res: unknown, next: () => void) => next()),
 }));
+jest.mock('../../middleware/concurrencyGate', () => ({
+  concurrencyGate: jest.fn((_req: unknown, _res: unknown, next: () => void) => next()),
+}));
 
 import express, { NextFunction, Request, Response } from 'express';
 import request from 'supertest';
