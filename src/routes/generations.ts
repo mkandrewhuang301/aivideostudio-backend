@@ -9,6 +9,7 @@ import { creditCheckMiddleware } from '../middleware/creditCheck';
 import { promptModerationMiddleware } from '../middleware/promptModeration';
 import { celebrityCheckMiddleware } from '../middleware/celebrityCheck';
 import { inputMediaGate } from '../middleware/inputMediaGate';
+import { entitlementGate } from '../middleware/entitlementGate';
 import { presetResolver } from '../middleware/presetResolver';
 import { formatResolver } from '../middleware/formatResolver';
 import {
@@ -814,7 +815,7 @@ async function prepareCost(req: Request, res: Response, next: NextFunction): Pro
   next();
 }
 
-generationsRouter.post('/', promptModerationMiddleware, presetResolver, formatResolver, prepareCost, celebrityCheckMiddleware, inputMediaGate, creditCheckMiddleware, async (req: Request, res: Response) => {
+generationsRouter.post('/', promptModerationMiddleware, presetResolver, formatResolver, prepareCost, celebrityCheckMiddleware, inputMediaGate, entitlementGate, creditCheckMiddleware, async (req: Request, res: Response) => {
   if (!req.user?.dbUserId) {
     res.status(401).json({ error: 'Not authenticated' });
     return;

@@ -199,6 +199,14 @@ jest.mock('../../middleware/celebrityCheck', () => ({
   celebrityCheckMiddleware: jest.fn((_req: unknown, _res: unknown, next: () => void) => next()),
 }));
 
+// Mock entitlementGate/concurrencyGate as pass-throughs — tier/concurrency gating logic is
+// tested separately (entitlementGate.test.ts, concurrencyGate.test.ts). Without this, every test
+// in this suite would need a mocked users.entitlement_level row (this suite's db mock returns
+// `{ rows: [] }` by default, which the hard-paywall gate would otherwise treat as NULL → 403).
+jest.mock('../../middleware/entitlementGate', () => ({
+  entitlementGate: jest.fn((_req: unknown, _res: unknown, next: () => void) => next()),
+}));
+
 import express, { NextFunction, Request, Response } from 'express';
 import request from 'supertest';
 import { generationsRouter } from '../../routes/generations';
