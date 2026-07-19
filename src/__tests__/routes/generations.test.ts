@@ -1949,9 +1949,49 @@ describe('GET /api/generations', () => {
     expect(res.body.items[0].params.preset_input_upload_ids).toEqual(['upload-1']);
   });
 
+  it('returns the user-authored Magic Editor prompt without exposing other preset templates (list)', async () => {
+    (db.select as jest.Mock).mockReturnValueOnce({
+      from: jest.fn(() => ({
+        where: jest.fn().mockResolvedValue([{
+          id: 'upload-source',
+          user_id: 'test-user-id',
+          r2_key: 'uploads/source.jpg',
+          mime_type: 'image/jpeg',
+        }]),
+      })),
+    });
+    (listGenerations as jest.Mock).mockResolvedValue([{
+      ...completedItem,
+      id: 'gen-magic-editor',
+      prompt: 'Replace the sign with a neon Fantasia logo',
+      params: { preset_id: 'magic-editor', preset_input_upload_ids: ['upload-source'] },
+    }]);
+
+    const res = await request(app).get('/api/generations');
+
+    expect(res.status).toBe(200);
+    expect(res.body.items[0].prompt).toBe('Replace the sign with a neon Fantasia logo');
+    expect(res.body.items[0].params).toEqual({
+      preset_id: 'magic-editor',
+      preset_input_upload_ids: ['upload-source'],
+    });
+    expect(res.body.items[0].preset_input_urls).toEqual([{
+      url: expect.stringContaining('uploads/source.jpg'),
+      isVideo: false,
+    }]);
+  });
+
   // D-F + D-G (09.2-13): a faceswap row is reported as media_type 'image' with model nulled and
   // params stripped to preset_id + preset_input_upload_ids — no model/infra/R2 URLs leak (list).
   it('serializes a faceswap preset row as media_type image, model null, minimal params (list)', async () => {
+    (db.select as jest.Mock).mockReturnValueOnce({
+      from: jest.fn(() => ({
+        where: jest.fn().mockResolvedValue([
+          { id: 'upload-face', user_id: 'test-user-id', r2_key: 'uploads/face.jpg', mime_type: 'image/jpeg' },
+          { id: 'upload-target', user_id: 'test-user-id', r2_key: 'uploads/target.jpg', mime_type: 'image/jpeg' },
+        ]),
+      })),
+    });
     const faceswapItem = {
       ...completedItem,
       id: 'gen-faceswap-ser',
@@ -1982,6 +2022,10 @@ describe('GET /api/generations', () => {
     // Infra must not leak.
     expect(row.params.swap_image).toBeUndefined();
     expect(row.params.target_image).toBeUndefined();
+    expect(row.preset_input_urls).toEqual([
+      { url: expect.stringContaining('uploads/face.jpg'), isVideo: false },
+      { url: expect.stringContaining('uploads/target.jpg'), isVideo: false },
+    ]);
   });
 
   // T-09.6-13: the server-only chain descriptor (prompts, models, duration) must never reach the
@@ -2084,6 +2128,37 @@ describe('GET /api/generations/:id', () => {
     expect(res.body.prompt).toBeNull();
     expect(res.body.params.preset_id).toBe('hairstyle');
     expect(res.body.params.preset_input_upload_ids).toEqual(['upload-1']);
+  });
+
+  it('returns the user-authored Magic Editor prompt from the detail endpoint', async () => {
+    (db.select as jest.Mock).mockReturnValueOnce({
+      from: jest.fn(() => ({
+        where: jest.fn().mockResolvedValue([{
+          id: 'upload-source',
+          user_id: 'test-user-id',
+          r2_key: 'uploads/source.jpg',
+          mime_type: 'image/jpeg',
+        }]),
+      })),
+    });
+    (getGenerationById as jest.Mock).mockResolvedValue({
+      ...completedGen,
+      prompt: 'Remove the person in the background',
+      params: { preset_id: 'magic-editor', preset_input_upload_ids: ['upload-source'] },
+    });
+
+    const res = await request(app).get('/api/generations/gen-001');
+
+    expect(res.status).toBe(200);
+    expect(res.body.prompt).toBe('Remove the person in the background');
+    expect(res.body.params).toEqual({
+      preset_id: 'magic-editor',
+      preset_input_upload_ids: ['upload-source'],
+    });
+    expect(res.body.preset_input_urls).toEqual([{
+      url: expect.stringContaining('uploads/source.jpg'),
+      isVideo: false,
+    }]);
   });
 
   // D-F + D-G (09.2-13): faceswap detail row → media_type image, model null, minimal params.

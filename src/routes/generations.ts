@@ -1232,14 +1232,20 @@ generationsRouter.get('/', async (req: Request, res: Response) => {
     const limit = Math.min(Number(limitStr) || 20, 50);
     const items = await listGenerations(req.user.dbUserId, cursor, limit);
 
-    // Pre-fetch all reference upload rows needed across all items in one query
-    const allRefIds = items.flatMap((item) => {
+    // Pre-fetch both freeform references and exact preset inputs in one query. Preset inputs are
+    // returned directly below because GET /uploads intentionally exposes only the newest 50;
+    // older generation cards must still be able to show the media they were made from.
+    const allUploadIds = items.flatMap((item) => {
       const p = item.params as Record<string, unknown> | null;
-      const ids = p?.ref_upload_ids;
-      return Array.isArray(ids) ? ids as string[] : [];
+      const refIds = Array.isArray(p?.ref_upload_ids) ? p.ref_upload_ids : [];
+      const presetIds = Array.isArray(p?.preset_input_upload_ids) ? p.preset_input_upload_ids : [];
+      return [...refIds, ...presetIds].filter((id): id is string => typeof id === 'string');
     });
-    const refUploadRows = allRefIds.length > 0
-      ? await db.select().from(referenceUploads).where(inArray(referenceUploads.id, allRefIds))
+    const refUploadRows = allUploadIds.length > 0
+      ? await db.select().from(referenceUploads).where(and(
+          inArray(referenceUploads.id, allUploadIds),
+          eq(referenceUploads.user_id, req.user.dbUserId),
+        ))
       : [];
     const refUploadMap = Object.fromEntries(refUploadRows.map((r) => [r.id, r]));
 
@@ -1247,6 +1253,9 @@ generationsRouter.get('/', async (req: Request, res: Response) => {
       items.map(async (item) => {
         const p = item.params as Record<string, unknown> | null;
         const refIds: string[] = Array.isArray(p?.ref_upload_ids) ? p!.ref_upload_ids as string[] : [];
+        const presetInputIds = Array.isArray(p?.preset_input_upload_ids)
+          ? p!.preset_input_upload_ids as unknown[]
+          : [];
         const referenceUrls = await Promise.all(
           refIds
             .filter((id) => refUploadMap[id])
@@ -1256,12 +1265,25 @@ generationsRouter.get('/', async (req: Request, res: Response) => {
               return { url, isVideo: row.mime_type.startsWith('video/') };
             }),
         );
+        const presetInputUrls = await Promise.all(
+          presetInputIds.map(async (id) => {
+            if (typeof id !== 'string' || !refUploadMap[id]) return null;
+            const row = refUploadMap[id];
+            return {
+              url: await getUploadPresignedUrl(row.r2_key),
+              isVideo: row.mime_type.startsWith('video/'),
+            };
+          }),
+        );
         return {
           ...item,
           // D-11/SC3/T-09.1-03: the expanded server template lives in this column for preset
           // rows — never let it reach the client. params.preset_id/preset_input_upload_ids are
           // retained (needed for the badge + Remix reopen).
-          prompt: p?.preset_id ? null : item.prompt,
+          // Magic Editor is the one preset whose stored prompt is user-authored passthrough
+          // text. Expose it so history can show the edit request; every server-expanded preset
+          // template remains private and is still nulled.
+          prompt: p?.preset_id === 'magic-editor' ? item.prompt : p?.preset_id ? null : item.prompt,
           // D-F (faceswap→image) + D-G (null model + strip params for preset rows). Spread AFTER
           // ...item so these override the raw DB values.
           ...presetSafeSerialization(item),
@@ -1269,6 +1291,7 @@ generationsRouter.get('/', async (req: Request, res: Response) => {
             ? await getGenerationPresignedUrl(item.r2_key)
             : null,
           reference_urls: referenceUrls.length > 0 ? referenceUrls : null,
+          preset_input_urls: presetInputUrls.some(Boolean) ? presetInputUrls : null,
         };
       }),
     );
@@ -1295,19 +1318,45 @@ generationsRouter.get('/:id', async (req: Request, res: Response) => {
       : null;
     const p = item.params as Record<string, unknown> | null;
     const refIds: string[] = Array.isArray(p?.ref_upload_ids) ? p!.ref_upload_ids as string[] : [];
-    const referenceRows = refIds.length > 0
-      ? await db.select().from(referenceUploads).where(inArray(referenceUploads.id, refIds))
+    const presetInputIds = Array.isArray(p?.preset_input_upload_ids)
+      ? p!.preset_input_upload_ids as unknown[]
       : [];
-    const reference_urls = referenceRows.length > 0
-      ? await Promise.all(referenceRows.map(async (r) => ({
-          url: await getUploadPresignedUrl(r.r2_key),
-          isVideo: r.mime_type.startsWith('video/'),
+    const allUploadIds = [...refIds, ...presetInputIds]
+      .filter((id): id is string => typeof id === 'string');
+    const referenceRows = allUploadIds.length > 0
+      ? await db.select().from(referenceUploads).where(and(
+          inArray(referenceUploads.id, allUploadIds),
+          eq(referenceUploads.user_id, req.user.dbUserId),
+        ))
+      : [];
+    const referenceRowMap = Object.fromEntries(referenceRows.map((row) => [row.id, row]));
+    const reference_urls = refIds.length > 0
+      ? await Promise.all(refIds.filter((id) => referenceRowMap[id]).map(async (id) => ({
+          url: await getUploadPresignedUrl(referenceRowMap[id].r2_key),
+          isVideo: referenceRowMap[id].mime_type.startsWith('video/'),
         })))
       : null;
+    const preset_input_urls = presetInputIds.length > 0
+      ? await Promise.all(presetInputIds.map(async (id) => {
+          if (typeof id !== 'string' || !referenceRowMap[id]) return null;
+          const row = referenceRowMap[id];
+          return {
+            url: await getUploadPresignedUrl(row.r2_key),
+            isVideo: row.mime_type.startsWith('video/'),
+          };
+        }))
+      : null;
     // D-11/SC3/T-09.1-03: null the expanded template for preset rows; params.preset_id retained.
-    const prompt = p?.preset_id ? null : item.prompt;
+    const prompt = p?.preset_id === 'magic-editor' ? item.prompt : p?.preset_id ? null : item.prompt;
     // D-F (faceswap→image) + D-G (null model + strip params for preset rows). Spread AFTER ...item.
-    res.status(200).json({ ...item, prompt, ...presetSafeSerialization(item), video_url, reference_urls });
+    res.status(200).json({
+      ...item,
+      prompt,
+      ...presetSafeSerialization(item),
+      video_url,
+      reference_urls,
+      preset_input_urls: preset_input_urls?.some(Boolean) ? preset_input_urls : null,
+    });
   } catch (err) {
     console.error('[generations] Error fetching generation:', err);
     res.status(500).json({ error: 'Failed to fetch generation' });
