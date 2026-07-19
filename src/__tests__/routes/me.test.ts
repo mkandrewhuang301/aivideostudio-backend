@@ -16,6 +16,11 @@ jest.mock('../../services/creditService', () => ({
   getUserWithBalance: mockGetUserWithBalance,
 }));
 
+const mockDeleteUserAccount = jest.fn();
+jest.mock('../../services/accountDeletionService', () => ({
+  deleteUserAccount: mockDeleteUserAccount,
+}));
+
 import express, { Request, Response, NextFunction } from 'express';
 import request from 'supertest';
 import { meRouter } from '../../routes/me';
@@ -43,6 +48,40 @@ const BALANCE_STUB = {
   active_topup_balance: 50,
   entitlement_level: 'pro',
 };
+
+// ─── DELETE /api/me ──────────────────────────────────────────────────────────
+
+describe('DELETE /api/me', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockDeleteUserAccount.mockResolvedValue(undefined);
+  });
+
+  it('returns 401 when unauthenticated and never invokes deletion', async () => {
+    const res = await request(buildApp(null)).delete('/api/me');
+
+    expect(res.status).toBe(401);
+    expect(mockDeleteUserAccount).not.toHaveBeenCalled();
+  });
+
+  it('returns 204 after deleting the authenticated account', async () => {
+    const res = await request(buildApp(AUTHED_USER)).delete('/api/me');
+
+    expect(res.status).toBe(204);
+    expect(mockDeleteUserAccount).toHaveBeenCalledWith('db-user-uuid-1', 'firebase-uid-1');
+  });
+
+  it('returns 500 when the authoritative DB deletion fails', async () => {
+    mockDeleteUserAccount.mockRejectedValueOnce(new Error('transaction failed'));
+    const consoleError = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    const res = await request(buildApp(AUTHED_USER)).delete('/api/me');
+
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual({ error: 'Failed to delete account' });
+    consoleError.mockRestore();
+  });
+});
 
 // ─── GET /api/me ─────────────────────────────────────────────────────────────
 

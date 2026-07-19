@@ -7,8 +7,24 @@ import { getUserWithBalance } from '../services/creditService';
 import { db } from '../db/client';
 import { sql } from 'drizzle-orm';
 import { CONCURRENCY_LIMIT, isTier } from '../config/tiers';
+import { deleteUserAccount } from '../services/accountDeletionService';
 
 export const meRouter = Router();
+
+meRouter.delete('/', async (req: Request, res: Response) => {
+  if (!req.user?.dbUserId) {
+    res.status(401).json({ error: 'Not authenticated' });
+    return;
+  }
+
+  try {
+    await deleteUserAccount(req.user.dbUserId, req.user.uid);
+    res.status(204).send();
+  } catch (error) {
+    console.error('[me] Error deleting account:', error);
+    res.status(500).json({ error: 'Failed to delete account' });
+  }
+});
 
 meRouter.get('/', async (req: Request, res: Response) => {
   if (!req.user?.dbUserId) {

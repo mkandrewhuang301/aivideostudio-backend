@@ -36,6 +36,10 @@ const AUTH_CACHE_TTL_MS = 60_000;
 const AUTH_CACHE_MAX_SIZE = 10_000;
 const authCache = new Map<string, CachedAuthUser>();
 
+export function evictAuthCache(uid: string): void {
+  authCache.delete(uid);
+}
+
 function getCached(uid: string): CachedAuthUser | undefined {
   const entry = authCache.get(uid);
   if (!entry) return undefined;
