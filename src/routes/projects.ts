@@ -22,11 +22,11 @@ import {
   projectCaptionCues,
   generations,
 } from '../db/schema';
-import { eq, and, sql, isNull, asc } from 'drizzle-orm';
+import { eq, and, sql, isNull, asc, inArray } from 'drizzle-orm';
 import { getUploadPresignedUrl } from '../services/archivalService';
 import { PRESET_MUSIC } from '../config/presetMusic';
 import { ffmpegQueue } from '../queue/ffmpegWorker';
-import { createGeneration } from '../services/generationService';
+import { createGeneration, STUDIO_COMPOSE_MODEL } from '../services/generationService';
 import { transcribeToWordCues, TranscriptionError } from '../services/captionTranscriptionService';
 import {
   createProject,
@@ -201,12 +201,46 @@ projectsRouter.get('/', async (req: Request, res: Response) => {
     const limit = Math.min(Number(limitStr) || 20, 50);
     const items = await listProjects(req.user.dbUserId, cursor, limit);
 
+    const exportIds = items
+      .map((project) => project.last_export_generation_id)
+      .filter((id): id is string => Boolean(id));
+    const exportRows = exportIds.length > 0
+      ? await db
+          .select({
+            id: generations.id,
+            status: generations.status,
+            r2_key: generations.r2_key,
+            completed_at: generations.completed_at,
+          })
+          .from(generations)
+          .where(
+            and(
+              eq(generations.user_id, req.user.dbUserId),
+              inArray(generations.id, exportIds),
+            ),
+          )
+      : [];
+    const exportById = new Map(exportRows.map((row) => [row.id, row]));
+
     const enriched = await Promise.all(
       items.map(async (p) => {
-        const { thumbnail_r2_key, ...rest } = p;
+        const { thumbnail_r2_key, last_export_generation_id, ...rest } = p;
+        const exportRow = last_export_generation_id
+          ? exportById.get(last_export_generation_id)
+          : undefined;
         return {
           ...rest,
           thumbnail_url: thumbnail_r2_key ? await getUploadPresignedUrl(thumbnail_r2_key) : null,
+          export: exportRow
+            ? {
+                generationId: exportRow.id,
+                status: exportRow.status,
+                mediaUrl: exportRow.r2_key
+                  ? await getUploadPresignedUrl(exportRow.r2_key)
+                  : null,
+                completedAt: exportRow.completed_at,
+              }
+            : null,
         };
       }),
     );
@@ -755,8 +789,8 @@ projectsRouter.post('/:id/clips/:clipId/split', async (req: Request, res: Respon
 
 // POST /api/projects/:id/export — real free export (D-07/D-10/D-12/SC7): snapshots the full
 // project state at request time (Pitfall 4), creates a NEW free generation row so the client can
-// poll it exactly like any other generation, and enqueues the ffmpeg 'compose' job. The project
-// row itself is NEVER updated here — exporting does not lock/consume the project (D-12).
+// poll it through the existing lifecycle, records the newest export pointer on the project, and
+// enqueues the ffmpeg 'compose' job. Exporting never locks or consumes editable project state.
 projectsRouter.post('/:id/export', async (req: Request, res: Response) => {
   if (!req.user?.dbUserId) {
     res.status(401).json({ error: 'Not authenticated' });
@@ -792,13 +826,20 @@ projectsRouter.post('/:id/export', async (req: Request, res: Response) => {
     // the client's existing GenerationManager poll loop (GET /api/generations/:id) works unchanged.
     const { id: generationId } = await createGeneration({
       user_id: req.user.dbUserId,
-      model: 'edit-studio-compose',
+      model: STUDIO_COMPOSE_MODEL,
       status: 'processing',
       prompt: null,
       params: { export_of_project_id: projectId },
       cost_credits: 0,
       media_type: 'video',
     });
+
+    // Point Studio at the newest render immediately, while it is still processing. A later
+    // export overwrites this pointer; earlier generation rows remain available by id.
+    await db
+      .update(projects)
+      .set({ last_export_generation_id: generationId })
+      .where(and(eq(projects.id, projectId), eq(projects.user_id, req.user.dbUserId)));
 
     await ffmpegQueue.add('compose-job', {
       generationId,

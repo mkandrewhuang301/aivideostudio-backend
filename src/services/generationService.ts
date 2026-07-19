@@ -5,11 +5,12 @@
 
 import { db } from '../db/client';
 import { generations } from '../db/schema';
-import { sql, desc, lt, eq, and, notInArray, or } from 'drizzle-orm';
+import { sql, desc, lt, eq, and, ne, notInArray, or } from 'drizzle-orm';
 import type { GenerationStatus, NewGeneration } from '../db/schema';
 import type { PresetDef } from '../config/presets';
 
 export const CREDITS_PER_DOLLAR = 50; // subscription/topup grant scale only (revenuecat.ts: 500 credits ≈ $9.99) — NEVER use for per-generation cost math
+export const STUDIO_COMPOSE_MODEL = 'edit-studio-compose' as const;
 
 // Per-generation cost rule (user-specified): 1 credit = 1 cent of provider cost, rounded up.
 // Do not use CREDITS_PER_DOLLAR here — that constant prices credit *grants*, not consumption,
@@ -534,6 +535,7 @@ export async function listGenerations(
     .where(
       and(
         eq(generations.user_id, userId),
+        ne(generations.model, STUDIO_COMPOSE_MODEL),
         notInArray(generations.status, HIDDEN_STATUSES),
         cursor
           ? or(

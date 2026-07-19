@@ -205,6 +205,9 @@ export const projects = pgTable(
     title: text('title'), // nullable; app-side default "Untitled Project"
     aspect_ratio: text('aspect_ratio').notNull().default('9:16'), // '9:16' | '4:5' | '1:1' | '16:9' — app-validated
     thumbnail_r2_key: text('thumbnail_r2_key'), // nullable
+    // Latest Edit Studio render. The generation row remains the single source of truth for
+    // status/media/completion; this pointer only keeps the export reachable from its project.
+    last_export_generation_id: text('last_export_generation_id'), // nullable generations.id as text
     caption_style: jsonb('caption_style'), // {fontSize, color, highlightColor, position, yOffsetNorm?} — ONE global style per SC5; yOffsetNorm added item 3 (2026-07-17), no migration (jsonb)
     created_at: timestamp('created_at', { withTimezone: true })
       .notNull()

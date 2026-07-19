@@ -49,6 +49,7 @@ jest.mock('../../queue/ffmpegWorker', () => ({
 const mockCreateGeneration = jest.fn();
 jest.mock('../../services/generationService', () => ({
   createGeneration: (...args: unknown[]) => mockCreateGeneration(...args),
+  STUDIO_COMPOSE_MODEL: 'edit-studio-compose',
 }));
 
 const mockTranscribeToWordCues = jest.fn();
@@ -68,7 +69,7 @@ import { smartUnpackOnImport, translateCaptionDraftsToProjectTimeline } from '..
 import { TranscriptionError } from '../../services/captionTranscriptionService';
 import { r2 } from '../../storage/r2';
 import { db } from '../../db/client';
-import { projectClips } from '../../db/schema';
+import { projectClips, projects } from '../../db/schema';
 
 const r2Mock = r2 as unknown as { send: jest.Mock };
 const dbMock = db as unknown as {
@@ -122,6 +123,7 @@ function baseProjectRow(overrides: Record<string, unknown> = {}) {
     title: null,
     aspect_ratio: '9:16',
     thumbnail_r2_key: null,
+    last_export_generation_id: null,
     caption_style: null,
     created_at: NOW,
     updated_at: NOW,
@@ -132,6 +134,7 @@ function baseProjectRow(overrides: Record<string, unknown> = {}) {
 beforeEach(() => {
   jest.clearAllMocks();
   r2Mock.send.mockResolvedValue({});
+  dbMock.update.mockReturnValue(makeChain([]));
 });
 
 // ─── POST /api/projects ────────────────────────────────────────────────────────
@@ -207,6 +210,32 @@ describe('GET /api/projects', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.nextCursor).toBeNull();
+  });
+
+  it('surfaces the latest Studio export with a signed URL and never leaks the raw pointer', async () => {
+    dbMock.select
+      .mockReturnValueOnce(makeChain([
+        baseProjectRow({ id: 'p1', last_export_generation_id: 'gen-export-1' }),
+      ]))
+      .mockReturnValueOnce(makeChain([
+        {
+          id: 'gen-export-1',
+          status: 'completed',
+          r2_key: 'generations/gen-export-1.mp4',
+          completed_at: NOW,
+        },
+      ]));
+
+    const res = await request(app).get('/api/projects');
+
+    expect(res.status).toBe(200);
+    expect(res.body.items[0].last_export_generation_id).toBeUndefined();
+    expect(res.body.items[0].export).toEqual({
+      generationId: 'gen-export-1',
+      status: 'completed',
+      mediaUrl: 'https://r2.example.com/presigned-clip-url',
+      completedAt: NOW.toISOString(),
+    });
   });
 });
 
@@ -1282,7 +1311,7 @@ describe('POST /api/projects/:id/export', () => {
     expect(mockCreateGeneration).not.toHaveBeenCalled();
   });
 
-  it('happy path: snapshots project state, creates a free generation, enqueues compose, and NEVER updates the project row', async () => {
+  it('happy path: snapshots project state, creates a free generation, points the project at it, and enqueues compose', async () => {
     dbMock.select
       .mockReturnValueOnce(makeChain([{ id: 'proj-1' }])) // owned project (route-level check)
       .mockReturnValueOnce(makeChain([{ count: 1 }])) // clip count
@@ -1301,12 +1330,15 @@ describe('POST /api/projects/:id/export', () => {
     expect(mockCreateGeneration).toHaveBeenCalledWith(
       expect.objectContaining({
         user_id: 'test-db-user-id',
+        model: 'edit-studio-compose',
         status: 'processing',
         cost_credits: 0,
         media_type: 'video',
         params: expect.objectContaining({ export_of_project_id: 'proj-1' }),
       }),
     );
+
+    expect(dbMock.update).toHaveBeenCalledWith(projects);
 
     expect(mockFfmpegQueueAdd).toHaveBeenCalledWith(
       'compose-job',
@@ -1329,8 +1361,8 @@ describe('POST /api/projects/:id/export', () => {
       }),
     );
 
-    // D-12: export never locks/consumes the project — no db.update call anywhere in this flow.
-    expect(dbMock.update).not.toHaveBeenCalled();
+    const updateChain = dbMock.update.mock.results[0]?.value;
+    expect(updateChain.set).toHaveBeenCalledWith({ last_export_generation_id: 'gen-export-1' });
   });
 
   it("B2 (13-22): aspect_ratio 'original' resolves originalCanvasWidth/Height from the FIRST (sort_order) clip's stored dimensions", async () => {

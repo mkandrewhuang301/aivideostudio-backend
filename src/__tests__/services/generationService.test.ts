@@ -39,6 +39,7 @@ import {
   getGenerationByPredictionId,
   createGeneration,
   listGenerations,
+  STUDIO_COMPOSE_MODEL,
   getGenerationById,
   softDeleteGeneration,
   classifyFailureReason,
@@ -75,6 +76,15 @@ function makeSelectChain(rows: unknown[] = []) {
   chain.where.mockReturnValue(chain);
   chain.orderBy.mockReturnValue(chain);
   return chain;
+}
+
+function queryNodeContains(value: unknown, needle: unknown, seen = new Set<unknown>()): boolean {
+  if (value === needle) return true;
+  if (value === null || typeof value !== 'object' || seen.has(value)) return false;
+  seen.add(value);
+  if (Array.isArray(value)) return value.some((child) => queryNodeContains(child, needle, seen));
+  return Object.values(value as Record<string, unknown>)
+    .some((child) => queryNodeContains(child, needle, seen));
 }
 
 beforeEach(() => {
@@ -536,6 +546,7 @@ describe('listGenerations', () => {
     expect(result).toEqual(mockRows);
     expect(mockDb.select).toHaveBeenCalled();
     expect(chain.limit).toHaveBeenCalledWith(20); // default limit
+    expect(queryNodeContains(chain.where.mock.calls[0][0], STUDIO_COMPOSE_MODEL)).toBe(true);
   });
 
   it('passes custom limit to the query', async () => {
