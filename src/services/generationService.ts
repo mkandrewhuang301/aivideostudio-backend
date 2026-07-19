@@ -65,8 +65,21 @@ export function computeGrokImagineCost(durationSeconds: number): number {
 // Exact endpoint: fal-ai/kling-video/v3/standard/image-to-video.
 // Live pricing verified from fal on 2026-07-15: $0.084/sec audio-off; $0.126/sec audio-on.
 export const FAL_KLING_V3_STANDARD_I2V_MODEL = 'fal-ai/kling-video/v3/standard/image-to-video' as const;
-export const SUPPORTED_FAL_KLING_MODELS = [FAL_KLING_V3_STANDARD_I2V_MODEL] as const;
+// fal.ai Kling O3 Standard reference-to-video (character identity + native lip-synced dialogue in
+// EN/ZH/JA/KO/ES). Live pricing verified from fal 2026-07-19: $0.084/sec audio-off; $0.112/sec audio-on.
+export const FAL_KLING_O3_REFERENCE_TO_VIDEO_MODEL = 'fal-ai/kling-video/o3/standard/reference-to-video' as const;
+export const SUPPORTED_FAL_KLING_MODELS = [
+  FAL_KLING_V3_STANDARD_I2V_MODEL,
+  FAL_KLING_O3_REFERENCE_TO_VIDEO_MODEL,
+] as const;
 export const FAL_KLING_V3_STANDARD_RATES = { audioOff: 0.084, audioOn: 0.126 } as const;
+export const FAL_KLING_O3_STANDARD_RATES = { audioOff: 0.084, audioOn: 0.112 } as const;
+
+export function falKlingRatesForModel(model: string): { audioOff: number; audioOn: number } {
+  return model === FAL_KLING_O3_REFERENCE_TO_VIDEO_MODEL
+    ? FAL_KLING_O3_STANDARD_RATES
+    : FAL_KLING_V3_STANDARD_RATES;
+}
 
 export function resolveFalKlingV3Duration(requested: number | 'auto'): number {
   if (requested === 'auto') return 5;
@@ -74,6 +87,12 @@ export function resolveFalKlingV3Duration(requested: number | 'auto'): number {
     throw new Error('duration must be an integer between 3 and 15 seconds');
   }
   return requested;
+}
+
+export function computeFalKlingCost(model: string, durationSeconds: number, audioEnabled: boolean): number {
+  const rates = falKlingRatesForModel(model);
+  const rate = audioEnabled ? rates.audioOn : rates.audioOff;
+  return Math.ceil(durationSeconds * rate * CENTS_PER_DOLLAR - 1e-9);
 }
 
 export function computeFalKlingV3Cost(durationSeconds: number, audioEnabled: boolean): number {

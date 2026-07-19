@@ -22,6 +22,7 @@ import {
   computeImageUpscaleCost,
   computeGrokImagineCost,
   computeFalKlingV3Cost,
+  computeFalKlingCost,
   resolveFalKlingV3Duration,
   computeVideoBackgroundRemovalCost,
   computeHappyHorseCost,
@@ -44,6 +45,7 @@ import {
   SUPPORTED_IMAGE_UPSCALE_MODELS,
   SUPPORTED_GROK_MODELS,
   SUPPORTED_FAL_KLING_MODELS,
+  FAL_KLING_O3_REFERENCE_TO_VIDEO_MODEL,
   SUPPORTED_HAPPYHORSE_MODELS,
   SUPPORTED_CHARACTER_REPLACE_MODELS,
   SUPPORTED_FACESWAP_MODELS,
@@ -498,6 +500,14 @@ async function prepareCost(req: Request, res: Response, next: NextFunction): Pro
     const refImages: string[] = Array.isArray(reference_images)
       ? reference_images.filter((u: unknown) => typeof u === 'string')
       : [];
+    // FIX (2026-07-19): the image branch never read reference_upload_ids, so refUploadIds was
+    // always undefined here and the dispatch params stamp below had nothing to persist — image
+    // generations lost their generation↔upload link entirely (reference_urls always null on
+    // refetch: no pullover thumbnails, Remix restored the prompt but zero references, and the
+    // transient-failure retry path rebuilt the input without its reference images).
+    const refUploadIds: string[] = Array.isArray(reference_upload_ids)
+      ? reference_upload_ids.filter((id: unknown) => typeof id === 'string')
+      : [];
     if (imageModel === FAL_IMAGE_BACKGROUND_REMOVAL_MODEL && refImages.length !== 1) {
       res.status(400).json({
         error: 'Photo background removal requires exactly one source image.',
@@ -515,6 +525,7 @@ async function prepareCost(req: Request, res: Response, next: NextFunction): Pro
       imageQuality,
       cost,
       referenceImages: refImages.length > 0 ? refImages : undefined,
+      refUploadIds: refUploadIds.length > 0 ? refUploadIds : undefined,
       // Magic Editor (09.2-08): presetResolver sets req.body.mask_url when preset_id ===
       // 'magic-editor' — its presence (not the model id) is what routes dispatch inline below.
       ...(typeof req.body?.mask_url === 'string' ? { maskUrl: req.body.mask_url } : {}),
@@ -616,35 +627,46 @@ async function prepareCost(req: Request, res: Response, next: NextFunction): Pro
   // fal.ai Kling v3 Standard image-to-video — exactly one start image, 3...15 seconds, optional
   // native audio. The start image defines framing, so fal exposes no resolution/aspect input.
   if (model && (SUPPORTED_FAL_KLING_MODELS as readonly string[]).includes(model)) {
+    const isO3 = model === FAL_KLING_O3_REFERENCE_TO_VIDEO_MODEL;
     const refImages: string[] = Array.isArray(reference_images)
       ? reference_images.filter((u: unknown) => typeof u === 'string')
       : [];
-    if (refImages.length !== 1) {
-      res.status(400).json({ error: 'Kling v3 Standard requires exactly one reference image.', code: 'INVALID_INPUT' });
+    // v3 Standard i2v takes exactly one start image; O3 reference-to-video takes 1..4 character refs.
+    if (isO3 ? (refImages.length < 1 || refImages.length > 4) : refImages.length !== 1) {
+      res.status(400).json({
+        error: isO3
+          ? 'Kling O3 requires between one and four reference images.'
+          : 'Kling v3 Standard requires exactly one reference image.',
+        code: 'INVALID_INPUT',
+      });
       return;
     }
     let durationSeconds: number;
     try {
-      durationSeconds = resolveFalKlingV3Duration(duration);
+      durationSeconds = resolveFalKlingV3Duration(duration); // shared 3..15s validation
     } catch (err) {
       res.status(400).json({ error: (err as Error).message, code: 'INVALID_DURATION' });
       return;
     }
     const audioEnabled = audio_enabled !== false;
-    const cost = computeFalKlingV3Cost(durationSeconds, audioEnabled);
+    const cost = computeFalKlingCost(model, durationSeconds, audioEnabled);
     const refUploadIds: string[] = Array.isArray(reference_upload_ids)
       ? reference_upload_ids.filter((id: unknown) => typeof id === 'string')
       : [];
-    // Composer reference chips use [Image1] tokens for Seedance. Kling receives the image in a
-    // dedicated start_image_url field, so remove that transport-only token from its text prompt.
-    const directPrompt = (prompt as string).replace(/\s*\[Image1\]\s*/g, ' ').trim();
+    // Composer reference chips use [Image1] tokens for Seedance. Kling receives images in dedicated
+    // fields (v3 start_image_url / O3 elements), so remove those transport-only tokens from the prompt.
+    const directPrompt = (prompt as string).replace(/\s*\[Image\d+\]\s*/g, ' ').trim();
+    const o3Aspect = typeof aspect_ratio === 'string' && ['16:9', '9:16', '1:1'].includes(aspect_ratio)
+      ? aspect_ratio
+      : '16:9';
     req.body.cost_credits = cost;
     req._resolved = {
       prompt: directPrompt,
       model,
       mediaType: 'video',
       durationSeconds,
-      resolution: '720p', // client display metadata only; fal's Standard endpoint has no selector
+      resolution: '720p', // client display metadata only; fal's Standard endpoints have no selector
+      ...(isO3 ? { aspectRatio: o3Aspect } : {}),
       audioEnabled,
       cost,
       referenceImages: refImages,
@@ -858,7 +880,13 @@ generationsRouter.post('/', promptModerationMiddleware, presetResolver, formatRe
             music: (req.body.__format_inputs as ResolvedFormatInputs).music,
           }
         : resolved.mediaType === 'image'
-        ? { aspect_ratio: resolved.imageAspectRatio ?? '1:1' }
+        ? {
+            aspect_ratio: resolved.imageAspectRatio ?? '1:1',
+            // Persist the generation↔upload link exactly like the video branch below —
+            // feed/detail reference_urls, Remix restore, and webhook retry all read it.
+            has_reference: (resolved.referenceImages?.length ?? 0) > 0,
+            ref_upload_ids: resolved.refUploadIds ?? [],
+          }
         : resolved.mediaType === 'avatar'
         ? { avatar_image: resolved.avatarImage, avatar_driving_video: resolved.avatarDrivingVideo, estimated_duration: resolved.durationSeconds }
         : resolved.mediaType === 'character_replace'

@@ -39,6 +39,7 @@ export function maxTier(a: Tier, b: Tier): Tier {
 export const MODEL_MIN_TIER: Record<string, Tier> = {
   'bytedance/seedance-2.0': 'pro',
   'fal-ai/kling-video/v3/standard/image-to-video': 'pro',
+  'fal-ai/kling-video/o3/standard/reference-to-video': 'pro',
   'kwaivgi/kling-v3-motion-control': 'pro',
   'alibaba/happyhorse-1.1': 'pro',
 };

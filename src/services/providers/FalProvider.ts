@@ -20,10 +20,12 @@ import {
 } from '../videoTranslation';
 
 export const FAL_KLING_V3_STANDARD_I2V_MODEL = 'fal-ai/kling-video/v3/standard/image-to-video' as const;
+export const FAL_KLING_O3_REFERENCE_TO_VIDEO_MODEL = 'fal-ai/kling-video/o3/standard/reference-to-video' as const;
 export const FAL_IMAGE_BACKGROUND_REMOVAL_MODEL = 'pixelcut/background-removal' as const;
 export const FAL_VIDEO_BACKGROUND_REMOVAL_MODEL = 'pixelcut/video-background-removal' as const;
 export const FAL_ASYNC_VIDEO_ENDPOINTS = [
   FAL_KLING_V3_STANDARD_I2V_MODEL,
+  FAL_KLING_O3_REFERENCE_TO_VIDEO_MODEL,
   FAL_VIDEO_BACKGROUND_REMOVAL_MODEL,
   FAL_VIDEO_TRANSLATE_SPEED_MODEL,
 ] as const;
@@ -152,6 +154,41 @@ export class FalProvider implements ModelProvider {
 
       return {
         providerPredictionId: encodePredictionId(FAL_KLING_V3_STANDARD_I2V_MODEL, submitted.request_id),
+      };
+    }
+
+    if (input.model === FAL_KLING_O3_REFERENCE_TO_VIDEO_MODEL) {
+      // Kling O3 reference-to-video: the reference image(s) become character `elements` (referenced
+      // in-prompt as @Element1..N). A single-image character duplicates the frontal into
+      // reference_image_urls (schema requires >=1). Native lip-synced audio in EN/ZH/JA/KO/ES when
+      // generate_audio is on; per-character voice enrollment (create-voice -> voice_id) is a follow-up.
+      const refs = (input.referenceImages ?? []).filter((u): u is string => typeof u === 'string');
+      if (refs.length < 1) throw new Error('Kling O3 reference-to-video requires at least one reference image');
+      if (!Number.isInteger(input.durationSeconds) || input.durationSeconds! < 3 || input.durationSeconds! > 15) {
+        throw new Error('Kling O3 duration must be an integer between 3 and 15 seconds');
+      }
+      const duration = String(input.durationSeconds) as
+        | '3' | '4' | '5' | '6' | '7' | '8' | '9' | '10' | '11' | '12' | '13' | '14' | '15';
+      // Cap at 4 elements (schema max is 4 total elements + image refs).
+      const elements = refs.slice(0, 4).map((url) => ({
+        frontal_image_url: url,
+        reference_image_urls: [url],
+      }));
+      const aspect = (input.aspectRatio === '9:16' || input.aspectRatio === '1:1') ? input.aspectRatio : '16:9';
+
+      const submitted = await fal.queue.submit(FAL_KLING_O3_REFERENCE_TO_VIDEO_MODEL, {
+        input: {
+          elements,
+          duration,
+          aspect_ratio: aspect,
+          generate_audio: input.audioEnabled ?? true,
+          ...(input.prompt.trim() ? { prompt: input.prompt.trim() } : {}),
+        },
+        webhookUrl,
+      });
+
+      return {
+        providerPredictionId: encodePredictionId(FAL_KLING_O3_REFERENCE_TO_VIDEO_MODEL, submitted.request_id),
       };
     }
 
