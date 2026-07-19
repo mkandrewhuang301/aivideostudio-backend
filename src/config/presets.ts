@@ -801,7 +801,7 @@ export const SERVER_PRESETS: PresetDef[] = [
   },
   {
     preset_id: 'anime-yourself',
-    title: 'Anime Yourself',
+    title: 'Anime',
     section: 'photo_effects',
     sort_order: 3,
     status: 'live',
@@ -809,7 +809,7 @@ export const SERVER_PRESETS: PresetDef[] = [
     model: 'openai/gpt-image-2-medium', // D-22: medium tier, 5 credits
     // Server-only (D-11) — never reaches the client, so the "Studio Ghibli" reference here
     // carries no trademark/App-Review exposure (that risk was about the user-facing feature
-    // NAME, which stays "Anime Yourself" — see presets-report.md item 12). GPT-Image-2 is the
+    // NAME, which stays "Anime" — see presets-report.md item 12). GPT-Image-2 is the
     // permissive model for this ("it powered the 2025 Ghibli wave" per research), so it accepts
     // the style reference directly instead of the generic "vibrant Japanese anime" wording.
     prompt_template:
