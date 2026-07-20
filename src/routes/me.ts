@@ -9,6 +9,8 @@ import { sql } from 'drizzle-orm';
 import { CONCURRENCY_LIMIT, isTier } from '../config/tiers';
 import { deleteUserAccount } from '../services/accountDeletionService';
 import { grantIfEligible } from '../services/freeCreditGrantService';
+import { getFirebaseAdmin } from '../firebase';
+import { MergeError, mergeUser } from '../services/userMergeService';
 
 export const meRouter = Router();
 
@@ -84,6 +86,65 @@ meRouter.post('/free-credits', async (req: Request, res: Response) => {
   } catch (error) {
     console.error('[me] Error processing free credits:', error);
     res.status(500).json({ error: 'Failed to process free credits' });
+  }
+});
+
+// POST /api/me/merge — fold a verified anonymous account into the authenticated account.
+meRouter.post('/merge', async (req: Request, res: Response) => {
+  if (!req.user?.dbUserId) {
+    res.status(401).json({ error: 'Not authenticated' });
+    return;
+  }
+
+  const { anonymousUid, anonymousToken } = req.body ?? {};
+  if (typeof anonymousUid !== 'string' || anonymousUid.trim().length === 0) {
+    res.status(400).json({ error: 'anonymousUid is required', code: 'MISSING_ANONYMOUS_UID' });
+    return;
+  }
+  if (typeof anonymousToken !== 'string' || anonymousToken.trim().length === 0) {
+    res.status(400).json({ error: 'anonymousToken is required', code: 'MISSING_ANONYMOUS_TOKEN' });
+    return;
+  }
+
+  const sourceUid = anonymousUid.trim();
+  let decodedToken;
+  try {
+    decodedToken = await getFirebaseAdmin().auth.verifyIdToken(anonymousToken.trim());
+  } catch {
+    res.status(401).json({ error: 'Invalid anonymous token', code: 'INVALID_ANONYMOUS_TOKEN' });
+    return;
+  }
+
+  if (decodedToken.uid !== sourceUid) {
+    res.status(401).json({ error: 'Anonymous token UID mismatch', code: 'ANONYMOUS_UID_MISMATCH' });
+    return;
+  }
+  if (decodedToken.firebase?.sign_in_provider !== 'anonymous') {
+    res.status(401).json({ error: 'Anonymous provider required', code: 'ANONYMOUS_PROVIDER_REQUIRED' });
+    return;
+  }
+
+  try {
+    const sourceRows = await db.execute(sql`
+      SELECT id FROM users WHERE firebase_uid = ${sourceUid} LIMIT 1
+    `);
+    const source = sourceRows.rows?.[0] as { id: string } | undefined;
+    if (!source) {
+      res.status(404).json({ error: 'Anonymous user not found', code: 'ANONYMOUS_USER_NOT_FOUND' });
+      return;
+    }
+
+    await mergeUser(source.id, req.user.dbUserId, sourceUid);
+    res.status(204).send();
+  } catch (error) {
+    if (error instanceof MergeError) {
+      const status = error.code === 'ALREADY_MERGED' || error.code === 'SAME_ACCOUNT' ? 409 : 500;
+      res.status(status).json({ error: 'Account merge failed', code: error.code });
+      return;
+    }
+
+    console.error('[me] Error merging anonymous account:', error);
+    res.status(500).json({ error: 'Failed to merge account' });
   }
 });
 

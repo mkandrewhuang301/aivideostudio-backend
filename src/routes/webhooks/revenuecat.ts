@@ -116,12 +116,21 @@ revenueCatWebhookRouter.post('/', async (req: Request, res: Response) => {
       return;
     }
 
-    // Step 3: Look up user by Firebase UID
+    // Step 3: Look up user by Firebase UID. If RevenueCat delivers an event
+    // after an anonymous account was merged, resolve the retained source UID
+    // through user_merges so credits land on the authenticated target.
     // Pitfall 3: Webhook may arrive before user row exists — return 200, let RC retry naturally.
     // BUT: auth middleware already upserts the user row on every authenticated request.
     // In practice, the purchase is initiated after sign-in, so the user row exists.
     const userRows = await db.execute(sql`
-      SELECT id, entitlement_level FROM users WHERE firebase_uid = ${firebaseUid}
+      SELECT
+        COALESCE(merge_target.id, source.id) AS id,
+        COALESCE(merge_target.entitlement_level, source.entitlement_level) AS entitlement_level
+      FROM users AS source
+      LEFT JOIN user_merges AS account_merge ON account_merge.from_user_id = source.id
+      LEFT JOIN users AS merge_target ON merge_target.id = account_merge.to_user_id
+      WHERE source.firebase_uid = ${firebaseUid}
+      LIMIT 1
     `);
 
     if (!userRows.rows || userRows.rows.length === 0) {

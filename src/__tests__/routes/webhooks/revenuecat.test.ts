@@ -60,6 +60,17 @@ const WRONG_AUTH = 'Bearer wrong-secret';
 // A DB user row returned on lookup
 const USER_ROW = { id: 'db-user-uuid-1', entitlement_level: 'basic' };
 
+function extractSql(drizzleQuery: unknown): string {
+  const query = drizzleQuery as { queryChunks?: Array<{ value?: string[] } | unknown> };
+  return query.queryChunks?.map((chunk) => {
+    if (chunk && typeof chunk === 'object' && 'value' in chunk) {
+      const value = (chunk as { value?: string[] }).value;
+      return Array.isArray(value) ? value.join('') : '';
+    }
+    return '';
+  }).join('') ?? String(drizzleQuery);
+}
+
 // Helper: build a minimal RevenueCat event payload
 function makePayload(
   type: string,
@@ -190,6 +201,27 @@ describe('INITIAL_PURCHASE event (PAY-01)', () => {
 // ─── NON_RENEWING_PURCHASE (top-up) ─────────────────────────────────────────
 
 describe('NON_RENEWING_PURCHASE event (top-up)', () => {
+  it('routes a delayed anonymous top-up to the merged target account', async () => {
+    const mergedTarget = { id: 'merged-target-user-id', entitlement_level: 'basic' };
+    (db.execute as jest.Mock).mockResolvedValueOnce({ rows: [mergedTarget] });
+
+    await request(app)
+      .post('/webhooks/revenuecat')
+      .set('Authorization', VALID_AUTH)
+      .send(makePayload('NON_RENEWING_PURCHASE', 'com.fantasiaai.topup_9_99', 'txn-delayed-anon-topup'));
+
+    expect(grantCredits).toHaveBeenCalledWith(
+      mergedTarget.id,
+      500,
+      'topup_grant',
+      'txn-delayed-anon-topup',
+      expect.any(Date),
+    );
+    const lookupSql = extractSql((db.execute as jest.Mock).mock.calls[0][0]);
+    expect(lookupSql).toMatch(/LEFT JOIN user_merges/);
+    expect(lookupSql).toMatch(/account_merge\.to_user_id/);
+  });
+
   it('still grants a top-up and warns when the user has no subscription entitlement', async () => {
     const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
     (db.execute as jest.Mock).mockResolvedValueOnce({
