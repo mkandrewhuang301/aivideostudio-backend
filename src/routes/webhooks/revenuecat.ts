@@ -121,7 +121,7 @@ revenueCatWebhookRouter.post('/', async (req: Request, res: Response) => {
     // BUT: auth middleware already upserts the user row on every authenticated request.
     // In practice, the purchase is initiated after sign-in, so the user row exists.
     const userRows = await db.execute(sql`
-      SELECT id FROM users WHERE firebase_uid = ${firebaseUid}
+      SELECT id, entitlement_level FROM users WHERE firebase_uid = ${firebaseUid}
     `);
 
     if (!userRows.rows || userRows.rows.length === 0) {
@@ -132,7 +132,8 @@ revenueCatWebhookRouter.post('/', async (req: Request, res: Response) => {
       return;
     }
 
-    const dbUserId = (userRows.rows[0] as { id: string }).id;
+    const userRow = userRows.rows[0] as { id: string; entitlement_level: string | null };
+    const dbUserId = userRow.id;
 
     // Step 4: Handle event types
     if (eventType === 'INITIAL_PURCHASE' || eventType === 'RENEWAL') {
@@ -188,6 +189,23 @@ revenueCatWebhookRouter.post('/', async (req: Request, res: Response) => {
 
       const expiresAt = new Date();
       expiresAt.setDate(expiresAt.getDate() + 90); // D-08: 90-day expiry
+
+      if (!userRow.entitlement_level) {
+        console.warn(
+          '[webhook/revenuecat] NON_RENEWING_PURCHASE from non-subscriber user=',
+          dbUserId,
+          'product=',
+          productId,
+          '— granting anyway per D-13',
+        );
+      } else {
+        console.log(
+          '[webhook/revenuecat] NON_RENEWING_PURCHASE granted to subscriber user=',
+          dbUserId,
+          'product=',
+          productId,
+        );
+      }
 
       await grantCredits(dbUserId, creditsToGrant, 'topup_grant', transactionId, expiresAt);
 
