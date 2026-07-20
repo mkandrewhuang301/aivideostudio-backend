@@ -17,6 +17,7 @@
     "upload:preset-music": "tsx src/scripts/uploadPresetMusic.ts",
     "r2:configure-quarantine-lifecycle": "tsx src/scripts/configureQuarantineLifecycle.ts",
     "test:delete-account": "tsx src/scripts/test-delete-account.ts",
+    "recover:gmail-alias": "tsx src/scripts/consolidateVerifiedGmailAlias.ts",
     "eslint": "eslint src --ext .ts",
     "test": "jest --passWithNoTests"
   },
