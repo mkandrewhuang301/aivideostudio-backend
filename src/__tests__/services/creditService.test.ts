@@ -192,6 +192,26 @@ describe('getUserWithBalance', () => {
     });
   });
 
+  it('includes merged source ledgers when calculating top-up balance and expiry', async () => {
+    (mockDb.execute as jest.Mock).mockResolvedValueOnce({
+      rows: [{
+        credits_balance: 300,
+        subscription_allotment: 0,
+        entitlement_level: 'basic',
+        active_topup_balance: '200',
+        expired_topups: [],
+      }],
+    });
+
+    await getUserWithBalance('user-uuid');
+
+    const sqlText = extractSql((mockDb.execute as jest.Mock).mock.calls[0][0]);
+    expect(sqlText).toMatch(/effective_ledger_users/);
+    expect(sqlText).toMatch(/FROM user_merges/);
+    expect(sqlText).toMatch(/from_user_id/);
+    expect(sqlText).toMatch(/to_user_id/);
+  });
+
   it('expires stale topup_grant rows, then re-fetches once before returning balance', async () => {
     // 1st execute: combined query — one expired topup present
     (mockDb.execute as jest.Mock).mockResolvedValueOnce({

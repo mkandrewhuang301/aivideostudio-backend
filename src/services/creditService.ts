@@ -149,20 +149,30 @@ interface CombinedBalanceRow {
 // neon-http driver, no pooled connection). The common case — no expired top-ups — now takes 1.
 // Only when expired top-ups exist do we fall back to the clawback loop + a second combined query.
 const COMBINED_BALANCE_QUERY = (userId: string) => sql`
+  WITH effective_ledger_users AS (
+    SELECT ${userId}::uuid AS id
+    UNION ALL
+    SELECT from_user_id
+    FROM user_merges
+    WHERE to_user_id = ${userId}::uuid
+  )
   SELECT u.credits_balance, u.subscription_allotment, u.entitlement_level,
     COALESCE((
       SELECT SUM(amount) FROM credit_transactions
-      WHERE user_id = u.id AND type = 'topup_grant'
+      WHERE user_id IN (SELECT id FROM effective_ledger_users)
+        AND type = 'topup_grant'
         AND (expires_at IS NULL OR expires_at > now())
     ), 0) AS active_topup_balance,
     COALESCE((
       SELECT json_agg(json_build_object('id', ct.id, 'amount', ct.amount))
       FROM credit_transactions ct
-      WHERE ct.user_id = u.id AND ct.type = 'topup_grant'
+      WHERE ct.user_id IN (SELECT id FROM effective_ledger_users)
+        AND ct.type = 'topup_grant'
         AND ct.expires_at IS NOT NULL AND ct.expires_at < now()
         AND NOT EXISTS (
           SELECT 1 FROM credit_transactions cb
-          WHERE cb.user_id = u.id AND cb.type = 'refund_clawback'
+          WHERE cb.user_id IN (SELECT id FROM effective_ledger_users)
+            AND cb.type = 'refund_clawback'
             AND cb.reference_id = ct.id::text
         )
     ), '[]'::json) AS expired_topups
@@ -190,7 +200,9 @@ function toBalance(row: CombinedBalanceRow): UserBalance {
  * Before returning, expires any stale topup_grant rows (expires_at < now()).
  * Stale rows are expired by inserting a refund_clawback row of opposite amount and
  * decrementing credits_balance (clamped to 0 — never goes negative).
- * Computes active_topup_balance from unexpired topup_grant rows after expiry.
+ * Computes active_topup_balance from unexpired topup_grant rows after expiry. For
+ * merged accounts, the append-only source ledger remains effective through the
+ * user_merges audit row so transferred top-ups retain their original expiry.
  */
 export async function getUserWithBalance(userId: string): Promise<UserBalance> {
   const result = await db.execute(COMBINED_BALANCE_QUERY(userId));

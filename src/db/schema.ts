@@ -23,6 +23,7 @@ export const creditTransactionTypeEnum = pgEnum('credit_transaction_type', [
   'generation_deduct',
   'generation_refund',
   'refund_clawback',
+  'merge_transfer',
 ]);
 
 export const freeCreditsStateEnum = pgEnum('free_credits_state', [
@@ -104,6 +105,7 @@ export const userMerges = pgTable(
       .default(sql`now()`),
   },
   (table) => ({
+    fromUserUniqueIdx: uniqueIndex('user_merges_from_user_id_unique_idx').on(table.from_user_id),
     fromToUniqueIdx: uniqueIndex('user_merges_from_user_id_to_user_id_unique_idx').on(
       table.from_user_id,
       table.to_user_id,
