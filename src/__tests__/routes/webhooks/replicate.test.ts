@@ -11,7 +11,7 @@
 jest.mock('../../../config', () => ({
   config: {
     replicateWebhookSecret: 'whsec_test-secret',
-    hiveScanEnabled: true,
+    hiveScanRealFacePaths: true,
     databaseUrl: 'mock://db',
     redisUrl: 'redis://localhost',
     r2AccountId: 'mock',
@@ -68,6 +68,9 @@ jest.mock('../../../services/generationService', () => ({
 jest.mock('../../../services/hiveService', () => ({
   scanForCsam: jest.fn(),
 }));
+jest.mock('../../../services/moderationEnforcementService', () => ({
+  enforceFlaggedGeneration: jest.fn(),
+}));
 
 jest.mock('../../../services/creditService', () => ({
   refundCredits: jest.fn(),
@@ -108,6 +111,7 @@ import { sendGenerationComplete } from '../../../services/apnsService';
 import { ReplicateProvider } from '../../../services/providers/ReplicateProvider';
 import { db } from '../../../db/client';
 import { r2 } from '../../../storage/r2';
+import { enforceFlaggedGeneration } from '../../../services/moderationEnforcementService';
 import { replicateWebhookRouter } from '../../../routes/webhooks/replicate';
 
 const MockedReplicateProvider = ReplicateProvider as jest.MockedClass<typeof ReplicateProvider>;
@@ -185,6 +189,7 @@ describe('replicateWebhookRouter', () => {
     expect(res.body).toEqual({ received: true });
     expect(archiveToR2).toHaveBeenCalledWith('https://replicate.delivery/abc.mp4', 'gen-1', 'video/mp4');
     expect(markCompleted).toHaveBeenCalledWith('gen-1', 'generations/gen-1.mp4');
+    expect(scanForCsam).not.toHaveBeenCalled();
 
     const archiveOrder = (archiveToR2 as jest.Mock).mock.invocationCallOrder[0];
     const completeOrder = (markCompleted as jest.Mock).mock.invocationCallOrder[0];
@@ -295,21 +300,27 @@ describe('replicateWebhookRouter', () => {
     expect(res.body).toEqual({ received: true });
   });
 
-  it('quarantines and refunds when Hive flags the video — never marks completed or sends push', async () => {
+  it('routes a flagged real-face output through two-tier enforcement', async () => {
     (validateWebhook as jest.Mock).mockResolvedValue(true);
     (getGenerationByPredictionId as jest.Mock).mockResolvedValue({
       id: 'gen-1',
       user_id: 'u1',
       status: 'processing',
       cost_credits: 45,
+      has_real_face_input: true,
     });
-    (scanForCsam as jest.Mock).mockResolvedValue({ flagged: true });
+    const result = { flagged: true, tier: 'high', childScore: 0.95, sexualScore: 0.9, hashMatched: false };
+    (scanForCsam as jest.Mock).mockResolvedValue(result);
 
     const res = await post({ id: 'pred_csam', status: 'succeeded', output: ['https://replicate.delivery/flagged.mp4'] });
 
     expect(res.status).toBe(200);
-    expect(markQuarantined).toHaveBeenCalledWith('gen-1');
-    expect(refundCredits).toHaveBeenCalledWith('u1', 45, 'csam-quarantine-pred_csam');
+    expect(enforceFlaggedGeneration).toHaveBeenCalledWith({
+      generationId: 'gen-1',
+      r2Key: 'generations/gen-1.mp4',
+      userId: 'u1',
+      costCredits: 45,
+    }, result);
     expect(markCompleted).not.toHaveBeenCalled();
     expect(sendGenerationComplete).not.toHaveBeenCalled();
   });
@@ -321,6 +332,7 @@ describe('replicateWebhookRouter', () => {
       user_id: 'u1',
       status: 'processing',
       cost_credits: 45,
+      has_real_face_input: true,
     });
     (scanForCsam as jest.Mock).mockRejectedValue(new Error('Hive timeout'));
 
@@ -347,6 +359,7 @@ describe('replicateWebhookRouter', () => {
       status: 'processing',
       cost_credits: 5,
       media_type: 'image',
+      has_real_face_input: true,
     });
     (archiveToR2 as jest.Mock).mockResolvedValue('generations/gen-img-err.jpg');
     (scanForCsam as jest.Mock).mockRejectedValue(new Error('Hive timeout'));

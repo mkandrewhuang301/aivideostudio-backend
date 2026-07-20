@@ -14,14 +14,15 @@ import { Queue, Worker, Job } from 'bullmq';
 import { execFile } from 'child_process';
 import { config } from '../config';
 import {
+  getOutputModerationContext,
   markCompleted,
   markFailed,
-  markQuarantined,
   mergeGenerationParams,
 } from '../services/generationService';
 import { refundCredits } from '../services/creditService';
 import { sendGenerationComplete } from '../services/apnsService';
 import { scanForCsam } from '../services/hiveService';
+import { enforceFlaggedGeneration } from '../services/moderationEnforcementService';
 import { db } from '../db/client';
 import { sql } from 'drizzle-orm';
 import { runFfmpegOp } from './ffmpegProcessor';
@@ -171,19 +172,18 @@ export async function processFfmpegJob(data: FfmpegJobData): Promise<void> {
 
   const { r2Key, masterR2Key } = await runFfmpegOp(data);
 
-  // Every ffmpeg output is a newly assembled delivery artifact. It must pass the same final
-  // CSAM boundary as webhook and OpenAI outputs before the row becomes client-visible.
-  if (config.hiveScanEnabled) {
+  // Policy v2: only artifacts derived from a server-classified real-face path cross the
+  // blocking output-scan boundary. This deliberately leaves Explainer and Edit Studio exports
+  // unblocked, while still covering final faceswap/character-replace post-process artifacts.
+  const moderationContext = await getOutputModerationContext(generationId);
+  if (config.hiveScanRealFacePaths && moderationContext?.hasRealFaceInput) {
     try {
-      const { flagged } = await scanForCsam(r2Key);
-      if (flagged) {
-        await markQuarantined(generationId);
-        await refundCredits(
-          userId,
-          data.costCredits,
-          `csam-quarantine-ffmpeg-${generationId}`,
+      const result = await scanForCsam(r2Key);
+      if (result.flagged) {
+        await enforceFlaggedGeneration(
+          { generationId, r2Key, userId, costCredits: data.costCredits },
+          result,
         );
-        console.warn(`[ffmpeg-postprocess] CSAM flagged: generation ${generationId} quarantined`);
         return;
       }
     } catch (hiveErr) {

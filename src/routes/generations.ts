@@ -73,6 +73,7 @@ import { referenceUploads } from '../db/schema';
 import { eq, inArray, and, sql } from 'drizzle-orm';
 import type { FormatDef, FormatDurationTier } from '../config/formats';
 import { probeVideoFrameCount } from '../services/mediaProbe';
+import { isRealFaceGenerationPath } from '../config/faceInputPresets';
 
 export const generationsRouter = Router();
 
@@ -933,6 +934,7 @@ generationsRouter.post('/', promptModerationMiddleware, presetResolver, formatRe
       ? false
       : Boolean(req.body?.model_explicitly_picked);
     const rowParams = { ...params, ...presetParams, model_explicitly_picked: modelExplicitlyPicked };
+    const hasRealFaceInput = isRealFaceGenerationPath(req._preset?.preset_id, resolved.mediaType);
 
     const { id: generationId } = await createGeneration({
       user_id: req.user.dbUserId,
@@ -942,6 +944,7 @@ generationsRouter.post('/', promptModerationMiddleware, presetResolver, formatRe
       params: rowParams,
       cost_credits: resolved.cost,
       media_type: resolved.mediaType,
+      has_real_face_input: hasRealFaceInput,
     });
 
     if (resolved.mediaType === 'format') {

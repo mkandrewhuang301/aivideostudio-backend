@@ -1,11 +1,13 @@
 const mockExecute = jest.fn();
 const mockBatch = jest.fn();
 const mockDelete = jest.fn();
+const mockUpdate = jest.fn();
 jest.mock('../../db/client', () => ({
   db: {
     execute: mockExecute,
     batch: mockBatch,
     delete: mockDelete,
+    update: mockUpdate,
   },
 }));
 
@@ -72,6 +74,11 @@ beforeEach(() => {
   mockDelete.mockImplementation((table: unknown) => ({
     where: jest.fn().mockReturnValue({ tableName: tableNames.get(table) }),
   }));
+  mockUpdate.mockImplementation((table: unknown) => ({
+    set: jest.fn((values: unknown) => ({
+      where: jest.fn().mockReturnValue({ tableName: `${tableNames.get(table)}_legal_hold`, values }),
+    })),
+  }));
 });
 
 it('deletes every owned R2 key, batches DB deletes in FK order, then deletes Firebase and evicts cache', async () => {
@@ -86,7 +93,7 @@ it('deletes every owned R2 key, batches DB deletes in FK order, then deletes Fir
     { Bucket: 'test-bucket', Key: 'projects/user/audio/audio.mp3' },
   ]);
 
-  const collectionSql = JSON.stringify(mockExecute.mock.calls[0][0]);
+  const collectionSql = JSON.stringify(mockExecute.mock.calls[1][0]);
   for (const source of ['generations', 'reference_uploads', 'projects', 'project_clips', 'project_audio_clips']) {
     expect(collectionSql).toContain(source);
   }
@@ -110,6 +117,41 @@ it('deletes every owned R2 key, batches DB deletes in FK order, then deletes Fir
   expect(mockFirebaseDeleteUser.mock.invocationCallOrder[0]).toBeLessThan(
     mockEvictAuthCache.mock.invocationCallOrder[0],
   );
+});
+
+it('pseudonymizes the user and preserves CyberTipline-held generation media on account deletion', async () => {
+  mockExecute
+    .mockResolvedValueOnce({ rows: [{ has_legal_hold: true }] })
+    .mockResolvedValueOnce({ rows: [{ r2_key: 'uploads/user/reference.jpg' }] });
+
+  await deleteUserAccount('11111111-1111-4111-8111-111111111111', 'firebase-user-1');
+
+  const collectionSql = JSON.stringify(mockExecute.mock.calls[1][0]);
+  expect(collectionSql).toContain('ncmec_report_id');
+  expect(mockR2Send).toHaveBeenCalledTimes(1);
+  expect((mockR2Send.mock.calls[0][0] as DeleteObjectCommand).input.Key)
+    .toBe('uploads/user/reference.jpg');
+
+  const batch = mockBatch.mock.calls[0][0] as Array<{ tableName: string; values?: Record<string, unknown> }>;
+  expect(batch.map((query) => query.tableName)).toEqual([
+    'project_caption_words',
+    'project_caption_cues',
+    'project_audio_clips',
+    'project_text_overlays',
+    'project_clips',
+    'projects',
+    'reports',
+    'generations',
+    'reference_uploads',
+    'credit_transactions',
+    'users_legal_hold',
+  ]);
+  expect(batch.at(-1)?.values).toEqual(expect.objectContaining({
+    email: null,
+    credits_balance: 0,
+    banned: true,
+  }));
+  expect(mockFirebaseDeleteUser).toHaveBeenCalledWith('firebase-user-1');
 });
 
 it('continues through DB, Firebase, and cache deletion when an R2 object delete fails', async () => {

@@ -28,6 +28,9 @@ jest.mock('../../services/generationService', () => ({
   markFailed: jest.fn(),
   markQuarantined: jest.fn(),
 }));
+jest.mock('../../services/moderationEnforcementService', () => ({
+  enforceFlaggedGeneration: jest.fn(),
+}));
 jest.mock('../../services/creditService', () => ({ refundCredits: jest.fn() }));
 jest.mock('../../services/apnsService', () => ({ sendGenerationComplete: jest.fn() }));
 jest.mock('../../db/client', () => ({ db: { execute: jest.fn() } }));
@@ -37,6 +40,7 @@ import { markCompleted, markFailed, markQuarantined } from '../../services/gener
 import { refundCredits } from '../../services/creditService';
 import { sendGenerationComplete } from '../../services/apnsService';
 import { db } from '../../db/client';
+import { enforceFlaggedGeneration } from '../../services/moderationEnforcementService';
 import { processHiveScan, handleScanFinalFailure, HIVE_SCAN_ATTEMPTS } from '../../queue/hiveScanWorker';
 
 const JOB_DATA = {
@@ -78,15 +82,18 @@ describe('processHiveScan', () => {
     expect(sendGenerationComplete).toHaveBeenCalledWith('token-abc', JOB_DATA.generationId, 'image');
   });
 
-  it('quarantines and refunds when scan flags the video — never marks completed', async () => {
-    (scanForCsam as jest.Mock).mockResolvedValue({ flagged: true });
+  it('routes a flagged retry through two-tier enforcement — never marks completed', async () => {
+    const result = { flagged: true, tier: 'low', childScore: 0.8, sexualScore: 0.7, hashMatched: false };
+    (scanForCsam as jest.Mock).mockResolvedValue(result);
 
     await processHiveScan(JOB_DATA);
 
-    expect(markQuarantined).toHaveBeenCalledWith(JOB_DATA.generationId);
-    expect(refundCredits).toHaveBeenCalledWith(
-      JOB_DATA.userId, JOB_DATA.costCredits, `csam-quarantine-${JOB_DATA.generationId}`,
-    );
+    expect(enforceFlaggedGeneration).toHaveBeenCalledWith({
+      generationId: JOB_DATA.generationId,
+      r2Key: JOB_DATA.r2Key,
+      userId: JOB_DATA.userId,
+      costCredits: JOB_DATA.costCredits,
+    }, result);
     expect(markCompleted).not.toHaveBeenCalled();
     expect(sendGenerationComplete).not.toHaveBeenCalled();
   });

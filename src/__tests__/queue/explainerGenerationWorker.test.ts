@@ -5,7 +5,7 @@ jest.mock('bullmq', () => ({
 
 jest.mock('../../config', () => ({
   config: {
-    hiveScanEnabled: true,
+    hiveScanRealFacePaths: true,
     nodeEnv: 'test',
   },
 }));
@@ -361,20 +361,12 @@ describe('processExplainerGeneration', () => {
     expect(ffmpegAdd).not.toHaveBeenCalled();
   });
 
-  it('scans only each winning still before animation and hard-fails a positive scan', async () => {
+  it('does not output-scan Explainer stills and proceeds directly to animation', async () => {
     await processExplainerGeneration(JOB);
-    expect(scanForCsam).toHaveBeenCalledTimes(2);
-    expect(scanForCsam).toHaveBeenNthCalledWith(1, candidateKey(0, 1));
-    expect(scanForCsam).toHaveBeenNthCalledWith(2, candidateKey(1, 1));
-    expect((scanForCsam as jest.Mock).mock.invocationCallOrder[0]).toBeLessThan(
-      (animateScene as jest.Mock).mock.invocationCallOrder[0],
-    );
-
-    resetHappyPath();
-    (scanForCsam as jest.Mock).mockResolvedValueOnce({ flagged: true });
-    await processExplainerGeneration(JOB);
-    expect(animateScene).not.toHaveBeenCalled();
-    expect(refundCredits).toHaveBeenCalledWith(JOB.userId, JOB.cost, `explainer-failure-${JOB.generationId}`);
+    expect(scanForCsam).not.toHaveBeenCalled();
+    expect(animateScene).toHaveBeenCalledTimes(JOB.sceneCount);
+    expect(ffmpegAdd).toHaveBeenCalledTimes(1);
+    expect(refundCredits).not.toHaveBeenCalled();
   });
 
   it('forwards the non-default per-request aspect ratio to every animate call', async () => {

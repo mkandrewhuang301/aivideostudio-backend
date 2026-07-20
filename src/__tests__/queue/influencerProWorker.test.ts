@@ -22,7 +22,7 @@ jest.mock('../../config', () => ({
     hiveApiKey: 'mock-hive-key', openaiApiKey: 'mock-openai-key',
     publicBaseUrl: 'https://mock.example.com',
     port: 3000, nodeEnv: 'test',
-    hiveScanEnabled: true,
+    hiveScanRealFacePaths: true,
   },
   getReplicateWebhookUrl: jest.fn(() => 'https://mock.example.com/webhooks/replicate'),
 }));

@@ -9,10 +9,11 @@
 import { Queue, Worker } from 'bullmq';
 import { db } from '../db/client';
 import { sql } from 'drizzle-orm';
-import { markRefunded, markCompleted, markQuarantined } from '../services/generationService';
+import { markRefunded, markCompleted } from '../services/generationService';
 import { refundCredits } from '../services/creditService';
 import { archiveToR2 } from '../services/archivalService';
 import { scanForCsam } from '../services/hiveService';
+import { enforceFlaggedGeneration } from '../services/moderationEnforcementService';
 import { ReplicateProvider } from '../services/providers/ReplicateProvider';
 import {
   FalProvider,
@@ -20,6 +21,7 @@ import {
   isFalAsyncVideoModel,
 } from '../services/providers/FalProvider';
 import { config } from '../config';
+import { hiveScanQueue } from './hiveScanWorker';
 
 const QUEUE_NAME = 'generation-reaper';
 
@@ -44,6 +46,7 @@ interface ReapableRow {
   cost_credits: number;
   replicate_prediction_id: string | null;
   model: string;
+  has_real_face_input: boolean;
 }
 
 export async function reapOrphanedJobs(): Promise<void> {
@@ -67,7 +70,7 @@ export async function reapOrphanedJobs(): Promise<void> {
 
 export async function reapStalledJobs(): Promise<void> {
   const result = await db.execute(sql`
-    SELECT id, user_id, cost_credits, replicate_prediction_id, model
+    SELECT id, user_id, cost_credits, replicate_prediction_id, model, has_real_face_input
     FROM generations
     WHERE status = 'processing' AND created_at < now() - interval '30 minutes'
       -- Explainer's sequential TTS/stills/vision/Omni stages can exceed 30 minutes; non-format
@@ -92,25 +95,35 @@ export async function reapStalledJobs(): Promise<void> {
           isFalAsyncVideoModel(row.model) ? falVideoOutputContentType(row.model) : 'video/mp4',
         );
 
-        let hiveFlagged = false;
-        if (config.hiveScanEnabled) {
+        if (config.hiveScanRealFacePaths && row.has_real_face_input) {
           try {
-            const { flagged } = await scanForCsam(r2Key);
-            hiveFlagged = flagged;
+            const result = await scanForCsam(r2Key);
+            if (result.flagged) {
+              await enforceFlaggedGeneration(
+                {
+                  generationId: row.id,
+                  r2Key,
+                  userId: row.user_id,
+                  costCredits: row.cost_credits,
+                },
+                result,
+              );
+              continue;
+            }
           } catch (hiveErr) {
-            console.error(`[reaper] Hive scan failed for ${row.id} — quarantining:`, hiveErr);
-            hiveFlagged = true;
+            console.error(`[reaper] Hive scan failed for ${row.id} — queuing retry:`, hiveErr);
+            await hiveScanQueue.add('scan', {
+              generationId: row.id,
+              r2Key,
+              userId: row.user_id,
+              costCredits: row.cost_credits,
+              mediaType: 'video',
+            });
+            continue;
           }
         }
-
-        if (hiveFlagged) {
-          await markQuarantined(row.id);
-          await refundCredits(row.user_id, row.cost_credits, `csam-quarantine-reaper-${row.id}`);
-          console.warn(`[reaper] Stalled generation ${row.id} quarantined after CSAM scan`);
-        } else {
-          await markCompleted(row.id, r2Key);
-          console.log(`[reaper] Stalled generation ${row.id} reconciled as completed`);
-        }
+        await markCompleted(row.id, r2Key);
+        console.log(`[reaper] Stalled generation ${row.id} reconciled as completed`);
       } else if (prediction.status === 'failed' || prediction.status === 'canceled') {
         const refunded = await markRefunded(row.id);
         if (refunded) await refundCredits(row.user_id, row.cost_credits, row.replicate_prediction_id);

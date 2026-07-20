@@ -15,6 +15,7 @@
     "smoke:r2": "tsx src/storage/smokeTest.ts",
     "upload:preset-art": "tsx src/scripts/uploadPresetArt.ts",
     "upload:preset-music": "tsx src/scripts/uploadPresetMusic.ts",
+    "r2:configure-quarantine-lifecycle": "tsx src/scripts/configureQuarantineLifecycle.ts",
     "test:delete-account": "tsx src/scripts/test-delete-account.ts",
     "eslint": "eslint src --ext .ts",
     "test": "jest --passWithNoTests"

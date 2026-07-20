@@ -13,9 +13,15 @@
 import { Worker, Job } from 'bullmq';
 import { config } from '../config';
 import { generateFaceswap, generateImageEditWithMask } from '../services/openaiImageService';
-import { markCompleted, markFailed, markQuarantined, classifyFailureReason } from '../services/generationService';
+import {
+  classifyFailureReason,
+  getOutputModerationContext,
+  markCompleted,
+  markFailed,
+} from '../services/generationService';
 import { refundCredits } from '../services/creditService';
 import { scanForCsam } from '../services/hiveService';
+import { enforceFlaggedGeneration } from '../services/moderationEnforcementService';
 import { hiveScanQueue } from './hiveScanWorker';
 import type { OpenAIGenerationJob } from './openaiGenerationQueue';
 
@@ -45,22 +51,19 @@ export async function processOpenAIGeneration(data: OpenAIGenerationJob): Promis
     return;
   }
 
-  // CSAM scan (only when enabled) — mirrors the webhook success path (routes/webhooks/replicate.ts).
-  if (config.hiveScanEnabled) {
+  const moderationContext = await getOutputModerationContext(generationId);
+  if (config.hiveScanRealFacePaths && moderationContext?.hasRealFaceInput) {
     try {
-      const { flagged } = await scanForCsam(r2Key);
-      if (flagged) {
-        await markQuarantined(generationId);
-        await refundCredits(userId, cost, `csam-quarantine-openai-${generationId}`);
-        console.warn(`[openai-generation] CSAM flagged: generation ${generationId} quarantined`);
+      const result = await scanForCsam(r2Key);
+      if (result.flagged) {
+        await enforceFlaggedGeneration(
+          { generationId, r2Key, userId, costCredits: cost },
+          result,
+        );
         return;
       }
     } catch (hiveErr) {
-      // FIX (2026-07-12): this used to mark the row completed on any Hive error, shipping
-      // unscanned content — CLAUDE.md Rule 4 violation. hiveScanQueue (hiveScanWorker.ts) is a
-      // generic, media-type-agnostic retry queue that already exists for exactly this — the
-      // Replicate webhook path (webhooks/replicate.ts) already routes Hive errors through it.
-      // Mirror that here instead of completing without a scan.
+      // A required real-face-path scan is fail-closed and retried out of band.
       console.error(`[openai-generation] Hive scan error for ${generationId} — queuing retry:`, hiveErr);
       await hiveScanQueue.add('scan', {
         generationId,

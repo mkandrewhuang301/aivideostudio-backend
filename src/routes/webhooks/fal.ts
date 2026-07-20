@@ -20,7 +20,6 @@ import {
   getGenerationByPredictionId,
   markCompleted,
   markFailed,
-  markQuarantined,
   type GenerationByPredictionRow,
 } from '../../services/generationService';
 import { refundCredits } from '../../services/creditService';
@@ -33,6 +32,8 @@ import {
 } from '../../services/providers/FalProvider';
 import { db } from '../../db/client';
 import { sql } from 'drizzle-orm';
+import { hiveScanQueue } from '../../queue/hiveScanWorker';
+import { enforceFlaggedGeneration } from '../../services/moderationEnforcementService';
 
 export const falWebhookRouter = Router();
 
@@ -105,22 +106,28 @@ falWebhookRouter.post('/', async (req: Request, res: Response) => {
         fetchDeviceToken(generation.user_id),
       ]);
 
-      if (config.hiveScanEnabled) {
+      if (config.hiveScanRealFacePaths && generation.has_real_face_input) {
         try {
-          const { flagged } = await scanForCsam(r2Key);
-          if (flagged) {
-            await markQuarantined(generation.id);
-            await refundCredits(generation.user_id, generation.cost_credits, `csam-quarantine-${payload.request_id}`);
-            console.warn(`[webhook/fal] CSAM flagged: generation ${generation.id} quarantined, credits refunded.`);
+          const result = await scanForCsam(r2Key);
+          if (result.flagged) {
+            await enforceFlaggedGeneration({
+              generationId: generation.id,
+              r2Key,
+              userId: generation.user_id,
+              costCredits: generation.cost_credits,
+            }, result);
             res.status(200).json({ received: true });
             return;
           }
         } catch (hiveError) {
-          // Unlike webhooks/replicate.ts, no retry-queue exists for this generation type yet —
-          // fail safe (quarantine + refund) rather than risk serving an unscanned video.
-          console.error('[webhook/fal] Hive scan error — quarantining fail-safe:', hiveError);
-          await markQuarantined(generation.id);
-          await refundCredits(generation.user_id, generation.cost_credits, `csam-scan-error-${payload.request_id}`);
+          console.error('[webhook/fal] Hive scan error — queuing blocking retry:', hiveError);
+          await hiveScanQueue.add('scan', {
+            generationId: generation.id,
+            r2Key,
+            userId: generation.user_id,
+            costCredits: generation.cost_credits,
+            mediaType: 'video',
+          });
           res.status(200).json({ received: true });
           return;
         }

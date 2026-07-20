@@ -27,9 +27,8 @@ jest.mock('../../config', () => ({
     openaiApiKey: 'mock-openai-key',
     port: 3000,
     nodeEnv: 'test',
-    // 09.2-08: real default is `process.env.HIVE_SCAN_ENABLED !== 'false'` (true) — set
-    // explicitly here so the Magic Editor inline CSAM-scan branch is exercised in this suite.
-    hiveScanEnabled: true,
+    // Moderation policy v2 uses the scoped real-face-path switch.
+    hiveScanRealFacePaths: true,
   },
   getReplicateWebhookUrl: jest.fn(() => 'https://mock.example.com/webhooks/replicate'),
   getFalWebhookUrl: jest.fn(() => 'https://mock.example.com/webhooks/fal'),
@@ -68,6 +67,7 @@ jest.mock('../../services/generationService', () => ({
   computeImageUpscaleCost: jest.fn(),
   computeGrokImagineCost: jest.fn(),
   computeFalKlingV3Cost: jest.fn(),
+  computeFalKlingCost: jest.fn(),
   computeVideoBackgroundRemovalCost: jest.fn(),
   resolveFalKlingV3Duration: jest.fn(),
   computeHappyHorseCost: jest.fn(),
@@ -223,6 +223,7 @@ import {
   computeImageUpscaleCost,
   computeGrokImagineCost,
   computeFalKlingV3Cost,
+  computeFalKlingCost,
   computeVideoBackgroundRemovalCost,
   resolveFalKlingV3Duration,
   computeHappyHorseCost,
@@ -437,7 +438,7 @@ describe('POST /api/generations — fal Kling v3 Standard image-to-video', () =>
 
   it('prices audio-on, strips the composer token, and dispatches only through FalProvider', async () => {
     (resolveFalKlingV3Duration as jest.Mock).mockReturnValue(5);
-    (computeFalKlingV3Cost as jest.Mock).mockReturnValue(63);
+    (computeFalKlingCost as jest.Mock).mockReturnValue(63);
     (deductCredits as jest.Mock).mockResolvedValue(true);
     (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-fal-kling-1' });
     falDispatchMock.mockResolvedValue({
@@ -449,7 +450,7 @@ describe('POST /api/generations — fal Kling v3 Standard image-to-video', () =>
 
     expect(res.status).toBe(200);
     expect(resolveFalKlingV3Duration).toHaveBeenCalledWith(5);
-    expect(computeFalKlingV3Cost).toHaveBeenCalledWith(5, true);
+    expect(computeFalKlingCost).toHaveBeenCalledWith(KLING_BODY.model, 5, true);
     expect(deductCredits).toHaveBeenCalledWith('test-user-id', 63);
     expect(dispatchMock).not.toHaveBeenCalled();
     expect(falDispatchMock).toHaveBeenCalledWith(
@@ -466,7 +467,7 @@ describe('POST /api/generations — fal Kling v3 Standard image-to-video', () =>
 
   it('prices audio-off independently', async () => {
     (resolveFalKlingV3Duration as jest.Mock).mockReturnValue(5);
-    (computeFalKlingV3Cost as jest.Mock).mockReturnValue(42);
+    (computeFalKlingCost as jest.Mock).mockReturnValue(42);
     (deductCredits as jest.Mock).mockResolvedValue(true);
     (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-fal-kling-2' });
     falDispatchMock.mockResolvedValue({ providerPredictionId: 'fal-model::req-2' });
@@ -474,7 +475,7 @@ describe('POST /api/generations — fal Kling v3 Standard image-to-video', () =>
     const res = await request(app).post('/api/generations').send({ ...KLING_BODY, audio_enabled: false });
 
     expect(res.status).toBe(200);
-    expect(computeFalKlingV3Cost).toHaveBeenCalledWith(5, false);
+    expect(computeFalKlingCost).toHaveBeenCalledWith(KLING_BODY.model, 5, false);
   });
 });
 

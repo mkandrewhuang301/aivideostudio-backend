@@ -4,7 +4,7 @@
 // All BullMQ, DB, and provider calls are mocked: no live Redis/Postgres/Replicate connection required.
 
 jest.mock('../../config', () => ({
-  config: { hiveScanEnabled: true },
+  config: { hiveScanRealFacePaths: true },
 }));
 
 jest.mock('bullmq', () => {
@@ -33,6 +33,14 @@ jest.mock('../../services/generationService', () => ({
 
 jest.mock('../../services/hiveService', () => ({
   scanForCsam: jest.fn(),
+}));
+const mockEnforceFlagged = jest.fn();
+jest.mock('../../services/moderationEnforcementService', () => ({
+  enforceFlaggedGeneration: mockEnforceFlagged,
+}));
+const mockHiveRetryAdd = jest.fn();
+jest.mock('../../queue/hiveScanWorker', () => ({
+  hiveScanQueue: { add: mockHiveRetryAdd },
 }));
 
 jest.mock('../../services/creditService', () => ({
@@ -104,6 +112,8 @@ function extractSql(drizzleQuery: unknown): string {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  // One-time scan results can otherwise leak when a non-real-face test deliberately skips Hive.
+  mockScanForCsam.mockReset();
 });
 
 // ─── reapOrphanedJobs ───────────────────────────────────────────────────────
@@ -244,10 +254,10 @@ describe('reapStalledJobs', () => {
     expect(mockMarkCompleted).toHaveBeenCalledWith('gen-alpha', 'generations/gen-alpha.mov');
   });
 
-  it('archives to R2, scans for CSAM, and marks completed when Replicate reports succeeded', async () => {
+  it('archives to R2, scans a real-face output, and marks completed when Replicate reports succeeded', async () => {
     mockDbExecute.mockResolvedValueOnce({
       rows: [
-        { id: 'gen-3', user_id: 'user-3', cost_credits: 60, replicate_prediction_id: 'pred-3' },
+        { id: 'gen-3', user_id: 'user-3', cost_credits: 60, replicate_prediction_id: 'pred-3', has_real_face_input: true },
       ],
     });
     mockGetStatus.mockResolvedValueOnce({
@@ -272,10 +282,10 @@ describe('reapStalledJobs', () => {
     expect(mockMarkQuarantined).not.toHaveBeenCalled();
   });
 
-  it('quarantines and refunds when Hive flags the video during reaper reconciliation', async () => {
+  it('routes a flagged real-face output through two-tier enforcement', async () => {
     mockDbExecute.mockResolvedValueOnce({
       rows: [
-        { id: 'gen-3b', user_id: 'user-3b', cost_credits: 60, replicate_prediction_id: 'pred-3b' },
+        { id: 'gen-3b', user_id: 'user-3b', cost_credits: 60, replicate_prediction_id: 'pred-3b', has_real_face_input: true },
       ],
     });
     mockGetStatus.mockResolvedValueOnce({
@@ -283,20 +293,25 @@ describe('reapStalledJobs', () => {
       outputUrl: 'https://replicate.delivery/flagged.mp4',
     });
     mockArchiveToR2.mockResolvedValueOnce('generations/gen-3b.mp4');
-    mockScanForCsam.mockResolvedValueOnce({ flagged: true });
+    const result = { flagged: true, tier: 'high', childScore: 0.95, sexualScore: 0.9, hashMatched: false };
+    mockScanForCsam.mockResolvedValueOnce(result);
     mockMarkQuarantined.mockResolvedValueOnce(true);
 
     await reapStalledJobs();
 
-    expect(mockMarkQuarantined).toHaveBeenCalledWith('gen-3b');
-    expect(mockRefundCredits).toHaveBeenCalledWith('user-3b', 60, 'csam-quarantine-reaper-gen-3b');
+    expect(mockEnforceFlagged).toHaveBeenCalledWith({
+      generationId: 'gen-3b',
+      r2Key: 'generations/gen-3b.mp4',
+      userId: 'user-3b',
+      costCredits: 60,
+    }, result);
     expect(mockMarkCompleted).not.toHaveBeenCalled();
   });
 
-  it('quarantines and refunds when Hive throws during reaper reconciliation (fail-safe)', async () => {
+  it('queues a blocking retry when Hive throws during real-face reconciliation', async () => {
     mockDbExecute.mockResolvedValueOnce({
       rows: [
-        { id: 'gen-3c', user_id: 'user-3c', cost_credits: 45, replicate_prediction_id: 'pred-3c' },
+        { id: 'gen-3c', user_id: 'user-3c', cost_credits: 45, replicate_prediction_id: 'pred-3c', has_real_face_input: true },
       ],
     });
     mockGetStatus.mockResolvedValueOnce({
@@ -309,8 +324,13 @@ describe('reapStalledJobs', () => {
 
     await reapStalledJobs();
 
-    expect(mockMarkQuarantined).toHaveBeenCalledWith('gen-3c');
-    expect(mockRefundCredits).toHaveBeenCalledWith('user-3c', 45, 'csam-quarantine-reaper-gen-3c');
+    expect(mockHiveRetryAdd).toHaveBeenCalledWith('scan', {
+      generationId: 'gen-3c',
+      r2Key: 'generations/gen-3c.mp4',
+      userId: 'user-3c',
+      costCredits: 45,
+      mediaType: 'video',
+    });
     expect(mockMarkCompleted).not.toHaveBeenCalled();
   });
 

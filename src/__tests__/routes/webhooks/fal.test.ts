@@ -7,6 +7,8 @@ const markFailedMock = jest.fn();
 const markQuarantinedMock = jest.fn();
 const refundMock = jest.fn();
 const pushMock = jest.fn();
+const enforceMock = jest.fn();
+const hiveRetryAddMock = jest.fn();
 
 jest.mock('../../../services/falWebhookVerify', () => ({
   verifyFalWebhookSignature: verifyMock,
@@ -18,6 +20,12 @@ jest.mock('../../../services/archivalService', () => ({
 
 jest.mock('../../../services/hiveService', () => ({
   scanForCsam: scanMock,
+}));
+jest.mock('../../../services/moderationEnforcementService', () => ({
+  enforceFlaggedGeneration: enforceMock,
+}));
+jest.mock('../../../queue/hiveScanWorker', () => ({
+  hiveScanQueue: { add: hiveRetryAddMock },
 }));
 
 jest.mock('../../../services/generationService', () => ({
@@ -40,7 +48,7 @@ jest.mock('../../../services/uploadCleanup', () => ({
 }));
 
 jest.mock('../../../config', () => ({
-  config: { hiveScanEnabled: true },
+  config: { hiveScanRealFacePaths: true },
 }));
 
 jest.mock('../../../db/client', () => ({
@@ -67,6 +75,7 @@ const generation = {
   prompt: null,
   params: {},
   retry_count: 0,
+  has_real_face_input: false,
 };
 
 function postWebhook(body: object) {
@@ -92,6 +101,7 @@ describe('POST /webhooks/fal', () => {
   it('resolves non-Kling endpoint IDs and archives transparent output as QuickTime before completion', async () => {
     getGenerationMock
       .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined)
       .mockResolvedValueOnce(generation);
 
     const res = await postWebhook({
@@ -106,7 +116,7 @@ describe('POST /webhooks/fal', () => {
       'fal-ai/kling-video/v3/standard/image-to-video::req-video-bg',
     );
     expect(getGenerationMock).toHaveBeenNthCalledWith(
-      2,
+      3,
       'pixelcut/video-background-removal::req-video-bg',
     );
     expect(archiveMock).toHaveBeenCalledWith(
@@ -114,7 +124,7 @@ describe('POST /webhooks/fal', () => {
       'gen-video-bg',
       'video/quicktime',
     );
-    expect(scanMock).toHaveBeenCalledWith('generations/gen-video-bg.mov');
+    expect(scanMock).not.toHaveBeenCalled();
     expect(markCompletedMock).toHaveBeenCalledWith(
       'gen-video-bg',
       'generations/gen-video-bg.mov',
@@ -138,6 +148,7 @@ describe('POST /webhooks/fal', () => {
     getGenerationMock
       .mockResolvedValueOnce(undefined)
       .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined)
       .mockResolvedValueOnce({ ...generation, model: 'fal-ai/heygen/v2/translate/speed' });
     archiveMock.mockResolvedValue('generations/gen-video-bg.mp4');
 
@@ -149,7 +160,7 @@ describe('POST /webhooks/fal', () => {
 
     expect(res.status).toBe(200);
     expect(getGenerationMock).toHaveBeenNthCalledWith(
-      3,
+      4,
       'fal-ai/heygen/v2/translate/speed::req-video-bg',
     );
     expect(archiveMock).toHaveBeenCalledWith(
@@ -159,11 +170,15 @@ describe('POST /webhooks/fal', () => {
     );
   });
 
-  it('quarantines and refunds a flagged transparent output without exposing completion', async () => {
+  it('routes a flagged real-face output through two-tier enforcement', async () => {
     getGenerationMock
-      .mockResolvedValueOnce(undefined)
-      .mockResolvedValueOnce(generation);
-    scanMock.mockResolvedValue({ flagged: true });
+      .mockResolvedValueOnce({
+        ...generation,
+        model: 'fal-ai/kling-video/v3/standard/image-to-video',
+        has_real_face_input: true,
+      });
+    const result = { flagged: true, tier: 'low', childScore: 0.8, sexualScore: 0.7, hashMatched: false };
+    scanMock.mockResolvedValue(result);
 
     const res = await postWebhook({
       request_id: 'req-video-bg',
@@ -172,8 +187,12 @@ describe('POST /webhooks/fal', () => {
     });
 
     expect(res.status).toBe(200);
-    expect(markQuarantinedMock).toHaveBeenCalledWith('gen-video-bg');
-    expect(refundMock).toHaveBeenCalledWith('user-1', 9, 'csam-quarantine-req-video-bg');
+    expect(enforceMock).toHaveBeenCalledWith({
+      generationId: 'gen-video-bg',
+      r2Key: 'generations/gen-video-bg.mov',
+      userId: 'user-1',
+      costCredits: 9,
+    }, result);
     expect(markCompletedMock).not.toHaveBeenCalled();
   });
 });

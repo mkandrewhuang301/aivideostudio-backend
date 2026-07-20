@@ -2,7 +2,6 @@
 // narration duration drives its single winning Omni clip, then one ffmpeg job owns final assembly.
 
 import { Job, Worker } from 'bullmq';
-import { config } from '../config';
 import { FORMATS_BY_ID, type FormatAspectRatio } from '../config/formats';
 import { getGenerationPresignedUrl, uploadBufferToR2 } from '../services/archivalService';
 import { refundCredits } from '../services/creditService';
@@ -13,7 +12,6 @@ import {
   markProcessing,
   mergeGenerationParams,
 } from '../services/generationService';
-import { scanForCsam } from '../services/hiveService';
 import { generateMusicBed } from '../services/lyriaService';
 import { animateScene } from '../services/omniService';
 import { expandExplainerScript, pickBestCandidateIndex } from '../services/openaiScriptService';
@@ -152,11 +150,6 @@ export async function processExplainerGeneration(data: ExplainerGenerationJob): 
         }
       } catch {
         console.warn(`[explainer-generation] Vision pick unavailable for scene ${sceneIndex}; using candidate 0`);
-      }
-
-      if (config.hiveScanEnabled) {
-        const { flagged } = await scanForCsam(candidateKeys[winnerIndex]!);
-        if (flagged) throw new Error(`CSAM scan flagged scene ${sceneIndex} winning still`);
       }
 
       if (sceneIndex === 0) await stampStage({ stage_label: 'Animating…' });

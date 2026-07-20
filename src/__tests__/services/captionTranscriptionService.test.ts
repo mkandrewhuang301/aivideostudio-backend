@@ -69,8 +69,8 @@ describe('groupWordsIntoCues', () => {
     ]);
   });
 
-  it('starts a new cue once a cue already holds 7 words (line-length cap)', () => {
-    const words = Array.from({ length: 8 }, (_, i) => ({
+  it('starts a new cue once a cue already holds 5 words (short-form single-line cap)', () => {
+    const words = Array.from({ length: 6 }, (_, i) => ({
       word: `w${i}`,
       start: i * 0.2,
       end: i * 0.2 + 0.15,
@@ -79,16 +79,15 @@ describe('groupWordsIntoCues', () => {
     const cues = groupWordsIntoCues(words);
 
     expect(cues).toHaveLength(2);
-    expect(cues[0].words).toHaveLength(7);
+    expect(cues[0].words).toHaveLength(5);
     expect(cues[1].words).toHaveLength(1);
   });
 
-  it('starts a new cue when the gap to the next word exceeds 0.8s', () => {
+  it('starts a new cue at a strong conversational pause below the old 0.8s threshold', () => {
     const words = [
       { word: 'hello', start: 0, end: 0.3 },
       { word: 'world', start: 0.3, end: 0.6 },
-      // 1.5s silent gap before the next word — well over the 0.8s threshold
-      { word: 'later', start: 2.1, end: 2.4 },
+      { word: 'later', start: 1.1, end: 1.4 },
     ];
 
     const cues = groupWordsIntoCues(words);
@@ -96,7 +95,74 @@ describe('groupWordsIntoCues', () => {
     expect(cues).toHaveLength(2);
     expect(cues[0].words.map((w) => w.text)).toEqual(['hello', 'world']);
     expect(cues[1].words.map((w) => w.text)).toEqual(['later']);
-    expect(cues[1].startSeconds).toBe(2.1);
+    expect(cues[1].startSeconds).toBe(1.1);
+  });
+
+  it('uses a smaller pause as a phrase break once enough words are visible', () => {
+    const words = [
+      { word: 'France', start: 0, end: 0.25 },
+      { word: 'World', start: 0.25, end: 0.5 },
+      { word: 'Cup', start: 0.5, end: 0.75 },
+      { word: 'game', start: 0.75, end: 1 },
+      { word: 'Oh', start: 1.3, end: 1.5 },
+      { word: 'no', start: 1.5, end: 1.7 },
+      { word: 'need', start: 1.7, end: 1.9 },
+    ];
+
+    const cues = groupWordsIntoCues(words);
+
+    expect(cues.map((cue) => cue.words.map((word) => word.text))).toEqual([
+      ['France', 'World', 'Cup', 'game'],
+      ['Oh', 'no', 'need'],
+    ]);
+  });
+
+  it('caps visual length even when the cue has fewer than 5 words', () => {
+    const words = [
+      { word: 'extraordinary', start: 0, end: 0.3 },
+      { word: 'international', start: 0.3, end: 0.6 },
+      { word: 'competition', start: 0.6, end: 0.9 },
+    ];
+
+    const cues = groupWordsIntoCues(words);
+
+    expect(cues.map((cue) => cue.words.map((word) => word.text))).toEqual([
+      ['extraordinary', 'international'],
+      ['competition'],
+    ]);
+  });
+
+  it('starts a new cue after sentence punctuation', () => {
+    const words = [
+      { word: 'We', start: 0, end: 0.2 },
+      { word: 'won.', start: 0.2, end: 0.5 },
+      { word: 'Nobody', start: 0.5, end: 0.8 },
+      { word: 'expected', start: 0.8, end: 1.1 },
+      { word: 'it.', start: 1.1, end: 1.4 },
+    ];
+
+    const cues = groupWordsIntoCues(words);
+
+    expect(cues.map((cue) => cue.words.map((word) => word.text))).toEqual([
+      ['We', 'won.'],
+      ['Nobody', 'expected', 'it.'],
+    ]);
+  });
+
+  it('caps a cue at 3 seconds even during continuous speech', () => {
+    const words = [
+      { word: 'one', start: 0, end: 0.8 },
+      { word: 'two', start: 0.8, end: 1.6 },
+      { word: 'three', start: 1.6, end: 2.4 },
+      { word: 'four', start: 2.4, end: 3.2 },
+    ];
+
+    const cues = groupWordsIntoCues(words);
+
+    expect(cues.map((cue) => cue.words.map((word) => word.text))).toEqual([
+      ['one', 'two', 'three'],
+      ['four'],
+    ]);
   });
 
   it('returns an empty array for an empty words array (no crash)', () => {

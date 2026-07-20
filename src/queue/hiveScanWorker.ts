@@ -5,12 +5,13 @@
 // On final failure: markFailed + refund credits.
 
 import { Queue, Worker, Job } from 'bullmq';
-import { markCompleted, markFailed, markQuarantined } from '../services/generationService';
+import { markCompleted, markFailed } from '../services/generationService';
 import { refundCredits } from '../services/creditService';
 import { scanForCsam } from '../services/hiveService';
 import { sendGenerationComplete } from '../services/apnsService';
 import { db } from '../db/client';
 import { sql } from 'drizzle-orm';
+import { enforceFlaggedGeneration } from '../services/moderationEnforcementService';
 
 const QUEUE_NAME = 'hive-scan-retry';
 export const HIVE_SCAN_ATTEMPTS = 6;
@@ -48,12 +49,10 @@ export async function processHiveScan(data: HiveScanJobData): Promise<void> {
   const { generationId, r2Key, userId, costCredits, mediaType } = data;
 
   // Throws on Hive API error — BullMQ catches and retries automatically.
-  const { flagged } = await scanForCsam(r2Key);
+  const result = await scanForCsam(r2Key);
 
-  if (flagged) {
-    await markQuarantined(generationId);
-    await refundCredits(userId, costCredits, `csam-quarantine-${generationId}`);
-    console.warn(`[hive-scan-retry] CSAM flagged: generation ${generationId} quarantined`);
+  if (result.flagged) {
+    await enforceFlaggedGeneration({ generationId, r2Key, userId, costCredits }, result);
     return;
   }
 

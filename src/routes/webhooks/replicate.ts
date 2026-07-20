@@ -16,7 +16,6 @@ import {
   isTransientProviderError,
   markCompleted,
   markFailed,
-  markQuarantined,
   PERMISSIVE_I2V_MODEL,
   reattachForRetry,
   SUPPORTED_MODELS,
@@ -25,6 +24,7 @@ import {
 import { refundCredits } from '../../services/creditService';
 import { sendGenerationComplete } from '../../services/apnsService';
 import { hiveScanQueue } from '../../queue/hiveScanWorker';
+import { enforceFlaggedGeneration } from '../../services/moderationEnforcementService';
 import { ffmpegQueue } from '../../queue/ffmpegWorker';
 import { db } from '../../db/client';
 import { referenceUploads } from '../../db/schema';
@@ -156,13 +156,13 @@ replicateWebhookRouter.post('/', async (req: Request, res: Response) => {
         fetchDeviceToken(generation.user_id),
       ]);
 
-      // Hive CSAM scan — skipped when HIVE_SCAN_ENABLED=false.
-      if (config.hiveScanEnabled) {
-        let hiveFlagged = false;
+      // Policy v2: the global scan is gone. Only a server-classified real-face path may cross
+      // this blocking boundary; all other outputs complete without Hive latency.
+      if (config.hiveScanRealFacePaths && generation.has_real_face_input) {
+        let hiveResult: Awaited<ReturnType<typeof scanForCsam>> | undefined;
         let hiveScanErrored = false;
         try {
-          const { flagged } = await scanForCsam(r2Key);
-          hiveFlagged = flagged;
+          hiveResult = await scanForCsam(r2Key);
         } catch (hiveError) {
           console.error('[webhook/replicate] Hive scan error — queuing retry:', hiveError);
           hiveScanErrored = true;
@@ -179,10 +179,13 @@ replicateWebhookRouter.post('/', async (req: Request, res: Response) => {
           console.log(`[webhook/replicate] Hive retry queued for generation ${generation.id}`);
           res.status(200).json({ received: true });
           return;
-        } else if (hiveFlagged) {
-          await markQuarantined(generation.id);
-          await refundCredits(generation.user_id, generation.cost_credits, `csam-quarantine-${payload.id}`);
-          console.warn(`[webhook/replicate] CSAM flagged: generation ${generation.id} quarantined, credits refunded.`);
+        } else if (hiveResult?.flagged) {
+          await enforceFlaggedGeneration({
+            generationId: generation.id,
+            r2Key,
+            userId: generation.user_id,
+            costCredits: generation.cost_credits,
+          }, hiveResult);
           res.status(200).json({ received: true });
           return;
         }

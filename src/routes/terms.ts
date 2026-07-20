@@ -16,6 +16,7 @@ const DMCA_AGENT_NAME = 'Andrew Huang';
 const DMCA_AGENT_EMAIL = 'baaa00033@gmail.com';
 const DMCA_AGENT_ADDRESS = '1109 Riggins Mill Road, Cary, NC 27519';
 const DMCA_AGENT_PHONE = '9199953829';
+const ABUSE_CONTACT_EMAIL = process.env.ABUSE_CONTACT_EMAIL ?? DMCA_AGENT_EMAIL;
 const MINIMUM_AGE = 17; // placeholder — confirm against actual content rating before launch
 
 const TERMS_HTML = `<!DOCTYPE html>
@@ -33,7 +34,7 @@ const TERMS_HTML = `<!DOCTYPE html>
 </head>
 <body>
 <h1>Terms of Service</h1>
-<p><strong>Last Updated:</strong> July 13, 2026</p>
+<p><strong>Last Updated:</strong> July 19, 2026</p>
 <div class="draft-notice">This is a draft Terms of Service, not yet legally reviewed. It is not final and should not be relied upon as a complete or binding agreement until reviewed and approved.</div>
 <p>These Terms of Service ("Terms") govern your access to and use of the Fantasia AI mobile application (the "App," "Service"), operated by ${DMCA_AGENT_NAME} ("we," "our," or "us"). By creating an account or using the App, you agree to be bound by these Terms. If you do not agree, do not use the App.</p>
 
@@ -68,16 +69,17 @@ const TERMS_HTML = `<!DOCTYPE html>
 <h2>6. Acceptable Use</h2>
 <p>You agree not to use the App to create, upload, or attempt to generate content that:</p>
 <ul>
-  <li>Depicts or sexualizes minors in any way (strictly prohibited, zero tolerance).</li>
+  <li>Constitutes or appears to constitute child sexual abuse material (CSAM), or depicts or sexualizes minors in any way (strictly prohibited, zero tolerance).</li>
+  <li>Creates, shares, or attempts to create nonconsensual intimate imagery, including sexual or intimate depictions of a real person created or altered without that person's consent.</li>
   <li>Depicts a real, identifiable person's Likeness (see Section 5) without their consent, including public figures, in a way intended to deceive, defame, harass, or misrepresent them.</li>
   <li>Infringes another party's copyright, trademark, or other intellectual property rights.</li>
   <li>Is unlawful, threatening, harassing, or intended to incite violence.</li>
   <li>Attempts to circumvent our content moderation or safety systems.</li>
 </ul>
-<p>We use automated systems — including prompt filtering and CSAM scanning — to help enforce this policy before content is generated or delivered. These systems are not perfect and do not replace your own obligations under Section 5 and this section.</p>
+<p>We use automated systems, including prompt filtering on every request and blocking output screening on generation paths that use a real-person face reference, to help enforce this policy. These systems are not perfect and do not replace your own obligations under Section 5 and this section.</p>
 
 <h2>7. Content Moderation and Enforcement</h2>
-<p>We may remove or refuse to generate content, and may suspend or terminate accounts, that we determine (in our reasonable judgment) violates these Terms or applicable law. You can report content you believe violates these Terms using the Report feature in the App. We review reports and take action as appropriate, which may include content removal, account suspension, or referral to law enforcement. For support or to report an issue, contact us at <a href="mailto:${DMCA_AGENT_EMAIL}">${DMCA_AGENT_EMAIL}</a>.</p>
+<p>We may remove or refuse to generate content, quarantine content, and suspend or terminate accounts that we determine violates these Terms or applicable law. High-confidence apparent CSAM may be reported automatically to the NCMEC CyberTipline with the content and available metadata; reported evidence may be preserved after account deletion where required by law. You can report content using the Report feature in the App. For abuse or nonconsensual-intimate-imagery removal requests, contact <a href="mailto:${ABUSE_CONTACT_EMAIL}">${ABUSE_CONTACT_EMAIL}</a> and include the content identifier and enough information for us to locate it. We aim to act on verified requests promptly, generally within 48 hours.</p>
 
 <h2>8. Intellectual Property</h2>
 <p>The App itself, including its design, branding, and underlying software, is owned by us and protected by intellectual property law. Subject to your compliance with these Terms and to the extent permitted by applicable law, you retain rights to the AI-generated output you create, for your own personal or commercial use. The legal status of AI-generated content ownership varies by jurisdiction and is an evolving area of law; we make no representation as to your ability to register copyright in AI-generated output.</p>

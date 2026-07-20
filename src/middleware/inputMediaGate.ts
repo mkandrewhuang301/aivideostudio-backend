@@ -9,7 +9,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { config } from '../config';
 import { scanInputMedia } from '../services/hiveService';
-import { FACE_INPUT_PRESET_IDS, FACE_INPUT_MEDIA_TYPES } from '../config/faceInputPresets';
+import { FACE_INPUT_PRESET_IDS, isRealFaceGenerationPath } from '../config/faceInputPresets';
 
 // Returns the user-supplied face slot URL(s) to scan for a face-input request, or [] if none.
 function faceSlotUrls(req: Request): string[] {
@@ -48,9 +48,7 @@ function blockMessage(reason?: string): string {
 export async function inputMediaGate(req: Request, res: Response, next: NextFunction): Promise<void> {
   const presetId = req._preset?.preset_id;
   const mediaType = req._resolved?.mediaType;
-  const isFaceInput =
-    (!!presetId && FACE_INPUT_PRESET_IDS.has(presetId)) ||
-    (!!mediaType && FACE_INPUT_MEDIA_TYPES.has(mediaType));
+  const isFaceInput = !!mediaType && isRealFaceGenerationPath(presetId, mediaType);
   if (!isFaceInput || !config.hiveInputScanEnabled) {
     next();
     return;

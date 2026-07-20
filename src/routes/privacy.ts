@@ -12,6 +12,7 @@ const DMCA_AGENT_NAME = 'Andrew Huang';
 const DMCA_AGENT_EMAIL = 'baaa00033@gmail.com';
 const DMCA_AGENT_ADDRESS = '1109 Riggins Mill Road, Cary, NC 27519';
 const DMCA_AGENT_PHONE = '9199953829';
+const ABUSE_CONTACT_EMAIL = process.env.ABUSE_CONTACT_EMAIL ?? DMCA_AGENT_EMAIL;
 
 const PRIVACY_HTML = `<!DOCTYPE html>
 <html lang="en">
@@ -27,7 +28,7 @@ const PRIVACY_HTML = `<!DOCTYPE html>
 </head>
 <body>
 <h1>Privacy Policy</h1>
-<p><strong>Last Updated:</strong> June 27, 2026</p>
+<p><strong>Last Updated:</strong> July 19, 2026</p>
 <p>Fantasia AI ("we," "our," or "us") operates the Fantasia AI mobile application. This Privacy Policy describes how we collect, use, and share information about you when you use our app.</p>
 
 <h2>1. Information We Collect</h2>
@@ -54,21 +55,23 @@ const PRIVACY_HTML = `<!DOCTYPE html>
   <li><strong>Cloudflare, Inc.</strong> — Your generated videos are stored in Cloudflare R2 object storage.</li>
   <li><strong>Google Firebase</strong> — Account authentication (Sign in with Apple, email/password).</li>
   <li><strong>RevenueCat</strong> — Subscription and in-app purchase management.</li>
-  <li><strong>Hive Moderation (The Hive AI, Inc.)</strong> — Every completed video generation is automatically scanned for Child Sexual Abuse Material (CSAM) using Hive's Visual Moderation API before being delivered to your device. Hive processes the video and deletes the media after analysis; only anonymized embeddings are retained.</li>
+  <li><strong>Hive Moderation (The Hive AI, Inc.)</strong> — Outputs from features that use a real-person face reference are automatically screened before delivery for apparent child sexual abuse material (CSAM) and sexual content, including possible nonconsensual intimate imagery. Other output paths are not automatically screened. Hive processes the media for this moderation purpose.</li>
   <li><strong>OpenAI, Inc.</strong> — Text prompts are screened through OpenAI's Moderation API to detect policy-violating content before any video is generated.</li>
 </ul>
 
 <h2>4. Content Moderation</h2>
 <ul>
   <li><strong>Prompt filtering:</strong> All generation prompts are screened against a keyword blocklist and through OpenAI's Moderation API before dispatch to the AI model.</li>
-  <li><strong>CSAM scanning:</strong> All generated videos are automatically scanned for Child Sexual Abuse Material (CSAM) by Hive Moderation before delivery to your device. Detected CSAM is quarantined, not delivered, and flagged for review and reporting to the NCMEC CyberTipline as required by 18 U.S.C. § 2258A and the REPORT Act (2024). We retain metadata about flagged content for at least one year after any report is filed.</li>
+  <li><strong>Real-face output screening:</strong> When a generation uses a real-person face reference, its output is automatically screened before delivery. Content that crosses our safety thresholds is quarantined and not delivered.</li>
+  <li><strong>CyberTipline reporting:</strong> When our automated systems identify high-confidence apparent CSAM, we may automatically submit the content and available account and generation metadata to the National Center for Missing &amp; Exploited Children's CyberTipline without a person viewing the media. Reported content and associated metadata are preserved for at least one year in accordance with 18 U.S.C. § 2258A.</li>
 </ul>
 
 <h2>5. User Reporting</h2>
 <p>You can report a generated video that you believe violates our Content Policy using the Report button in the app. We review reports and may remove content, suspend accounts, or refer matters to law enforcement as appropriate.</p>
+<p>To report nonconsensual intimate imagery or other abusive content, email <a href="mailto:${ABUSE_CONTACT_EMAIL}">${ABUSE_CONTACT_EMAIL}</a> with the generation or content identifier and enough information for us to locate it. We aim to remove verified violating content promptly, generally within 48 hours.</p>
 
 <h2>6. Data Retention</h2>
-<p>We retain your generated videos in cloud storage until you delete them from the app. Account data is retained while your account is active. We retain metadata related to CSAM reports for at least one year as required by law.</p>
+<p>We retain generated media in cloud storage until it is deleted through the app or our retention processes. Account data is retained while your account is active. Content and metadata associated with a CyberTipline report are subject to a legal hold and preserved for at least one year, including if the account is deleted.</p>
 
 <h2>7. Your Rights</h2>
 <p>Depending on your jurisdiction, you may have rights to access, correct, or delete your personal data. To exercise these rights, contact us at the address below.</p>
@@ -87,7 +90,7 @@ const PRIVACY_HTML = `<!DOCTYPE html>
 <p>We may update this Privacy Policy from time to time. We will notify you of material changes via the app or email.</p>
 
 <h2>10. Contact Us</h2>
-<p>Questions about this Privacy Policy? Contact us at: <a href="mailto:${DMCA_AGENT_EMAIL}">${DMCA_AGENT_EMAIL}</a></p>
+<p>Questions about this Privacy Policy? Contact us at <a href="mailto:${DMCA_AGENT_EMAIL}">${DMCA_AGENT_EMAIL}</a>. Abuse and NCII reports: <a href="mailto:${ABUSE_CONTACT_EMAIL}">${ABUSE_CONTACT_EMAIL}</a>.</p>
 </body>
 </html>`;
 

@@ -49,6 +49,7 @@ const source = {
   status: 'completed',
   media_type: 'video',
   r2_key: 'generations/source-1.mp4',
+  has_real_face_input: true,
   params: { resolution: '720p', aspect_ratio: '9:16' },
 };
 
@@ -78,6 +79,7 @@ describe('POST /api/generations/:id/translate', () => {
     expect(createGenerationMock).toHaveBeenCalledWith(expect.objectContaining({
       model: 'fal-ai/heygen/v2/translate/speed',
       cost_credits: 65,
+      has_real_face_input: true,
       params: expect.objectContaining({ output_language: 'Spanish', source_generation_id: 'source-1' }),
     }));
     expect(dispatchMock).toHaveBeenCalledWith(expect.objectContaining({

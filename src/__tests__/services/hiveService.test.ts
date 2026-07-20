@@ -5,7 +5,13 @@
 
 // Mock config FIRST — config.ts calls requireEnv() at module eval time
 jest.mock('../../config', () => ({
-  config: { hiveApiKey: 'test-hive-key', hiveInputNsfwThreshold: 0.85 },
+  config: {
+    hiveApiKey: 'test-hive-key',
+    hiveCsamApiKey: '',
+    hiveInputNsfwThreshold: 0.85,
+    hiveLowChildThreshold: 0.80,
+    hiveLowSexualThreshold: 0.70,
+  },
 }));
 
 // Mock DB for markQuarantined tests
@@ -35,8 +41,10 @@ global.fetch = mockFetch as unknown as typeof fetch;
 import { scanForCsam, scanInputMedia } from '../../services/hiveService';
 import { markQuarantined } from '../../services/generationService';
 import { db } from '../../db/client';
+import { config } from '../../config';
 
 const mockDb = db as jest.Mocked<typeof db>;
+const mutableConfig = config as { hiveCsamApiKey: string };
 
 function makeHiveResponse(frames: Array<{ class_name: string; value: number }[]>) {
   return {
@@ -50,7 +58,64 @@ function makeHiveResponse(frames: Array<{ class_name: string; value: number }[]>
 }
 
 describe('scanForCsam', () => {
-  beforeEach(() => mockFetch.mockReset());
+  beforeEach(() => {
+    mockFetch.mockReset();
+    mutableConfig.hiveCsamApiKey = '';
+  });
+
+  it('uses a Thorn hash match as a high-confidence signal without calling visual moderation', async () => {
+    mutableConfig.hiveCsamApiKey = 'test-thorn-key';
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ csam_results: ['thorn_hash_matching'] }),
+    });
+
+    const result = await scanForCsam('outputs/generation.mp4');
+
+    expect(result).toMatchObject({
+      flagged: true,
+      tier: 'high',
+      reason: 'csam_hash',
+      hashMatched: true,
+    });
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(mockFetch).toHaveBeenCalledWith(
+      'https://api.hivemoderation.com/api/v2/task/sync',
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({ Authorization: 'token test-thorn-key' }),
+        body: expect.stringContaining('"thorn_enabled":true'),
+      }),
+    );
+  });
+
+  it('fails closed when the configured Combined CSAM API is unavailable', async () => {
+    mutableConfig.hiveCsamApiKey = 'test-thorn-key';
+    mockFetch.mockResolvedValue({ ok: false, status: 503 });
+
+    await expect(scanForCsam('outputs/generation.mp4')).rejects.toThrow(
+      'Hive Combined CSAM API error: 503',
+    );
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a Thorn classifier-only result in the low-confidence lane', async () => {
+    mutableConfig.hiveCsamApiKey = 'test-thorn-key';
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ csam_results: ['thorn_classification'] }),
+    });
+
+    const result = await scanForCsam('outputs/generation.mp4');
+
+    expect(result).toMatchObject({
+      flagged: true,
+      tier: 'low',
+      reason: 'csam_classifier',
+      hashMatched: false,
+    });
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
 
   it('returns flagged=true when a frame has yes_child_present >= 0.92 AND yes_female_nudity >= 0.85', async () => {
     mockFetch.mockResolvedValue(makeHiveResponse([[
@@ -58,7 +123,7 @@ describe('scanForCsam', () => {
       { class_name: 'yes_female_nudity', value: 0.92 },
     ]]));
     const result = await scanForCsam('https://r2.example.com/video.mp4');
-    expect(result.flagged).toBe(true);
+    expect(result).toMatchObject({ flagged: true, tier: 'high', hashMatched: false });
   });
 
   it('returns flagged=false when child_present is high but no explicit sexual content (general_nsfw alone does not flag)', async () => {
@@ -79,13 +144,31 @@ describe('scanForCsam', () => {
     expect(result.flagged).toBe(false);
   });
 
-  it('returns flagged=false when yes_child_present is below threshold (0.91)', async () => {
+  it('returns the low tier when scores clear the low floor but not the high combiner', async () => {
     mockFetch.mockResolvedValue(makeHiveResponse([[
       { class_name: 'yes_child_present', value: 0.91 },
-      { class_name: 'yes_female_nudity', value: 0.99 },
+      { class_name: 'yes_female_nudity', value: 0.80 },
     ]]));
     const result = await scanForCsam('https://r2.example.com/video.mp4');
-    expect(result.flagged).toBe(false);
+    expect(result).toMatchObject({ flagged: true, tier: 'low' });
+  });
+
+  it('returns the low tier for adult sexual content on a real-face path', async () => {
+    mockFetch.mockResolvedValue(makeHiveResponse([[
+      { class_name: 'yes_child_present', value: 0.10 },
+      { class_name: 'yes_sexual_activity', value: 0.90 },
+    ]]));
+    const result = await scanForCsam('https://r2.example.com/video.mp4');
+    expect(result).toMatchObject({ flagged: true, tier: 'low', reason: 'sexual_content' });
+  });
+
+  it('returns clean below both low-confidence floors', async () => {
+    mockFetch.mockResolvedValue(makeHiveResponse([[
+      { class_name: 'yes_child_present', value: 0.79 },
+      { class_name: 'yes_female_nudity', value: 0.69 },
+    ]]));
+    const result = await scanForCsam('https://r2.example.com/video.mp4');
+    expect(result).toMatchObject({ flagged: false, tier: 'none' });
   });
 
   it('throws an error when Hive API returns HTTP 500', async () => {

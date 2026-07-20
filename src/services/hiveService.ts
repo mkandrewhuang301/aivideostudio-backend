@@ -4,14 +4,16 @@
 // Uses a presigned R2 URL (5 min TTL) — no public bucket required.
 // API: Hive v3 Visual Moderation (POST /api/v3/hive/visual-moderation, Bearer auth)
 //
-// CSAM flag logic: flag the video if ANY frame has BOTH:
-//   - yes_child_present >= 0.92
-//   - ANY of: yes_female_nudity, yes_male_nudity, yes_sexual_activity, yes_sexual_intent >= 0.85
+// Policy-v2 output classification (real-face paths only; callers own that gate):
+//   HIGH — child >= 0.92 AND sexual >= 0.85 on the same frame.
+//   LOW  — child >= configured low floor AND sexual >= configured low floor, OR a sexual class
+//          independently reaches 0.85 (adult NCII / faceswap abuse backstop).
 //
-// On Hive errors: caller should quarantine (fail-safe — never deliver unscanned content).
+// On Hive errors: caller should queue a retry and never deliver the scoped real-face output.
 
 import { GetObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { randomUUID } from 'node:crypto';
 import { r2, R2_BUCKET } from '../storage/r2';
 import { config } from '../config';
 
@@ -57,11 +59,32 @@ const INPUT_NSFW_CLASS_NAMES = new Set([
   'yes_sexual_intent',
 ]);
 
-function isFrameFlagged(classes: HiveClass[]): boolean {
+export type OutputModerationTier = 'none' | 'low' | 'high';
+
+export interface OutputModerationResult {
+  flagged: boolean;
+  tier: OutputModerationTier;
+  reason?: 'csam_hash' | 'csam_classifier' | 'sexual_content';
+  childScore: number;
+  sexualScore: number;
+  hashMatched: boolean;
+}
+
+function classifyFrame(classes: HiveClass[]): Omit<OutputModerationResult, 'hashMatched'> {
   const classMap = new Map(classes.map((c) => [c.class_name, c.value]));
-  const childPresent = (classMap.get('yes_child_present') ?? 0) >= CHILD_PRESENT_THRESHOLD;
-  if (!childPresent) return false;
-  return [...SEXUAL_CLASS_NAMES].some((name) => (classMap.get(name) ?? 0) >= SEXUAL_CONTENT_THRESHOLD);
+  const childScore = classMap.get('yes_child_present') ?? 0;
+  const sexualScore = Math.max(...[...SEXUAL_CLASS_NAMES].map((name) => classMap.get(name) ?? 0));
+
+  if (childScore >= CHILD_PRESENT_THRESHOLD && sexualScore >= SEXUAL_CONTENT_THRESHOLD) {
+    return { flagged: true, tier: 'high', reason: 'csam_classifier', childScore, sexualScore };
+  }
+  if (
+    (childScore >= config.hiveLowChildThreshold && sexualScore >= config.hiveLowSexualThreshold) ||
+    sexualScore >= SEXUAL_CONTENT_THRESHOLD
+  ) {
+    return { flagged: true, tier: 'low', reason: 'sexual_content', childScore, sexualScore };
+  }
+  return { flagged: false, tier: 'none', childScore, sexualScore };
 }
 
 // Shared v3 visual-moderation request + response parsing, used by BOTH the output CSAM scan
@@ -99,19 +122,98 @@ async function visualModerationClasses(mediaUrl: string): Promise<HiveFrameResul
   return frames;
 }
 
+interface HiveThornResponse {
+  csam_results?: Array<'thorn_classification' | 'thorn_hash_matching' | string>;
+}
+
+// Hive's Combined CSAM API is a separate Moderation Dashboard project. When provisioned, run it
+// before general visual moderation so a known hash match or Thorn classifier hit immediately
+// enters the high-confidence lane. Any API error fails the whole scoped scan closed.
+async function scanWithThorn(mediaUrl: string): Promise<OutputModerationResult | undefined> {
+  if (!config.hiveCsamApiKey) return undefined;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), HIVE_TIMEOUT_MS);
+  let response: Response;
+  try {
+    response = await fetch('https://api.hivemoderation.com/api/v2/task/sync', {
+      method: 'POST',
+      headers: {
+        Authorization: `token ${config.hiveCsamApiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        user_id: 'fantasia-system',
+        post_id: `moderation-${randomUUID()}`,
+        url: mediaUrl,
+        thorn_enabled: true,
+      }),
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+  if (!response.ok) throw new Error(`Hive Combined CSAM API error: ${response.status}`);
+
+  const results = ((await response.json()) as HiveThornResponse).csam_results ?? [];
+  const hashMatched = results.includes('thorn_hash_matching');
+  if (hashMatched) {
+    return {
+      flagged: true,
+      tier: 'high',
+      reason: 'csam_hash',
+      childScore: 0,
+      sexualScore: 0,
+      hashMatched: true,
+    };
+  }
+  // D-3 reserves automatic reporting for known-hash matches or the tuned two-signal visual
+  // combiner. Thorn's classifier-only result is still actionable, but remains in the
+  // low-confidence quarantine/refund/strike lane because it has no score exposed here.
+  if (results.includes('thorn_classification')) {
+    return {
+      flagged: true,
+      tier: 'low',
+      reason: 'csam_classifier',
+      childScore: 0,
+      sexualScore: 0,
+      hashMatched: false,
+    };
+  }
+  return undefined;
+}
+
 // Accepts the R2 object key (not a URL) — generates a presigned URL internally.
-export async function scanForCsam(r2Key: string): Promise<{ flagged: boolean }> {
+export async function scanForCsam(r2Key: string): Promise<OutputModerationResult> {
   const presignedUrl = await getPresignedUrl(r2Key);
+  const thornResult = await scanWithThorn(presignedUrl);
+  if (thornResult) return thornResult;
   const frames = await visualModerationClasses(presignedUrl);
-  const flagged = frames.some((frame) => isFrameFlagged(frame.classes ?? []));
-  return { flagged };
+  let strongest: Omit<OutputModerationResult, 'hashMatched'> = {
+    flagged: false,
+    tier: 'none',
+    childScore: 0,
+    sexualScore: 0,
+  };
+  for (const frame of frames) {
+    const result = classifyFrame(frame.classes ?? []);
+    if (
+      result.tier === 'high' ||
+      (result.tier === 'low' && strongest.tier === 'none') ||
+      (result.tier === strongest.tier && result.childScore + result.sexualScore > strongest.childScore + strongest.sexualScore)
+    ) {
+      strongest = result;
+    }
+    if (strongest.tier === 'high') break;
+  }
+  return { ...strongest, hashMatched: false };
 }
 
 // INPUT-media NSFW scan for user-supplied face uploads (faceswap / motion-transfer face slot).
 // SEPARATE from scanForCsam: no child_present gating (age is NOT scanned here — D-2), thresholded
 // via its own config.hiveInputNsfwThreshold rather than the output SEXUAL_CONTENT_THRESHOLD, and
 // gated by its own config.hiveInputScanEnabled flag (checked by callers, not here) rather than
-// hiveScanEnabled. Celebrity likeness is NOT this function's job — see the separate Rekognition
+// HIVE_SCAN_REAL_FACE_PATHS. Celebrity likeness is NOT this function's job — see Rekognition
 // celebrityCheckMiddleware (D-1).
 //
 // Fail-safe: on Hive HTTP error or empty/unparseable output, visualModerationClasses() throws —

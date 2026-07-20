@@ -23,15 +23,19 @@ jest.mock('../../config', () => ({
     apnsTeamId: 'mock', apnsBundleId: 'mock', replicateApiToken: 'mock-token',
     hiveApiKey: 'mock-hive-key', publicBaseUrl: 'https://mock.example.com',
     port: 3000, nodeEnv: 'test',
-    hiveScanEnabled: true,
+    hiveScanRealFacePaths: true,
   },
 }));
 
 jest.mock('../../services/generationService', () => ({
+  getOutputModerationContext: jest.fn(),
   markCompleted: jest.fn(),
   markFailed: jest.fn(),
   markQuarantined: jest.fn(),
   mergeGenerationParams: jest.fn(),
+}));
+jest.mock('../../services/moderationEnforcementService', () => ({
+  enforceFlaggedGeneration: jest.fn(),
 }));
 jest.mock('../../services/creditService', () => ({ refundCredits: jest.fn() }));
 jest.mock('../../services/apnsService', () => ({ sendGenerationComplete: jest.fn() }));
@@ -48,6 +52,7 @@ jest.mock('../../db/client', () => ({ db: { execute: jest.fn() } }));
 jest.mock('../../queue/ffmpegProcessor', () => ({ runFfmpegOp: jest.fn() }));
 
 import {
+  getOutputModerationContext,
   markCompleted,
   markFailed,
   markQuarantined,
@@ -58,6 +63,7 @@ import { sendGenerationComplete } from '../../services/apnsService';
 import { scanForCsam } from '../../services/hiveService';
 import { db } from '../../db/client';
 import { runFfmpegOp } from '../../queue/ffmpegProcessor';
+import { enforceFlaggedGeneration } from '../../services/moderationEnforcementService';
 // FFMPEG_ATTEMPTS mirrors HIVE_SCAN_ATTEMPTS's role: the queue's defaultJobOptions.attempts,
 // exported so this file's expectation and the queue config can never silently drift apart (same
 // regression guard as hiveScanWorker.test.ts).
@@ -78,6 +84,12 @@ const JOB_DATA = {
 beforeEach(() => {
   jest.clearAllMocks();
   (db.execute as jest.Mock).mockResolvedValue({ rows: [{ apns_device_token: 'token-abc' }] });
+  (getOutputModerationContext as jest.Mock).mockResolvedValue({
+    generationId: JOB_DATA.generationId,
+    userId: JOB_DATA.userId,
+    hasRealFaceInput: true,
+    status: 'processing',
+  });
   (markCompleted as jest.Mock).mockResolvedValue(true);
   (markFailed as jest.Mock).mockResolvedValue(true);
   (markQuarantined as jest.Mock).mockResolvedValue(true);
@@ -109,23 +121,39 @@ describe('processFfmpegJob', () => {
     expect(sendGenerationComplete).toHaveBeenCalledWith('token-abc', JOB_DATA.generationId, 'video');
   });
 
-  it('quarantines and refunds a flagged final output exactly once without completing or pushing', async () => {
-    (scanForCsam as jest.Mock).mockResolvedValueOnce({ flagged: true });
+  it('hands a flagged real-face output to the two-tier enforcement service', async () => {
+    const result = { flagged: true, tier: 'low', childScore: 0.8, sexualScore: 0.7, hashMatched: false };
+    (scanForCsam as jest.Mock).mockResolvedValueOnce(result);
 
     await processFfmpegJob(JOB_DATA);
 
-    expect(markQuarantined).toHaveBeenCalledTimes(1);
-    expect(markQuarantined).toHaveBeenCalledWith(JOB_DATA.generationId);
-    expect(refundCredits).toHaveBeenCalledTimes(1);
-    expect(refundCredits).toHaveBeenCalledWith(
-      JOB_DATA.userId,
-      JOB_DATA.costCredits,
-      `csam-quarantine-ffmpeg-${JOB_DATA.generationId}`,
+    expect(enforceFlaggedGeneration).toHaveBeenCalledWith(
+      {
+        generationId: JOB_DATA.generationId,
+        r2Key: `generations/${JOB_DATA.generationId}.mp4`,
+        userId: JOB_DATA.userId,
+        costCredits: JOB_DATA.costCredits,
+      },
+      result,
     );
     expect(markCompleted).not.toHaveBeenCalled();
     expect(mergeGenerationParams).not.toHaveBeenCalled();
     expect(sendGenerationComplete).not.toHaveBeenCalled();
     expect(hiveScanAdd).not.toHaveBeenCalled();
+  });
+
+  it('does not scan an Explainer output without the persisted real-face flag', async () => {
+    (getOutputModerationContext as jest.Mock).mockResolvedValue({
+      generationId: JOB_DATA.generationId,
+      userId: JOB_DATA.userId,
+      hasRealFaceInput: false,
+      status: 'processing',
+    });
+
+    await processFfmpegJob({ ...JOB_DATA, op: 'explainer_compose' });
+
+    expect(scanForCsam).not.toHaveBeenCalled();
+    expect(markCompleted).toHaveBeenCalled();
   });
 
   it('queues the existing Hive retry job on scan error and never completes unscanned output', async () => {

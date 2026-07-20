@@ -74,6 +74,10 @@ videoTranslationRouter.post('/:id/translate', async (req: Request, res: Response
         status: 'pending',
         prompt: null,
         media_type: 'video',
+        // A derived output inherits the source's moderation provenance. Translating a real-face
+        // generation cannot turn it into a non-real-face path merely because no new upload was
+        // attached to this request.
+        has_real_face_input: source.has_real_face_input,
         cost_credits: cost,
         params: {
           tool: 'video_translation',

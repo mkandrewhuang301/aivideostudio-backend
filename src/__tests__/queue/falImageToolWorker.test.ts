@@ -16,7 +16,7 @@ jest.mock('../../config', () => ({
     apnsTeamId: 'mock', apnsBundleId: 'mock', replicateApiToken: 'mock-token',
     hiveApiKey: 'mock-hive-key', openaiApiKey: 'mock-openai-key',
     publicBaseUrl: 'https://mock.example.com', port: 3000, nodeEnv: 'test',
-    hiveScanEnabled: true,
+    hiveScanRealFacePaths: true,
   },
 }));
 
@@ -61,7 +61,7 @@ beforeEach(() => {
 });
 
 describe('processFalImageTool', () => {
-  it('archives the expiring PNG before scanning and completing', async () => {
+  it('archives the expiring PNG and completes without an output scan', async () => {
     (falRunImageBackgroundRemoval as jest.Mock).mockResolvedValue('https://fal.media/cutout.png');
     (archiveToR2 as jest.Mock).mockResolvedValue('generations/gen-bg-1.png');
     (scanForCsam as jest.Mock).mockResolvedValue({ flagged: false });
@@ -74,9 +74,7 @@ describe('processFalImageTool', () => {
       'gen-bg-1',
       'image/png',
     );
-    expect((archiveToR2 as jest.Mock).mock.invocationCallOrder[0]).toBeLessThan(
-      (scanForCsam as jest.Mock).mock.invocationCallOrder[0],
-    );
+    expect(scanForCsam).not.toHaveBeenCalled();
     expect(markCompleted).toHaveBeenCalledWith('gen-bg-1', 'generations/gen-bg-1.png');
     expect(refundCredits).not.toHaveBeenCalled();
   });
@@ -92,37 +90,16 @@ describe('processFalImageTool', () => {
     expect(markCompleted).not.toHaveBeenCalled();
   });
 
-  it('quarantines and refunds a CSAM-flagged output', async () => {
+  it('does not let a stale Hive mock block the non-real-face background-removal path', async () => {
     (falRunImageBackgroundRemoval as jest.Mock).mockResolvedValue('https://fal.media/cutout.png');
     (archiveToR2 as jest.Mock).mockResolvedValue('generations/gen-bg-1.png');
     (scanForCsam as jest.Mock).mockResolvedValue({ flagged: true });
 
     await processFalImageTool(JOB);
 
-    expect(markQuarantined).toHaveBeenCalledWith('gen-bg-1');
-    expect(refundCredits).toHaveBeenCalledWith(
-      'user-1',
-      2,
-      'csam-quarantine-fal-image-gen-bg-1',
-    );
-    expect(markCompleted).not.toHaveBeenCalled();
-  });
-
-  it('queues a Hive retry instead of exposing an unscanned output', async () => {
-    (falRunImageBackgroundRemoval as jest.Mock).mockResolvedValue('https://fal.media/cutout.png');
-    (archiveToR2 as jest.Mock).mockResolvedValue('generations/gen-bg-1.png');
-    (scanForCsam as jest.Mock).mockRejectedValue(new Error('Hive timeout'));
-
-    await processFalImageTool(JOB);
-
-    expect(hiveScanQueue.add).toHaveBeenCalledWith('scan', {
-      generationId: 'gen-bg-1',
-      r2Key: 'generations/gen-bg-1.png',
-      userId: 'user-1',
-      costCredits: 2,
-      mediaType: 'image',
-    });
-    expect(markCompleted).not.toHaveBeenCalled();
+    expect(scanForCsam).not.toHaveBeenCalled();
+    expect(markQuarantined).not.toHaveBeenCalled();
+    expect(markCompleted).toHaveBeenCalledWith('gen-bg-1', 'generations/gen-bg-1.png');
     expect(refundCredits).not.toHaveBeenCalled();
   });
 });

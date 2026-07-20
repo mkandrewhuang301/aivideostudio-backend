@@ -21,10 +21,30 @@ const execFileAsync = promisify(execFile);
 const OPENAI_TRANSCRIPTION_URL = 'https://api.openai.com/v1/audio/transcriptions';
 const WHISPER_MODEL = 'whisper-1';
 
-// Line-level cue grouping heuristic: break a new cue every ~7 words OR whenever the gap to the
-// next word exceeds 0.8s (a natural pause) — matches this plan's <behavior> spec verbatim.
-const MAX_WORDS_PER_CUE = 7;
-const MAX_GAP_SECONDS = 0.8;
+// Short-form-video captions need tighter limits than conventional two-line subtitles because the
+// editor intentionally renders each cue on ONE line. A word-count-only limit is not sufficient:
+// seven long words can be far wider than seven short ones. Group on a combination of visual
+// length, elapsed speech time, punctuation, and pauses instead.
+const MAX_WORDS_PER_CUE = 5;
+const MAX_CHARACTERS_PER_CUE = 30;
+const MAX_CUE_DURATION_SECONDS = 3;
+const STRONG_PAUSE_SECONDS = 0.45;
+const SOFT_PAUSE_SECONDS = 0.25;
+const MIN_WORDS_BEFORE_SOFT_BREAK = 3;
+
+function endsSentence(text: string): boolean {
+  return /[.!?…]["'”’)]*$/.test(text);
+}
+
+function endsPhrase(text: string): boolean {
+  return /[,;:]["'”’)]*$/.test(text);
+}
+
+function cueCharacterCount(words: CaptionWordDraft[], nextWord?: CaptionWordDraft): number {
+  return [...words, ...(nextWord ? [nextWord] : [])]
+    .map((word) => Array.from(word.text).length)
+    .reduce((total, length, index) => total + length + (index > 0 ? 1 : 0), 0);
+}
 
 export interface CaptionWordDraft {
   text: string;
@@ -77,7 +97,7 @@ function extFromKey(r2Key: string): string {
 
 /**
  * Groups Whisper's flat word-timestamp array into line-level caption cue drafts. Pure function —
- * no I/O — so the grouping heuristic (7-word cap OR >0.8s gap) is independently unit-testable.
+ * no I/O — so the readability heuristic is independently unit-testable.
  */
 export function groupWordsIntoCues(words: WhisperWord[]): CaptionCueDraft[] {
   const cues: CaptionCueDraft[] = [];
@@ -85,9 +105,24 @@ export function groupWordsIntoCues(words: WhisperWord[]): CaptionCueDraft[] {
 
   for (const w of words) {
     const word: CaptionWordDraft = { text: w.word.trim(), startSeconds: w.start, endSeconds: w.end };
+    if (!word.text) continue;
+
     const lastWord = current?.words[current.words.length - 1];
     const gapSeconds = lastWord ? word.startSeconds - lastWord.endSeconds : 0;
-    const startsNewCue = !current || current.words.length >= MAX_WORDS_PER_CUE || gapSeconds > MAX_GAP_SECONDS;
+    const cueDurationWithWord = current ? word.endSeconds - current.startSeconds : 0;
+    const previousEndsPhrase = lastWord
+      ? endsSentence(lastWord.text)
+        || (endsPhrase(lastWord.text) && current!.words.length >= MIN_WORDS_BEFORE_SOFT_BREAK)
+      : false;
+    const pauseBoundary = gapSeconds >= STRONG_PAUSE_SECONDS
+      || (gapSeconds >= SOFT_PAUSE_SECONDS
+        && (current?.words.length ?? 0) >= MIN_WORDS_BEFORE_SOFT_BREAK);
+    const startsNewCue = !current
+      || current.words.length >= MAX_WORDS_PER_CUE
+      || cueCharacterCount(current.words, word) > MAX_CHARACTERS_PER_CUE
+      || cueDurationWithWord > MAX_CUE_DURATION_SECONDS
+      || previousEndsPhrase
+      || pauseBoundary;
 
     if (startsNewCue) {
       current = { startSeconds: word.startSeconds, endSeconds: word.endSeconds, words: [word] };

@@ -483,15 +483,77 @@ export async function markFailed(
   return (result.rows?.length ?? 0) > 0;
 }
 
-export async function markQuarantined(generationId: string): Promise<boolean> {
+export async function markQuarantined(generationId: string, r2Key?: string): Promise<boolean> {
   // Accepts 'pending' in addition to 'processing' for the OpenAI inline path.
-  const result = await db.execute(sql`
-    UPDATE generations
-    SET status = 'quarantined', completed_at = now()
-    WHERE id = ${generationId}::uuid AND status IN ('pending', 'processing')
-    RETURNING id
-  `);
+  const result = r2Key
+    ? await db.execute(sql`
+        UPDATE generations
+        SET status = 'quarantined', r2_key = ${r2Key}, completed_at = now()
+        WHERE id = ${generationId}::uuid AND status IN ('pending', 'processing')
+        RETURNING id
+      `)
+    : await db.execute(sql`
+        UPDATE generations
+        SET status = 'quarantined', completed_at = now()
+        WHERE id = ${generationId}::uuid AND status IN ('pending', 'processing')
+        RETURNING id
+      `);
   return (result.rows?.length ?? 0) > 0;
+}
+
+export interface OutputModerationContext {
+  generationId: string;
+  userId: string;
+  hasRealFaceInput: boolean;
+  status: GenerationStatus;
+}
+
+/** Persisted policy-v2 gate used by completion workers that do not already hold a generation row. */
+export async function getOutputModerationContext(
+  generationId: string,
+): Promise<OutputModerationContext | undefined> {
+  const result = await db.execute(sql`
+    SELECT id, user_id, has_real_face_input, status
+    FROM generations
+    WHERE id = ${generationId}::uuid
+  `);
+  const row = result.rows?.[0] as {
+    id: string;
+    user_id: string;
+    has_real_face_input: boolean;
+    status: GenerationStatus;
+  } | undefined;
+  return row
+    ? {
+        generationId: row.id,
+        userId: row.user_id,
+        hasRealFaceInput: row.has_real_face_input,
+        status: row.status,
+      }
+    : undefined;
+}
+
+/** High-confidence moderation action. Cache propagation remains bounded by auth's 60s TTL. */
+export async function banUserForModeration(userId: string): Promise<void> {
+  await db.execute(sql`
+    UPDATE users
+    SET banned = true, updated_at = now()
+    WHERE id = ${userId}::uuid
+  `);
+}
+
+/** Low-confidence action: one atomic strike increment; the third strike bans the account. */
+export async function addModerationStrike(userId: string): Promise<{ strikes: number; banned: boolean }> {
+  const result = await db.execute(sql`
+    UPDATE users
+    SET moderation_strikes = moderation_strikes + 1,
+        banned = banned OR moderation_strikes + 1 >= 3,
+        updated_at = now()
+    WHERE id = ${userId}::uuid
+    RETURNING moderation_strikes, banned
+  `);
+  const row = result.rows?.[0] as { moderation_strikes: number; banned: boolean } | undefined;
+  return { strikes: row?.moderation_strikes ?? 0, banned: row?.banned ?? false };
 }
 
 export async function markRefunded(generationId: string): Promise<boolean> {
@@ -514,13 +576,15 @@ export interface GenerationByPredictionRow {
   prompt: string | null;
   params: unknown;
   retry_count: number;
+  has_real_face_input: boolean;
 }
 
 export async function getGenerationByPredictionId(
   predictionId: string,
 ): Promise<GenerationByPredictionRow | undefined> {
   const result = await db.execute(sql`
-    SELECT id, user_id, status, cost_credits, media_type, model, prompt, params, retry_count
+    SELECT id, user_id, status, cost_credits, media_type, model, prompt, params, retry_count,
+           has_real_face_input
     FROM generations WHERE replicate_prediction_id = ${predictionId}
   `);
   return result.rows?.[0] as unknown as GenerationByPredictionRow | undefined;

@@ -57,6 +57,7 @@ export const users = pgTable(
     total_generations: integer('total_generations').notNull().default(0), // incremented on generation completion; avoids COUNT(*) on generations table
     last_active_at: timestamp('last_active_at', { withTimezone: true }), // churn analytics and re-engagement push (Phase 7)
     banned: boolean('banned').notNull().default(false),
+    moderation_strikes: integer('moderation_strikes').notNull().default(0),
     onboarding_preferences: jsonb('onboarding_preferences'), // nullable jsonb; saved after auth from bubble-picker onboarding (Phase 6)
     face_consent_at: timestamp('face_consent_at', { withTimezone: true }), // SC2: set once on first-use face-input consent attestation; NULL = not yet consented
     created_at: timestamp('created_at', { withTimezone: true })
@@ -121,6 +122,16 @@ export const generations = pgTable(
     media_type: text('media_type').notNull().default('video'), // 'video' | 'image'; validated at application layer (prepareCost middleware)
     failure_reason: text('failure_reason'), // nullable; 'content_policy' | 'copyright' | 'generic_error' | 'provider_error' — set when status transitions to 'failed'
     retry_count: integer('retry_count').notNull().default(0), // bumped on transient-provider-error auto-retry (webhooks/replicate.ts); capped at 1
+    // Moderation policy v2 (2026-07-19): only generations that consumed a real-person face
+    // input cross the blocking output-scan boundary. Persist the decision at dispatch time so
+    // webhook/worker retries never have to reconstruct it from expiring URLs or client data.
+    has_real_face_input: boolean('has_real_face_input').notNull().default(false),
+    // CyberTipline reporting state. report_id is written immediately after /submit so retries
+    // resume the same report; file_id is written after /upload + /fileinfo; reported_at is set
+    // only after /finish succeeds. This is the audit trail for the legally load-bearing call.
+    ncmec_report_id: text('ncmec_report_id'),
+    ncmec_file_id: text('ncmec_file_id'),
+    ncmec_reported_at: timestamp('ncmec_reported_at', { withTimezone: true }),
     is_favorite: boolean('is_favorite').notNull().default(false), // FAV-01: user-toggled favorite flag, display-only server state
     created_at: timestamp('created_at', { withTimezone: true })
       .notNull()

@@ -14,6 +14,7 @@ import { scheduleReaper } from './queue/reaperWorker';
 import { scheduleUploadReaper } from './queue/uploadReaperWorker';
 import { scheduleYearlyGrant } from './queue/yearlyGrantWorker';
 import './queue/hiveScanWorker';
+import './queue/ncmecReportWorker';
 import './queue/openaiGenerationWorker';
 import './queue/falImageToolWorker';
 import './queue/chainGenerationWorker';
@@ -42,9 +43,17 @@ scheduleReaper().catch((err) => console.error('[server] Failed to schedule reape
 scheduleUploadReaper().catch((err) => console.error('[server] Failed to schedule upload reaper:', err));
 scheduleYearlyGrant().catch((err) => console.error('[server] Failed to schedule yearly grant:', err));
 
-// Hive CSAM scanning defaults on; HIVE_SCAN_ENABLED=false disables it deliberately.
-// Logged at startup so a missing/misconfigured env var doesn't silently disable scanning.
-console.log(`[server] Hive CSAM scanning: ${config.hiveScanEnabled ? 'ENABLED' : 'DISABLED'}`);
+// Policy v2: this switch can only activate output scanning for persisted real-face paths.
+console.log(`[server] Hive real-face-path output scanning: ${config.hiveScanRealFacePaths ? 'ENABLED' : 'DISABLED'}`);
+if (config.hiveScanRealFacePaths && !config.hiveApiKey) {
+  console.error('[server] HIVE_SCAN_REAL_FACE_PATHS is enabled but HIVE_API_KEY is missing');
+}
+if (config.hiveScanRealFacePaths && !config.hiveCsamApiKey) {
+  console.warn('[server] HIVE_CSAM_API_KEY is missing; real-face scans use the tuned visual combiner without Thorn hash matching');
+}
+if (!config.ncmecEspUsername || !config.ncmecEspPassword || !config.ncmecReporterEmail) {
+  console.warn('[server] NCMEC API reporting is not fully configured; high-confidence flags require the runbook fallback');
+}
 
 const app = express();
 
