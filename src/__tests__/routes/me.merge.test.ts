@@ -18,6 +18,11 @@ jest.mock('../../services/accountDeletionService', () => ({
   deleteUserAccount: mockDeleteUserAccount,
 }));
 
+const mockGrantIfEligible = jest.fn();
+jest.mock('../../services/freeCreditGrantService', () => ({
+  grantIfEligible: mockGrantIfEligible,
+}));
+
 const mockMergeUser = jest.fn();
 jest.mock('../../services/userMergeService', () => ({
   mergeUser: mockMergeUser,

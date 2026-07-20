@@ -8,6 +8,7 @@ import { db } from '../db/client';
 import { sql } from 'drizzle-orm';
 import { CONCURRENCY_LIMIT, isTier } from '../config/tiers';
 import { deleteUserAccount } from '../services/accountDeletionService';
+import { grantIfEligible } from '../services/freeCreditGrantService';
 
 export const meRouter = Router();
 
@@ -61,6 +62,28 @@ meRouter.get('/', async (req: Request, res: Response) => {
   } catch (error) {
     console.error('[me] Error fetching user balance:', error);
     res.status(500).json({ error: 'Failed to fetch user data' });
+  }
+});
+
+// POST /api/me/free-credits — DeviceCheck-backed, once-per-device guest credit grant.
+meRouter.post('/free-credits', async (req: Request, res: Response) => {
+  if (!req.user?.dbUserId) {
+    res.status(401).json({ error: 'Not authenticated' });
+    return;
+  }
+
+  const { deviceToken } = req.body ?? {};
+  if (typeof deviceToken !== 'string' || deviceToken.trim().length === 0) {
+    res.status(400).json({ error: 'deviceToken is required', code: 'MISSING_DEVICE_TOKEN' });
+    return;
+  }
+
+  try {
+    await grantIfEligible(req.user.dbUserId, req.user.uid, deviceToken);
+    res.status(204).send();
+  } catch (error) {
+    console.error('[me] Error processing free credits:', error);
+    res.status(500).json({ error: 'Failed to process free credits' });
   }
 });
 

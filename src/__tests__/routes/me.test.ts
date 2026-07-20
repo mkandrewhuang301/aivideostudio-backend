@@ -21,6 +21,11 @@ jest.mock('../../services/accountDeletionService', () => ({
   deleteUserAccount: mockDeleteUserAccount,
 }));
 
+const mockGrantIfEligible = jest.fn();
+jest.mock('../../services/freeCreditGrantService', () => ({
+  grantIfEligible: mockGrantIfEligible,
+}));
+
 import express, { Request, Response, NextFunction } from 'express';
 import request from 'supertest';
 import { meRouter } from '../../routes/me';
@@ -171,6 +176,64 @@ describe('GET /api/me', () => {
 
     expect(res.body.tier).toBeNull();
     expect(res.body.parallel_limit).toBeNull();
+  });
+});
+
+// ─── POST /api/me/free-credits ──────────────────────────────────────────────
+
+describe('POST /api/me/free-credits', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockGrantIfEligible.mockResolvedValue(undefined);
+  });
+
+  it('returns 204 after processing a valid DeviceCheck token', async () => {
+    const res = await request(buildApp(AUTHED_USER))
+      .post('/api/me/free-credits')
+      .send({ deviceToken: 'base64-devicecheck-token' });
+
+    expect(res.status).toBe(204);
+    expect(mockGrantIfEligible).toHaveBeenCalledWith(
+      'db-user-uuid-1',
+      'firebase-uid-1',
+      'base64-devicecheck-token',
+    );
+  });
+
+  it.each([
+    {},
+    { deviceToken: '' },
+    { deviceToken: '   ' },
+    { deviceToken: 123 },
+    { deviceToken: null },
+  ])('returns 400 MISSING_DEVICE_TOKEN for invalid input %#', async (body) => {
+    const res = await request(buildApp(AUTHED_USER)).post('/api/me/free-credits').send(body);
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('MISSING_DEVICE_TOKEN');
+    expect(mockGrantIfEligible).not.toHaveBeenCalled();
+  });
+
+  it('returns 401 when unauthenticated', async () => {
+    const res = await request(buildApp(null))
+      .post('/api/me/free-credits')
+      .send({ deviceToken: 'base64-devicecheck-token' });
+
+    expect(res.status).toBe(401);
+    expect(mockGrantIfEligible).not.toHaveBeenCalled();
+  });
+
+  it('returns 500 when the grant service fails', async () => {
+    mockGrantIfEligible.mockRejectedValueOnce(new Error('Apple unavailable'));
+    const consoleError = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    const res = await request(buildApp(AUTHED_USER))
+      .post('/api/me/free-credits')
+      .send({ deviceToken: 'base64-devicecheck-token' });
+
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual({ error: 'Failed to process free credits' });
+    consoleError.mockRestore();
   });
 });
 
