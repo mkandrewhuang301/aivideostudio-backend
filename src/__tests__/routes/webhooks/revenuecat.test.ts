@@ -58,7 +58,7 @@ const VALID_AUTH = 'Bearer test-webhook-secret';
 const WRONG_AUTH = 'Bearer wrong-secret';
 
 // A DB user row returned on lookup
-const USER_ROW = { id: 'db-user-uuid-1' };
+const USER_ROW = { id: 'db-user-uuid-1', entitlement_level: 'basic' };
 
 // Helper: build a minimal RevenueCat event payload
 function makePayload(
@@ -190,6 +190,31 @@ describe('INITIAL_PURCHASE event (PAY-01)', () => {
 // ─── NON_RENEWING_PURCHASE (top-up) ─────────────────────────────────────────
 
 describe('NON_RENEWING_PURCHASE event (top-up)', () => {
+  it('still grants a top-up and warns when the user has no subscription entitlement', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    (db.execute as jest.Mock).mockResolvedValueOnce({
+      rows: [{ id: USER_ROW.id, entitlement_level: null }],
+    });
+
+    try {
+      await request(app)
+        .post('/webhooks/revenuecat')
+        .set('Authorization', VALID_AUTH)
+        .send(makePayload('NON_RENEWING_PURCHASE', 'com.fantasiaai.topup_9_99', 'txn-topup-guest-001'));
+
+      expect(grantCredits).toHaveBeenCalledWith(
+        USER_ROW.id,
+        500,
+        'topup_grant',
+        'txn-topup-guest-001',
+        expect.any(Date),
+      );
+      expect(warnSpy.mock.calls.flat().join(' ')).toContain('non-subscriber');
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
   it('grants 500 credits with 90-day expiry for topup_9_99', async () => {
     await request(app)
       .post('/webhooks/revenuecat')
