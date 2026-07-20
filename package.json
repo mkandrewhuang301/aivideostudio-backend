@@ -42,6 +42,7 @@
     "express": "^4.21.2",
     "firebase-admin": "^13.4.0",
     "ioredis": "^5.6.1",
+    "jsonwebtoken": "^9.0.3",
     "multer": "^2.2.0",
     "pdf-parse": "^2.4.5",
     "replicate": "^1.4.0",
@@ -50,6 +51,7 @@
   },
   "devDependencies": {
     "@types/jest": "^29.5.14",
+    "@types/jsonwebtoken": "^9.0.10",
     "@types/multer": "^2.1.0",
     "@types/node": "^26.0.0",
     "@types/supertest": "^7.2.0",
