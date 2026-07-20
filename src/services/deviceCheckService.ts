@@ -63,7 +63,10 @@ async function postToDeviceCheck<T>(
     );
   }
 
-  if (response.status === 204) return undefined as T;
+  // Apple's update_two_bits endpoint reports success with HTTP 200 and no JSON body.
+  // Only query_two_bits has a response payload; trying to decode update success as JSON
+  // turns a completed Apple bit update into a false grant failure.
+  if (path === 'update_two_bits' || response.status === 204) return undefined as T;
   return (await response.json()) as T;
 }
 
