@@ -19,9 +19,17 @@ import { sql, desc } from 'drizzle-orm';
 export const creditTransactionTypeEnum = pgEnum('credit_transaction_type', [
   'subscription_grant',
   'topup_grant',
+  'free_grant',
   'generation_deduct',
   'generation_refund',
   'refund_clawback',
+]);
+
+export const freeCreditsStateEnum = pgEnum('free_credits_state', [
+  'pending',
+  'devicecheck_updated',
+  'granted',
+  'ineligible',
 ]);
 
 export const generationStatusEnum = pgEnum('generation_status', [
@@ -39,6 +47,7 @@ export const generationStatusEnum = pgEnum('generation_status', [
 //           created_at, updated_at
 // Note: credits_balance is a SIGNED integer (allows negative for bug detection).
 //       apns_device_token added here for Phase 4 (APNs) to avoid a future migration.
+//       free_credits_state persists the DeviceCheck/grant recovery state machine.
 
 export const users = pgTable(
   'users',
@@ -47,6 +56,7 @@ export const users = pgTable(
     firebase_uid: text('firebase_uid').notNull().unique(),
     email: text('email'),
     credits_balance: integer('credits_balance').notNull().default(0),
+    free_credits_state: freeCreditsStateEnum('free_credits_state').notNull().default('pending'),
     apns_device_token: text('apns_device_token'),
     entitlement_level: text('entitlement_level'), // nullable: 'basic' | 'pro' | NULL (no active subscription)
     subscription_allotment: integer('subscription_allotment').notNull().default(0), // credits granted in the current billing period (reset on RENEWAL)
@@ -69,6 +79,35 @@ export const users = pgTable(
   },
   (table) => ({
     firebaseUidIdx: uniqueIndex('users_firebase_uid_idx').on(table.firebase_uid),
+  }),
+);
+
+// ─── user_merges ─────────────────────────────────────────────────────────────
+// Idempotency and audit record for one-time anonymous-user merges. Free-grant
+// credits remain on the source account and are recorded separately from the
+// purchased credits transferred to the target account.
+
+export const userMerges = pgTable(
+  'user_merges',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    from_user_id: uuid('from_user_id')
+      .notNull()
+      .references(() => users.id),
+    to_user_id: uuid('to_user_id')
+      .notNull()
+      .references(() => users.id),
+    transferred_credits: integer('transferred_credits').notNull().default(0),
+    excluded_free_credits: integer('excluded_free_credits').notNull().default(0),
+    created_at: timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+  },
+  (table) => ({
+    fromToUniqueIdx: uniqueIndex('user_merges_from_user_id_to_user_id_unique_idx').on(
+      table.from_user_id,
+      table.to_user_id,
+    ),
   }),
 );
 
@@ -387,6 +426,8 @@ export const projectCaptionWords = pgTable(
 
 export type User = typeof users.$inferSelect;
 export type NewUser = typeof users.$inferInsert;
+export type UserMerge = typeof userMerges.$inferSelect;
+export type NewUserMerge = typeof userMerges.$inferInsert;
 export type CreditTransaction = typeof creditTransactions.$inferSelect;
 export type NewCreditTransaction = typeof creditTransactions.$inferInsert;
 export type Generation = typeof generations.$inferSelect;
