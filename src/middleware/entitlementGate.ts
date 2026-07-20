@@ -1,7 +1,7 @@
 // src/middleware/entitlementGate.ts
-// Tier gating for POST /api/generations (paywall-tiers-plan.md Part 1). Blocks dispatch of a
-// model/resolution above the user's subscription tier — and, per the hard-paywall product model,
-// blocks a NULL entitlement_level (no active subscription) entirely.
+// Tier gating for POST /api/generations (paywall-tiers-plan.md Part 1). Guests with a NULL
+// entitlement_level may dispatch basic models/resolutions while credits last; pro and creator
+// requirements remain subscription-gated.
 //
 // Placement (generations.ts chain): AFTER prepareCost (needs req._resolved.model/resolution) and
 // BEFORE creditCheckMiddleware (a block deducts NO credits — mirrors celebrityCheckMiddleware/

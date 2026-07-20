@@ -1,8 +1,8 @@
 // src/__tests__/middleware/entitlementGate.test.ts
 // Tests for entitlementGate — tier gating for POST /api/generations (paywall-tiers-plan.md
 // Part 1, items 2-3). Covers: basic user + premium model -> 403; pro user + premium model ->
-// passes; 1080p requires pro; 4k requires creator; NULL entitlement -> 403 (hard paywall); DB
-// error -> fail-safe 403.
+// passes; 1080p requires pro; 4k requires creator; NULL entitlement passes basic only; DB error
+// -> fail-safe 403.
 
 const mockExecute = jest.fn();
 jest.mock('../../db/client', () => ({
@@ -100,21 +100,38 @@ describe('entitlementGate', () => {
     expect(res.status).not.toHaveBeenCalled();
   });
 
-  it('blocks a NULL entitlement (no active subscription) even on a core model — hard paywall', async () => {
+  it('allows a NULL entitlement guest to dispatch a basic 720p core model', async () => {
     mockEntitlement(null);
     const { req, res, next } = makeReqResNext({ model: 'bytedance/seedance-2.0-mini', resolution: '720p' });
     await entitlementGate(req, res, next);
+    expect(next).toHaveBeenCalled();
+    expect(res.status).not.toHaveBeenCalled();
+  });
+
+  it('blocks a NULL entitlement guest from requesting 1080p with required_tier pro', async () => {
+    mockEntitlement(null);
+    const { req, res, next } = makeReqResNext({ model: 'bytedance/seedance-2.0-mini', resolution: '1080p' });
+    await entitlementGate(req, res, next);
     expect(res.status).toHaveBeenCalledWith(403);
-    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'TIER_REQUIRED', required_tier: 'basic' }));
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'TIER_REQUIRED', required_tier: 'pro' }));
     expect(next).not.toHaveBeenCalled();
   });
 
-  it('treats a missing user row (no rows returned) the same as NULL entitlement', async () => {
+  it('blocks a NULL entitlement guest from requesting a 4k creator generation', async () => {
+    mockEntitlement(null);
+    const { req, res, next } = makeReqResNext({ model: 'bytedance/seedance-2.0-mini', resolution: '4k' });
+    await entitlementGate(req, res, next);
+    expect(res.status).toHaveBeenCalledWith(403);
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'TIER_REQUIRED', required_tier: 'creator' }));
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  it('treats a missing user row (no rows returned) like a NULL entitlement for basic access', async () => {
     mockExecute.mockResolvedValue({ rows: [] });
     const { req, res, next } = makeReqResNext({ model: 'bytedance/seedance-2.0-mini', resolution: '720p' });
     await entitlementGate(req, res, next);
-    expect(res.status).toHaveBeenCalledWith(403);
-    expect(next).not.toHaveBeenCalled();
+    expect(next).toHaveBeenCalled();
+    expect(res.status).not.toHaveBeenCalled();
   });
 
   it('fails safe (blocks with 403) when the DB query throws', async () => {

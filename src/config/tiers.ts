@@ -4,10 +4,9 @@
 // floors + concurrency caps. Model ids are pulled from the real registries in
 // services/generationService.ts — never invent an id here.
 //
-// Product model is a HARD PAYWALL (CLAUDE.md: "Monetized via monthly subscription + credit
-// top-ups"): users.entitlement_level is 'basic' | 'pro' | 'creator' | NULL, and NULL (no active
-// subscription) is treated as below 'basic' — it should not normally occur post-onboarding, but
-// entitlementGate must never crash on it.
+// Product model is guest-first: users.entitlement_level is 'basic' | 'pro' | 'creator' | NULL.
+// NULL means no active subscription and may use basic-tier models/resolutions while credits last;
+// pro and creator requirements still require the corresponding paid entitlement.
 
 export type Tier = 'basic' | 'pro' | 'creator';
 
@@ -17,9 +16,10 @@ export function isTier(value: unknown): value is Tier {
   return value === 'basic' || value === 'pro' || value === 'creator';
 }
 
-// True if `have` meets or exceeds `need`. NULL/undefined `have` (no entitlement) never satisfies
-// any requirement, including 'basic' — this IS the hard-paywall enforcement point.
+// True if `have` meets or exceeds `need`. Basic is available to every authenticated user,
+// including guests with NULL/undefined entitlement; pro and creator still require a real tier.
 export function tierAtLeast(have: Tier | null | undefined, need: Tier): boolean {
+  if (need === 'basic') return true;
   if (!have) return false;
   return TIER_RANK[have] >= TIER_RANK[need];
 }
