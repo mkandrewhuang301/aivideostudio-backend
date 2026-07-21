@@ -694,6 +694,12 @@ describe('POST /api/projects/:id/clips', () => {
     expect(copyCall).toBeDefined();
     expect(copyCall![0].input.Key).toMatch(/^projects\/proj-1\/clips\//);
     expect(copyCall![0].input.CopySource).toBe('test-bucket/generations/gen-1.mp4');
+    expect(mockExtractVideoFrame).toHaveBeenCalledWith(
+      'https://r2.example.com/presigned-clip-url',
+      expect.stringMatching(/^project-thumb-/),
+    );
+    const thumbnailUpdate = dbMock.update.mock.results[0].value.set.mock.calls[0][0];
+    expect(thumbnailUpdate).toEqual({ thumbnail_r2_key: 'generations/project-cover-mocked.png' });
   });
 
   it('rejects with 400 when the project already holds the maximum clip count', async () => {
@@ -734,6 +740,9 @@ describe('POST /api/projects/:id/clips', () => {
     expect(mockProbeVideoMeta).toHaveBeenCalledTimes(1);
     const insertedValues = dbMock.insert.mock.results[0].value.values.mock.calls[0][0];
     expect(insertedValues.original_duration_seconds).toBe(3);
+    expect(mockExtractVideoFrame).not.toHaveBeenCalled();
+    const thumbnailUpdate = dbMock.update.mock.results[0].value.set.mock.calls[0][0];
+    expect(thumbnailUpdate.thumbnail_r2_key).toMatch(/^projects\/proj-1\/clips\//);
   });
 
   it('B1: video upload path probes the just-uploaded temp file and passes the real duration + dimensions through', async () => {
@@ -851,6 +860,37 @@ describe('POST /api/projects/:id/clips', () => {
 // ─── PATCH /api/projects/:id/clips/:clipId ─────────────────────────────────────
 
 describe('PATCH /api/projects/:id/clips/:clipId', () => {
+  it('updates a clip source volume without marking captions stale', async () => {
+    dbMock.select.mockReturnValueOnce(makeChain([{ id: 'proj-1' }]));
+    dbMock.update.mockReturnValueOnce(
+      makeChain([{ id: 'clip-1', project_id: 'proj-1', volume: 0.42 }]),
+    );
+
+    const res = await request(app)
+      .patch('/api/projects/proj-1/clips/clip-1')
+      .send({ volume: 0.42 });
+
+    expect(res.status).toBe(200);
+    expect(res.body.clip.volume).toBe(0.42);
+    expect(res.body).not.toHaveProperty('captions_may_be_stale');
+    expect(dbMock.update.mock.results[0].value.set).toHaveBeenCalledWith({ volume: 0.42 });
+  });
+
+  it('rejects clip source volume outside the 0...1 range', async () => {
+    for (const volume of [-0.01, 1.01]) {
+      dbMock.select.mockReset();
+      dbMock.update.mockReset();
+      dbMock.select.mockReturnValueOnce(makeChain([{ id: 'proj-1' }]));
+
+      const res = await request(app)
+        .patch('/api/projects/proj-1/clips/clip-1')
+        .send({ volume });
+
+      expect(res.status).toBe(400);
+      expect(dbMock.update).not.toHaveBeenCalled();
+    }
+  });
+
   it('trims a clip and returns 200', async () => {
     dbMock.select
       .mockReturnValueOnce(makeChain([{ id: 'proj-1' }])) // owned project

@@ -69,6 +69,8 @@ describe('reapUnnamedUploads', () => {
     const selectSql = extractSql(mockDbExecute.mock.calls[0][0]);
     expect(selectSql).toMatch(/display_name IS NULL/);
     expect(selectSql).toMatch(/interval '24 hours'/);
+    expect(selectSql).toMatch(/generation\.params->'preset_input_upload_ids'/);
+    expect(selectSql).toMatch(/generation\.params->>'mask_upload_id'/);
 
     expect(mockR2Send).toHaveBeenCalledTimes(1);
     const deleteSql = extractSql(mockDbExecute.mock.calls[1][0]);

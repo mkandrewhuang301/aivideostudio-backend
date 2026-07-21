@@ -915,6 +915,9 @@ generationsRouter.post('/', promptModerationMiddleware, presetResolver, formatRe
       ? {
           preset_id: req._preset.preset_id,
           preset_input_upload_ids: req._preset.input_upload_ids,
+          // Persist the owned upload id, never the expiring mask_url. This lets Magic Editor
+          // history render the prior selection and lets Regen replay the exact edit.
+          ...(req._preset.mask_upload_id ? { mask_upload_id: req._preset.mask_upload_id } : {}),
           // 09.3-05: stamps the ffmpeg post-process op (mux/concat) onto the generation row when
           // the resolved preset declares one — read by the webhook to enqueue ffmpegWorker instead
           // of marking the generation complete immediately.
@@ -1231,7 +1234,15 @@ function presetSafeSerialization(item: {
     media_type: item.media_type === 'faceswap' ? 'image' : item.media_type,
     model: isPreset || isVideoTranslation ? null : item.model,
     params: isPreset
-      ? { preset_id: p!.preset_id, preset_input_upload_ids: p!.preset_input_upload_ids ?? [] }
+      ? {
+          preset_id: p!.preset_id,
+          preset_input_upload_ids: p!.preset_input_upload_ids ?? [],
+          // An opaque, user-owned upload id is safe to return and is required for exact replay.
+          // No provider URL or internal expanded prompt is exposed.
+          ...(p!.preset_id === 'magic-editor' && typeof p!.mask_upload_id === 'string'
+            ? { mask_upload_id: p!.mask_upload_id }
+            : {}),
+        }
       : isFormat
       ? formatParams
       : isVideoTranslation
@@ -1270,7 +1281,10 @@ generationsRouter.get('/', async (req: Request, res: Response) => {
       const p = item.params as Record<string, unknown> | null;
       const refIds = Array.isArray(p?.ref_upload_ids) ? p.ref_upload_ids : [];
       const presetIds = Array.isArray(p?.preset_input_upload_ids) ? p.preset_input_upload_ids : [];
-      return [...refIds, ...presetIds].filter((id): id is string => typeof id === 'string');
+      const maskIds = p?.preset_id === 'magic-editor' && typeof p?.mask_upload_id === 'string'
+        ? [p.mask_upload_id]
+        : [];
+      return [...refIds, ...presetIds, ...maskIds].filter((id): id is string => typeof id === 'string');
     });
     const refUploadRows = allUploadIds.length > 0
       ? await db.select().from(referenceUploads).where(and(
@@ -1287,6 +1301,9 @@ generationsRouter.get('/', async (req: Request, res: Response) => {
         const presetInputIds = Array.isArray(p?.preset_input_upload_ids)
           ? p!.preset_input_upload_ids as unknown[]
           : [];
+        const magicEditorMaskId = p?.preset_id === 'magic-editor' && typeof p?.mask_upload_id === 'string'
+          ? p.mask_upload_id
+          : undefined;
         const referenceUrls = await Promise.all(
           refIds
             .filter((id) => refUploadMap[id])
@@ -1323,6 +1340,9 @@ generationsRouter.get('/', async (req: Request, res: Response) => {
             : null,
           reference_urls: referenceUrls.length > 0 ? referenceUrls : null,
           preset_input_urls: presetInputUrls.some(Boolean) ? presetInputUrls : null,
+          magic_editor_mask_url: magicEditorMaskId && refUploadMap[magicEditorMaskId]
+            ? await getUploadPresignedUrl(refUploadMap[magicEditorMaskId].r2_key)
+            : null,
         };
       }),
     );
@@ -1352,7 +1372,10 @@ generationsRouter.get('/:id', async (req: Request, res: Response) => {
     const presetInputIds = Array.isArray(p?.preset_input_upload_ids)
       ? p!.preset_input_upload_ids as unknown[]
       : [];
-    const allUploadIds = [...refIds, ...presetInputIds]
+    const magicEditorMaskId = p?.preset_id === 'magic-editor' && typeof p?.mask_upload_id === 'string'
+      ? p.mask_upload_id
+      : undefined;
+    const allUploadIds = [...refIds, ...presetInputIds, ...(magicEditorMaskId ? [magicEditorMaskId] : [])]
       .filter((id): id is string => typeof id === 'string');
     const referenceRows = allUploadIds.length > 0
       ? await db.select().from(referenceUploads).where(and(
@@ -1387,6 +1410,9 @@ generationsRouter.get('/:id', async (req: Request, res: Response) => {
       video_url,
       reference_urls,
       preset_input_urls: preset_input_urls?.some(Boolean) ? preset_input_urls : null,
+      magic_editor_mask_url: magicEditorMaskId && referenceRowMap[magicEditorMaskId]
+        ? await getUploadPresignedUrl(referenceRowMap[magicEditorMaskId].r2_key)
+        : null,
     });
   } catch (err) {
     console.error('[generations] Error fetching generation:', err);

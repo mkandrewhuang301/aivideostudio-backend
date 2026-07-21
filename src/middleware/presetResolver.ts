@@ -41,6 +41,9 @@ declare global {
       _preset?: {
         preset_id: string;
         input_upload_ids: Array<string | null>;
+        // Magic Editor's alpha mask is replayable generation input just like the source slot.
+        // Persist only its owned upload id; the short-lived presigned URL stays server-side.
+        mask_upload_id?: string;
         postprocess?: { op: 'mux' | 'concat'; audio_r2_key?: string };
       };
     }
@@ -327,9 +330,13 @@ export async function presetResolver(req: Request, res: Response, next: NextFunc
         break;
     }
 
+    const maskUploadId = preset_id === 'magic-editor' && typeof req.body.mask_upload_id === 'string'
+      ? req.body.mask_upload_id
+      : undefined;
     req._preset = {
       preset_id,
       input_upload_ids: uploadIds,
+      ...(maskUploadId ? { mask_upload_id: maskUploadId } : {}),
       ...(def.postprocess ? { postprocess: def.postprocess } : {}),
     };
     next();

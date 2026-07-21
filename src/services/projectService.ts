@@ -576,18 +576,21 @@ export async function importClipByCopy(input: ImportClipParams): Promise<Project
     })
     .returning();
 
-  // First clip ever added to this project (nextSortOrder === 0) becomes its cover thumbnail —
-  // best-effort, never blocks the clip-import response. Video clips get a real extracted frame
+  // First clip ever added to this project (nextSortOrder === 0) becomes its cover thumbnail.
+  // Await the best-effort work before returning so the create-project flow's immediate follow-up
+  // GET cannot race the thumbnail update and permanently cache a nil cover. Video clips get a
+  // real extracted frame
   // (reuses AI Influencer Pro's frameExtractor.ts, same execFile-fixed-argv ffmpeg pattern);
   // image clips are already a still, so their own r2Key is the thumbnail directly. Does not
   // re-derive on every subsequent clip add/delete — the project's cover is set once, like a
-  // static poster, not a live "current first clip" mirror. Skipped under Jest (NODE_ENV=test) —
-  // this is a fire-and-forget background task that would otherwise issue a real network fetch()
-  // per test run against mocked db/r2 clients.
-  if (nextSortOrder === 0 && process.env.NODE_ENV !== 'test') {
-    void setProjectThumbnailFromClip(projectId, r2Key, mediaType).catch((err) => {
+  // static poster, not a live "current first clip" mirror. A cover failure still never fails the
+  // clip import; it is logged and the project remains editable.
+  if (nextSortOrder === 0) {
+    try {
+      await setProjectThumbnailFromClip(projectId, r2Key, mediaType);
+    } catch (err) {
       console.error('[projectService] setProjectThumbnailFromClip failed (non-blocking):', err);
-    });
+    }
   }
 
   return clip;
@@ -685,6 +688,7 @@ export async function splitClip(
       height: clip.height,
       trim_start_seconds: input.newTrimStart,
       trim_end_seconds: input.newTrimEnd,
+      volume: clip.volume,
     })
     .returning();
 
@@ -1423,6 +1427,7 @@ export async function buildComposeSnapshot(projectId: string, userId: string): P
       mediaType: c.media_type as 'video' | 'image',
       trimStartSeconds: c.trim_start_seconds,
       trimEndSeconds,
+      volume: c.volume,
     };
   });
 

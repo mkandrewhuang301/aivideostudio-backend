@@ -535,7 +535,7 @@ projectsRouter.patch('/:id/clips/:clipId', async (req: Request, res: Response) =
   }
   const projectId = req.params.id as string;
   const clipId = req.params.clipId as string;
-  const { sort_order, trim_start_seconds, trim_end_seconds } = req.body ?? {};
+  const { sort_order, trim_start_seconds, trim_end_seconds, volume } = req.body ?? {};
   const trimWasSupplied = trim_start_seconds !== undefined || trim_end_seconds !== undefined;
 
   try {
@@ -570,6 +570,13 @@ projectsRouter.patch('/:id/clips/:clipId', async (req: Request, res: Response) =
         return;
       }
       setValues.trim_end_seconds = trim_end_seconds;
+    }
+    if (volume !== undefined) {
+      if (typeof volume !== 'number' || !Number.isFinite(volume) || volume < 0 || volume > 1) {
+        res.status(400).json({ error: 'volume must be a finite number between 0 and 1' });
+        return;
+      }
+      setValues.volume = volume;
     }
     if (Object.keys(setValues).length === 0 && requestedSortOrder === undefined) {
       res.status(400).json({ error: 'No valid fields to update' });

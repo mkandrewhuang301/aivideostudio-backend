@@ -1762,6 +1762,13 @@ describe('POST /api/generations — presets', () => {
 
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ generation_id: 'gen-magic-1', status: 'processing' });
+      expect(createGeneration).toHaveBeenCalledWith(expect.objectContaining({
+        params: expect.objectContaining({
+          preset_id: 'magic-editor',
+          preset_input_upload_ids: ['upload-source'],
+          mask_upload_id: 'upload-mask',
+        }),
+      }));
       expect(computeImageCostCredits).toHaveBeenCalledWith('openai/gpt-image-2-medium');
       // The resolved (presigned) source + mask URLs and trimmed client text flow into the job payload.
       expect(openaiGenerationQueue.add).toHaveBeenCalledWith('generate', {
@@ -1953,19 +1960,31 @@ describe('GET /api/generations', () => {
   it('returns the user-authored Magic Editor prompt without exposing other preset templates (list)', async () => {
     (db.select as jest.Mock).mockReturnValueOnce({
       from: jest.fn(() => ({
-        where: jest.fn().mockResolvedValue([{
-          id: 'upload-source',
-          user_id: 'test-user-id',
-          r2_key: 'uploads/source.jpg',
-          mime_type: 'image/jpeg',
-        }]),
+        where: jest.fn().mockResolvedValue([
+          {
+            id: 'upload-source',
+            user_id: 'test-user-id',
+            r2_key: 'uploads/source.jpg',
+            mime_type: 'image/jpeg',
+          },
+          {
+            id: 'upload-mask',
+            user_id: 'test-user-id',
+            r2_key: 'uploads/mask.png',
+            mime_type: 'image/png',
+          },
+        ]),
       })),
     });
     (listGenerations as jest.Mock).mockResolvedValue([{
       ...completedItem,
       id: 'gen-magic-editor',
       prompt: 'Replace the sign with a neon Fantasia logo',
-      params: { preset_id: 'magic-editor', preset_input_upload_ids: ['upload-source'] },
+      params: {
+        preset_id: 'magic-editor',
+        preset_input_upload_ids: ['upload-source'],
+        mask_upload_id: 'upload-mask',
+      },
     }]);
 
     const res = await request(app).get('/api/generations');
@@ -1975,11 +1994,13 @@ describe('GET /api/generations', () => {
     expect(res.body.items[0].params).toEqual({
       preset_id: 'magic-editor',
       preset_input_upload_ids: ['upload-source'],
+      mask_upload_id: 'upload-mask',
     });
     expect(res.body.items[0].preset_input_urls).toEqual([{
       url: expect.stringContaining('uploads/source.jpg'),
       isVideo: false,
     }]);
+    expect(res.body.items[0].magic_editor_mask_url).toEqual(expect.stringContaining('uploads/mask.png'));
   });
 
   // D-F + D-G (09.2-13): a faceswap row is reported as media_type 'image' with model nulled and
@@ -2134,18 +2155,30 @@ describe('GET /api/generations/:id', () => {
   it('returns the user-authored Magic Editor prompt from the detail endpoint', async () => {
     (db.select as jest.Mock).mockReturnValueOnce({
       from: jest.fn(() => ({
-        where: jest.fn().mockResolvedValue([{
-          id: 'upload-source',
-          user_id: 'test-user-id',
-          r2_key: 'uploads/source.jpg',
-          mime_type: 'image/jpeg',
-        }]),
+        where: jest.fn().mockResolvedValue([
+          {
+            id: 'upload-source',
+            user_id: 'test-user-id',
+            r2_key: 'uploads/source.jpg',
+            mime_type: 'image/jpeg',
+          },
+          {
+            id: 'upload-mask',
+            user_id: 'test-user-id',
+            r2_key: 'uploads/mask.png',
+            mime_type: 'image/png',
+          },
+        ]),
       })),
     });
     (getGenerationById as jest.Mock).mockResolvedValue({
       ...completedGen,
       prompt: 'Remove the person in the background',
-      params: { preset_id: 'magic-editor', preset_input_upload_ids: ['upload-source'] },
+      params: {
+        preset_id: 'magic-editor',
+        preset_input_upload_ids: ['upload-source'],
+        mask_upload_id: 'upload-mask',
+      },
     });
 
     const res = await request(app).get('/api/generations/gen-001');
@@ -2155,11 +2188,13 @@ describe('GET /api/generations/:id', () => {
     expect(res.body.params).toEqual({
       preset_id: 'magic-editor',
       preset_input_upload_ids: ['upload-source'],
+      mask_upload_id: 'upload-mask',
     });
     expect(res.body.preset_input_urls).toEqual([{
       url: expect.stringContaining('uploads/source.jpg'),
       isVideo: false,
     }]);
+    expect(res.body.magic_editor_mask_url).toEqual(expect.stringContaining('uploads/mask.png'));
   });
 
   // D-F + D-G (09.2-13): faceswap detail row → media_type image, model null, minimal params.

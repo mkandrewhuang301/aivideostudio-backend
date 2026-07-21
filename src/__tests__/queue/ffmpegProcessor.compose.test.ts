@@ -76,6 +76,28 @@ describe('buildComposeArgs', () => {
     expect(args.filter((a: string) => a === '-filter_complex')).toHaveLength(1);
   });
 
+  it('applies each video clip source volume and defaults legacy compose jobs to full level', () => {
+    const spec = baseSpec({
+      clips: [
+        { ...baseSpec().clips[0], volume: 0.35 },
+        { ...baseSpec().clips[1] },
+      ],
+    });
+    const args = buildComposeArgs({
+      spec,
+      clipPaths: ['/tmp/clip0.mp4', '/tmp/clip1.mp4'],
+      audioPaths: [],
+      assPath: null,
+      textOverlayAssPath: null,
+      fontsDir: '/app/assets/fonts',
+      outPath: '/tmp/out.mp4',
+    });
+    const graph = filterComplexOf(args);
+
+    expect(graph).toContain('asetpts=PTS-STARTPTS,volume=0.35[a0]');
+    expect(graph).toContain('asetpts=PTS-STARTPTS,volume=1[a1]');
+  });
+
   it('honors the 1080p-cap canvas table for every aspect ratio', () => {
     const cases: Array<[ComposeSpec['aspectRatio'], string]> = [
       ['9:16', '1080:1920'],

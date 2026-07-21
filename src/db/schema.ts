@@ -303,6 +303,8 @@ export const projectClips = pgTable(
     height: integer('height'),
     trim_start_seconds: doublePrecision('trim_start_seconds').notNull().default(0),
     trim_end_seconds: doublePrecision('trim_end_seconds'), // nullable
+    // Linear source-audio gain for this clip: 0 = muted, 1 = original level.
+    volume: doublePrecision('volume').notNull().default(1),
     // Soft-delete (Plan 13-21 B1): full undo of deletes. R2 object is kept until the lazy purge
     // (getProjectWithState) reaps rows older than 24h. Every read path MUST filter deleted_at IS NULL.
     deleted_at: timestamp('deleted_at', { withTimezone: true }), // nullable

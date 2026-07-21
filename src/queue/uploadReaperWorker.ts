@@ -1,7 +1,8 @@
 // src/queue/uploadReaperWorker.ts
 // BullMQ repeatable job (hourly) — deletes reference_uploads rows that were never given a
-// display_name ("paperclip uploads") once they're older than 24 hours. Named references
-// (display_name IS NOT NULL) are exempt and persist until the user manually deletes them.
+// display_name ("paperclip uploads") once they're older than 24 hours. Named references and
+// uploads still referenced by a non-deleted generation are exempt: history Remix/Regen and the
+// Magic Editor's source+mask overlay must remain reconstructible beyond the first day.
 // Modeled after reaperWorker.ts's BullMQ pattern (Redis-persisted schedule survives restarts).
 
 import { Queue, Worker } from 'bullmq';
@@ -28,8 +29,19 @@ interface ReapableUploadRow {
 export async function reapUnnamedUploads(): Promise<void> {
   const result = await db.execute(sql`
     SELECT id, r2_key
-    FROM reference_uploads
-    WHERE display_name IS NULL AND created_at < now() - interval '24 hours'
+    FROM reference_uploads AS upload
+    WHERE upload.display_name IS NULL
+      AND upload.created_at < now() - interval '24 hours'
+      AND NOT EXISTS (
+        SELECT 1
+        FROM generations AS generation
+        WHERE generation.status <> 'deleted'
+          AND (
+            COALESCE(generation.params->'ref_upload_ids', '[]'::jsonb) @> jsonb_build_array(upload.id::text)
+            OR COALESCE(generation.params->'preset_input_upload_ids', '[]'::jsonb) @> jsonb_build_array(upload.id::text)
+            OR generation.params->>'mask_upload_id' = upload.id::text
+          )
+      )
   `);
 
   for (const row of (result.rows ?? []) as unknown as ReapableUploadRow[]) {

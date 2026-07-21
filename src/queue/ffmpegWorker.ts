@@ -51,6 +51,8 @@ export interface ComposeClipSpec {
   mediaType: 'video' | 'image';
   trimStartSeconds: number;
   trimEndSeconds: number;
+  /** Linear source-audio gain. Optional only for backward compatibility with already-queued jobs. */
+  volume?: number;
 }
 
 export interface ComposeTextSpec {

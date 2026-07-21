@@ -4,7 +4,8 @@
 // because OpenAI's image generation is synchronous, not async.
 
 import { config } from '../config';
-import { archiveToR2, archiveBase64ToR2 } from './archivalService';
+import sharp from 'sharp';
+import { archiveToR2, archiveBase64ToR2, uploadBufferToR2 } from './archivalService';
 
 function sizeFromAspectRatio(ar: string): string {
   const landscape = ['4:3', '16:9', '3:2', '21:9'].includes(ar);
@@ -56,6 +57,20 @@ export async function generateImageEditWithMask(
     throw new Error('Failed to fetch source/mask for mask edit');
   }
 
+  const sourceBuffer = Buffer.from(await imgRes.arrayBuffer());
+  const maskBuffer = Buffer.from(await maskRes.arrayBuffer());
+  const sourceMetadata = await sharp(sourceBuffer).metadata();
+  const maskMetadata = await sharp(maskBuffer).metadata();
+  const width = sourceMetadata.width;
+  const height = sourceMetadata.height;
+  if (!width || !height) throw new Error('Magic Editor source image has no dimensions');
+  if (maskMetadata.width !== width || maskMetadata.height !== height) {
+    throw new Error(
+      `Magic Editor mask dimensions ${maskMetadata.width}x${maskMetadata.height} ` +
+      `do not match source dimensions ${width}x${height}`,
+    );
+  }
+
   // The source image's content-type must match its actual bytes — the iOS client uploads it as
   // JPEG (2026-07-12: switched from PNG to cut Magic Editor's submit-to-navigate time, since a
   // 2048px photo PNG can run several MB vs. a few hundred KB as JPEG). Read it from R2's response
@@ -66,12 +81,17 @@ export async function generateImageEditWithMask(
 
   const form = new FormData();
   form.append('model', 'gpt-image-2');
-  form.append('image', new Blob([await imgRes.arrayBuffer()], { type: imageContentType }), `source.${imageExt}`);
-  form.append('mask', new Blob([await maskRes.arrayBuffer()], { type: 'image/png' }), 'mask.png');
+  form.append('image', new Blob([sourceBuffer], { type: imageContentType }), `source.${imageExt}`);
+  form.append('mask', new Blob([maskBuffer], { type: 'image/png' }), 'mask.png');
+  // Keep the model output in the source coordinate space. Without an explicit size, an edit can
+  // come back at a different aspect ratio; stretching that result would move the generated
+  // content away from the user's painted mask before the locality composite below.
+  form.append('size', `${width}x${height}`);
   form.append(
     'prompt',
     prompt && prompt.trim().length > 0
-      ? prompt
+      ? `Apply this change only inside the transparent mask region: ${prompt.trim()} ` +
+        'Keep the rest of the image unchanged and return the complete image.'
       : 'Remove the masked region and fill it in naturally; the rest of the image must not change.',
   );
 
@@ -93,9 +113,82 @@ export async function generateImageEditWithMask(
 
   const json = await response.json() as { data: Array<{ url?: string; b64_json?: string }> };
   const item = json.data?.[0];
-  if (item?.url) return archiveToR2(item.url, generationId, 'image/png');
-  if (item?.b64_json) return archiveBase64ToR2(item.b64_json, generationId, 'image/png');
-  throw new Error('OpenAI returned no image');
+  let generatedBuffer: Buffer;
+  if (item?.url) {
+    const generatedResponse = await fetch(item.url);
+    if (!generatedResponse.ok) throw new Error('Failed to fetch OpenAI mask-edit output');
+    generatedBuffer = Buffer.from(await generatedResponse.arrayBuffer());
+  } else if (item?.b64_json) {
+    generatedBuffer = Buffer.from(item.b64_json, 'base64');
+  } else {
+    throw new Error('OpenAI returned no image');
+  }
+
+  // GPT Image treats a mask as guidance and can still alter distant, unrelated pixels. Enforce
+  // locality ourselves: reveal the generated edit in the painted region plus a small feathered
+  // halo for natural edge blending, while restoring the original everywhere farther away.
+  const composited = await compositeMaskedEdit(sourceBuffer, generatedBuffer, maskBuffer);
+  const key = `generations/${generationId}.png`;
+  await uploadBufferToR2(composited, key, 'image/png');
+  return key;
+}
+
+/**
+ * Applies an OpenAI mask-edit result with a controlled, softly feathered boundary.
+ *
+ * OpenAI mask convention: transparent = edit, opaque = preserve. Sharp's `over` composite uses
+ * the opposite alpha meaning for an overlay, so the mask alpha is inverted, expanded by about 1%
+ * of the shorter image edge (capped at 24px), and feathered. This gives GPT a little room to blend
+ * object borders without allowing unrelated changes elsewhere. The original source is the base.
+ */
+export async function compositeMaskedEdit(
+  sourceBuffer: Buffer,
+  generatedBuffer: Buffer,
+  maskBuffer: Buffer,
+): Promise<Buffer> {
+  const sourceMetadata = await sharp(sourceBuffer).metadata();
+  const maskMetadata = await sharp(maskBuffer).metadata();
+  const width = sourceMetadata.width;
+  const height = sourceMetadata.height;
+  if (!width || !height) throw new Error('Magic Editor source image has no dimensions');
+  if (maskMetadata.width !== width || maskMetadata.height !== height) {
+    throw new Error(
+      `Magic Editor mask dimensions ${maskMetadata.width}x${maskMetadata.height} ` +
+      `do not match source dimensions ${width}x${height}`,
+    );
+  }
+
+  const editHaloPixels = Math.max(2, Math.min(24, Math.round(Math.min(width, height) * 0.01)));
+  const editAlpha = await sharp(maskBuffer)
+    .ensureAlpha()
+    .extractChannel('alpha')
+    .negate()
+    .blur(Math.max(0.5, editHaloPixels / 2))
+    // Boost the blurred alpha back toward opaque. This preserves the painted area's full edit
+    // strength while turning the blur's outer tail into the small, soft expansion we want.
+    .linear(2, 0)
+    .raw()
+    .toBuffer();
+  // Materialize the resized image as three-channel RGB before joining the edit alpha. Keeping
+  // removeAlpha() and joinChannel() in one lazy Sharp pipeline can retain the generated image's
+  // original all-opaque alpha instead of using the joined mask channel.
+  const generatedRgb = await sharp(generatedBuffer)
+    .resize(width, height, { fit: 'fill' })
+    .removeAlpha()
+    .raw()
+    .toBuffer();
+  const editLayer = await sharp(generatedRgb, {
+    raw: { width, height, channels: 3 },
+  })
+    .joinChannel(editAlpha, { raw: { width, height, channels: 1 } })
+    .png()
+    .toBuffer();
+
+  return sharp(sourceBuffer)
+    .resize(width, height, { fit: 'fill' })
+    .composite([{ input: editLayer, blend: 'over' }])
+    .png()
+    .toBuffer();
 }
 
 // Faceswap (09.2-12): the SECOND consumer of the inline (synchronous, no-webhook) OpenAI path,

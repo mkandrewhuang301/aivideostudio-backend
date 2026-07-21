@@ -139,7 +139,7 @@ export function buildComposeArgs(input: BuildComposeArgsInput): string[] {
         `[${i}:v]trim=start=${clip.trimStartSeconds}:end=${clip.trimEndSeconds},setpts=PTS-STARTPTS,scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1[v${i}]`,
       );
       filterParts.push(
-        `[${i}:a]atrim=start=${clip.trimStartSeconds}:end=${clip.trimEndSeconds},asetpts=PTS-STARTPTS[a${i}]`,
+        `[${i}:a]atrim=start=${clip.trimStartSeconds}:end=${clip.trimEndSeconds},asetpts=PTS-STARTPTS,volume=${Math.min(Math.max(clip.volume ?? 1, 0), 1)}[a${i}]`,
       );
     }
   });
