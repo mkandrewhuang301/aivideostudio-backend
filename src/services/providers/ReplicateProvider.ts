@@ -140,8 +140,15 @@ export async function generateStyledStill(
       quality,
     },
   })) as unknown;
-  const outputUrl = Array.isArray(output) ? output[0] : output;
-  if (typeof outputUrl !== 'string' || !outputUrl) {
+  // The replicate client (v1.x) returns FileOutput object(s) with a .url() method, not plain
+  // URL strings — normalize both shapes (and arrays of either).
+  const first = Array.isArray(output) ? output[0] : output;
+  const outputUrl = typeof first === 'string'
+    ? first
+    : (first && typeof (first as { url?: unknown }).url === 'function')
+      ? String((first as { url: () => unknown }).url())
+      : '';
+  if (!outputUrl) {
     throw new Error('openai/gpt-image-2 returned no output image');
   }
   return archiveToR2(outputUrl, outputKey, 'image/png');
