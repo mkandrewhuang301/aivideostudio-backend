@@ -505,17 +505,33 @@ projectsRouter.post('/:id/clips', clipUpload.single('file'), async (req: Request
     const mimeType = EXT_TO_MIME[ext] ?? 'video/mp4';
     const mediaType: 'video' | 'image' = genRow.media_type === 'image' ? 'image' : 'video';
 
-    const clip = await importClipByCopy({
-      projectId,
-      userId: req.user.dbUserId,
-      sourceType: 'generation',
-      sourceId: generation_id,
-      mimeType,
-      mediaType,
-    });
+    // If the source carries an itemized video timeline (e.g. the Video Summarizer's structured
+    // videoClips), smartUnpackOnImport reconstructs the editable clips from the RAW source + trims.
+    // Importing the generation's own r2_key here too would drop the FLAT burned master (captions
+    // baked in, audio mixed) onto the timeline ON TOP of those parts → double captions + double
+    // narration. So skip the flat-master import and let the unpack build the whole timeline.
+    const structured = (genRow.params as Record<string, unknown> | null)?.structured as
+      | { videoClips?: unknown[] }
+      | undefined;
+    const hasVideoTimeline = Array.isArray(structured?.videoClips) && structured!.videoClips.length > 0;
 
-    const { unpacked } = await smartUnpackOnImport(projectId, { id: genRow.id, params: genRow.params });
+    const flatClip = hasVideoTimeline
+      ? null
+      : await importClipByCopy({
+          projectId,
+          userId: req.user.dbUserId,
+          sourceType: 'generation',
+          sourceId: generation_id,
+          mimeType,
+          mediaType,
+        });
 
+    const { unpacked, clips } = await smartUnpackOnImport(projectId, { id: genRow.id, params: genRow.params });
+
+    // Response keeps the { clip, unpacked } shape: for a rebuilt timeline the first reconstructed
+    // clip stands in as `clip` (clients that read it get a valid clip; the editor refetches full
+    // project state regardless).
+    const clip = flatClip ?? clips[0] ?? null;
     res.status(201).json(unpacked ? { clip, unpacked: true } : { clip });
   } catch (err) {
     if (err instanceof ImportSourceNotFoundError) {

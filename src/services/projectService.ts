@@ -1280,9 +1280,27 @@ export interface StructuredCaptionCue {
   endSeconds: number;
   words: StructuredCaptionWord[];
 }
+// A timeline video clip = a trim window into an original source (the user's uploaded footage),
+// NOT a pre-rendered file. On import each becomes its own independent copy of the source + a
+// projectClips row carrying the trim window — mirroring importClipByCopy's copy-per-row invariant
+// (purgeExpiredSoftDeletes deletes a soft-deleted clip's r2_key with no refcount, so N clips must
+// never share one object).
+export interface StructuredVideoClip {
+  sourceR2Key: string;
+  trimStartSeconds: number;
+  trimEndSeconds: number;
+  outputDurationSeconds?: number;
+  // Linear gain for THIS clip's own source-footage audio on the rebuilt timeline (0 = muted).
+  // The producer declares the intended mix: the Video Summarizer emits 0 because its burned master
+  // drops footage audio entirely (buildSummaryComposeArgs maps only narration+music), so an
+  // imported recap must start footage-silent to match — the narration stem carries the voice, and
+  // the user can raise footage audio in the editor. Absent → 1 (full), the general import default.
+  sourceVolume?: number;
+}
 export interface StructuredImportData {
   captionCues?: StructuredCaptionCue[];
   audioStems?: StructuredAudioStem[];
+  videoClips?: StructuredVideoClip[];
 }
 
 // GENERALIZED mechanism (not autoexplainer-specific): if the source generation's params.structured
@@ -1293,14 +1311,91 @@ export interface StructuredImportData {
 export async function smartUnpackOnImport(
   projectId: string,
   sourceGeneration: { id: string; params: unknown },
-): Promise<{ unpacked: boolean }> {
+): Promise<{ unpacked: boolean; clips: ProjectClip[] }> {
   const params = (sourceGeneration.params ?? null) as Record<string, unknown> | null;
   const structured = params?.structured as StructuredImportData | undefined;
   const audioStems = structured?.audioStems ?? [];
   const captionCues = structured?.captionCues ?? [];
+  const videoClips = structured?.videoClips ?? [];
 
-  if (!structured || (audioStems.length === 0 && captionCues.length === 0)) {
-    return { unpacked: false };
+  if (!structured || (audioStems.length === 0 && captionCues.length === 0 && videoClips.length === 0)) {
+    return { unpacked: false, clips: [] };
+  }
+
+  // Rebuild the editable video timeline from the source's trim windows. Each clip gets its own
+  // independent copy of the source (see StructuredVideoClip note + purge refcount hazard). The
+  // source video is identical across every clip, so probe its dimensions/duration ONCE and reuse.
+  const rebuiltClips: ProjectClip[] = [];
+  if (videoClips.length > 0) {
+    const baseOrderResult = await db.execute(sql`
+      SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_order FROM project_clips
+      WHERE project_id = ${projectId}::uuid AND deleted_at IS NULL
+    `);
+    const baseOrder = Number((baseOrderResult.rows?.[0] as { next_order?: number } | undefined)?.next_order ?? 0);
+
+    let sourceWidth: number | null = null;
+    let sourceHeight: number | null = null;
+    let sourceDuration: number | null = null;
+    let probed = false;
+
+    for (let i = 0; i < videoClips.length; i++) {
+      const vc = videoClips[i];
+      const ext = vc.sourceR2Key.split('.').pop() ?? 'mp4';
+      const destKey = `projects/${projectId}/clips/${randomUUID()}.${ext}`;
+      try {
+        await r2.send(
+          new CopyObjectCommand({
+            Bucket: R2_BUCKET,
+            CopySource: `${R2_BUCKET}/${vc.sourceR2Key}`,
+            Key: destKey,
+          }),
+        );
+      } catch (err) {
+        throw new ImportSourceNotFoundError(
+          `Source footage for this summary is no longer available (${vc.sourceR2Key})`,
+        );
+      }
+
+      if (!probed) {
+        // Probe failure must never fail the import — dimensions self-heal on read like a normal import.
+        try {
+          const meta = await probeVideoMeta(await getUploadPresignedUrl(destKey));
+          sourceWidth = meta.width ?? null;
+          sourceHeight = meta.height ?? null;
+          sourceDuration = meta.durationSeconds ?? null;
+        } catch (err) {
+          console.error('[projectService] summary clip probe failed (non-blocking):', err);
+        }
+        probed = true;
+      }
+
+      const [clip] = await db
+        .insert(projectClips)
+        .values({
+          project_id: projectId,
+          sort_order: baseOrder + i,
+          r2_key: destKey,
+          media_type: 'video',
+          source_type: 'generation',
+          original_duration_seconds: sourceDuration,
+          width: sourceWidth,
+          height: sourceHeight,
+          trim_start_seconds: vc.trimStartSeconds,
+          trim_end_seconds: vc.trimEndSeconds,
+          volume: Math.min(Math.max(vc.sourceVolume ?? 1, 0), 1),
+        })
+        .returning();
+      if (clip) rebuiltClips.push(clip);
+
+      // First clip in an empty project becomes its cover, mirroring importClipByCopy.
+      if (baseOrder + i === 0) {
+        try {
+          await setProjectThumbnailFromClip(projectId, destKey, 'video');
+        } catch (err) {
+          console.error('[projectService] summary cover thumbnail failed (non-blocking):', err);
+        }
+      }
+    }
   }
 
   for (let i = 0; i < audioStems.length; i++) {
@@ -1349,7 +1444,7 @@ export async function smartUnpackOnImport(
     }
   }
 
-  return { unpacked: true };
+  return { unpacked: true, clips: rebuiltClips };
 }
 
 // ─── Export snapshot (SC7, D-10/D-12) ──────────────────────────────────────────

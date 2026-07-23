@@ -2665,4 +2665,63 @@ describe('smartUnpackOnImport', () => {
     expect(result.unpacked).toBe(false);
     expect(dbMock.insert).not.toHaveBeenCalled();
   });
+
+  it('rebuilds the video timeline: one independent source COPY + a trimmed project_clips row per videoClip', async () => {
+    // baseOrder query → empty project, next sort_order 0.
+    dbMock.execute.mockResolvedValueOnce({ rows: [{ next_order: 0 }] });
+    // Source dimensions/duration are probed ONCE and reused across both clips.
+    mockProbeVideoMeta.mockResolvedValueOnce({ durationSeconds: 600, width: 1920, height: 1080 });
+    dbMock.insert
+      .mockReturnValueOnce(makeChain([{ id: 'clip-1', r2_key: 'projects/proj-1/clips/a.mp4' }])) // clip 0 insert (.returning())
+      .mockReturnValueOnce(makeChain([{ id: 'clip-2', r2_key: 'projects/proj-1/clips/b.mp4' }])); // clip 1 insert (.returning())
+
+    const result = await smartUnpackOnImport('proj-1', {
+      id: 'gen-summary',
+      params: {
+        structured: {
+          videoClips: [
+            { sourceR2Key: 'uploads/source.mp4', trimStartSeconds: 3, trimEndSeconds: 11, outputDurationSeconds: 8, sourceVolume: 0 },
+            { sourceR2Key: 'uploads/source.mp4', trimStartSeconds: 40, trimEndSeconds: 46.5, outputDurationSeconds: 6.5, sourceVolume: 0 },
+          ],
+        },
+      },
+    });
+
+    expect(result.unpacked).toBe(true);
+    expect(result.clips).toHaveLength(2);
+
+    // Two independent copies of the SAME source into this project's clips/ prefix (never a shared object).
+    const copyCalls = r2Mock.send.mock.calls.filter((c) => c[0] instanceof CopyObjectCommand);
+    expect(copyCalls).toHaveLength(2);
+    for (const c of copyCalls) {
+      expect(c[0].input.CopySource).toContain('uploads/source.mp4');
+      expect(c[0].input.Key).toMatch(/^projects\/proj-1\/clips\//);
+    }
+    const destKeys = copyCalls.map((c) => c[0].input.Key);
+    expect(new Set(destKeys).size).toBe(2); // distinct objects, no sharing
+
+    // Source is probed exactly once, not once-per-clip.
+    expect(mockProbeVideoMeta).toHaveBeenCalledTimes(1);
+
+    // First clip carries its trim window + the probed source dimensions/duration.
+    const clip0Values = (dbMock.insert.mock.results[0].value as { values: jest.Mock }).values;
+    expect(clip0Values).toHaveBeenCalledWith(
+      expect.objectContaining({
+        project_id: 'proj-1',
+        sort_order: 0,
+        media_type: 'video',
+        trim_start_seconds: 3,
+        trim_end_seconds: 11,
+        original_duration_seconds: 600,
+        width: 1920,
+        height: 1080,
+        volume: 0, // footage muted so it imports matching the burned narration-only master
+      }),
+    );
+    // Second clip keeps ordering + its own (fractional) trim window.
+    const clip1Values = (dbMock.insert.mock.results[1].value as { values: jest.Mock }).values;
+    expect(clip1Values).toHaveBeenCalledWith(
+      expect.objectContaining({ sort_order: 1, trim_start_seconds: 40, trim_end_seconds: 46.5 }),
+    );
+  });
 });
