@@ -66,14 +66,17 @@ export function computeGrokImagineCost(durationSeconds: number): number {
 // Live pricing verified from fal on 2026-07-15: $0.084/sec audio-off; $0.126/sec audio-on.
 export const FAL_KLING_V3_STANDARD_I2V_MODEL = 'fal-ai/kling-video/v3/standard/image-to-video' as const;
 // fal.ai Kling O3 Standard reference-to-video (character identity + native lip-synced dialogue in
-// EN/ZH/JA/KO/ES). Live pricing verified from fal 2026-07-19: $0.084/sec audio-off; $0.112/sec audio-on.
+// EN/ZH/JA/KO/ES). Pricing CORRECTED 2026-07-23 (Andrew, against fal's published rates): $0.112/sec
+// audio-off, $0.14/sec audio-on — e.g. a 5s audio-on clip is $0.70. The previous values here
+// (0.084/0.112) were a tier too low and under-charged credits; O3 had no client surface yet, so no
+// generation ever billed at the wrong rate.
 export const FAL_KLING_O3_REFERENCE_TO_VIDEO_MODEL = 'fal-ai/kling-video/o3/standard/reference-to-video' as const;
 export const SUPPORTED_FAL_KLING_MODELS = [
   FAL_KLING_V3_STANDARD_I2V_MODEL,
   FAL_KLING_O3_REFERENCE_TO_VIDEO_MODEL,
 ] as const;
 export const FAL_KLING_V3_STANDARD_RATES = { audioOff: 0.084, audioOn: 0.126 } as const;
-export const FAL_KLING_O3_STANDARD_RATES = { audioOff: 0.084, audioOn: 0.112 } as const;
+export const FAL_KLING_O3_STANDARD_RATES = { audioOff: 0.112, audioOn: 0.14 } as const;
 
 export function falKlingRatesForModel(model: string): { audioOff: number; audioOn: number } {
   return model === FAL_KLING_O3_REFERENCE_TO_VIDEO_MODEL

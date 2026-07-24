@@ -17,8 +17,13 @@ import { entitlementGate } from '../../middleware/entitlementGate';
 function makeReqResNext(
   resolved: Record<string, unknown> | undefined,
   dbUserId: string | null = 'user-1',
+  preset?: Record<string, unknown>,
 ) {
-  const req = { _resolved: resolved, user: dbUserId ? { dbUserId } : undefined } as unknown as Request;
+  const req = {
+    _resolved: resolved,
+    user: dbUserId ? { dbUserId } : undefined,
+    ...(preset ? { _preset: preset } : {}),
+  } as unknown as Request;
   const res = {
     status: jest.fn().mockReturnThis(),
     json: jest.fn(),
@@ -140,6 +145,45 @@ describe('entitlementGate', () => {
     await entitlementGate(req, res, next);
     expect(res.status).toHaveBeenCalledWith(403);
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'TIER_CHECK_ERROR' }));
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  // Presets are tier-agnostic: any preset is open to every user regardless of the (possibly pro)
+  // model or resolution powering it. Gating applies only to freeform (no _preset) requests.
+  it('allows a basic user to run a preset on a pro model (no min_tier) — presets never inherit model tier', async () => {
+    mockEntitlement('basic');
+    const { req, res, next } = makeReqResNext(
+      { model: 'alibaba/happyhorse-1.1', resolution: '720p' },
+      'user-1',
+      { preset_id: 'you-vs-you', input_upload_ids: [] },
+    );
+    await entitlementGate(req, res, next);
+    expect(next).toHaveBeenCalled();
+    expect(res.status).not.toHaveBeenCalled();
+  });
+
+  it('allows a NULL guest to run a Kling preset (no min_tier) at 1080p — model AND resolution gate skipped for presets', async () => {
+    mockEntitlement(null);
+    const { req, res, next } = makeReqResNext(
+      { model: 'fal-ai/kling-video/o3/standard/reference-to-video', resolution: '1080p' },
+      'user-1',
+      { preset_id: 'gorilla-vlogs', input_upload_ids: [] },
+    );
+    await entitlementGate(req, res, next);
+    expect(next).toHaveBeenCalled();
+    expect(res.status).not.toHaveBeenCalled();
+  });
+
+  it('still honors an explicit preset min_tier as an escape hatch: basic user + pro preset -> 403', async () => {
+    mockEntitlement('basic');
+    const { req, res, next } = makeReqResNext(
+      { model: 'bytedance/seedance-2.0-mini', resolution: '720p' },
+      'user-1',
+      { preset_id: 'some-premium-preset', input_upload_ids: [], min_tier: 'pro' },
+    );
+    await entitlementGate(req, res, next);
+    expect(res.status).toHaveBeenCalledWith(403);
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'TIER_REQUIRED', required_tier: 'pro' }));
     expect(next).not.toHaveBeenCalled();
   });
 

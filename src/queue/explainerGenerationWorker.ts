@@ -13,9 +13,8 @@ import {
   mergeGenerationParams,
 } from '../services/generationService';
 import { generateMusicBed } from '../services/lyriaService';
-import { animateScene } from '../services/omniService';
-import { expandExplainerScript, pickBestCandidateIndex } from '../services/openaiScriptService';
-import { generateStyledStill } from '../services/providers/ReplicateProvider';
+import { expandExplainerScript } from '../services/openaiScriptService';
+import { resolveVisualStage } from '../services/explainerVisualStage';
 import { buildGroundingText } from '../services/sourceGroundingService';
 import { concatWavBuffers } from '../services/wavUtil';
 import { buildSceneCues, getWordTimings } from '../services/whisperxService';
@@ -124,45 +123,25 @@ export async function processExplainerGeneration(data: ExplainerGenerationJob): 
       );
       stems.push(stem);
 
-      if (sceneIndex === 0) await stampStage({ stage_label: 'Illustrating scenes…' });
-      const candidateKeys: string[] = [];
-      for (let candidateIndex = 0; candidateIndex < def.candidate_still_count; candidateIndex += 1) {
-        candidateKeys.push(await generateStyledStill(
-          scene.visual_prompt,
-          anchorUrl,
-          def.image_model,
-          `${data.generationId}.scene${sceneIndex}.candidate${candidateIndex}`,
-        ));
+      if (sceneIndex === 0) {
+        await stampStage({
+          stage_label: data.visualMethod === 'illustrated' ? 'Illustrating scenes…' : 'Animating scenes…',
+        });
       }
-      const candidateUrls = await Promise.all(
-        candidateKeys.map((key) => getGenerationPresignedUrl(key)),
-      );
-
-      let winnerIndex = 0;
-      try {
-        const pickedIndex = await pickBestCandidateIndex(
-          candidateUrls,
-          scene.visual_prompt,
-          scene.text_zone,
-        );
-        if (Number.isInteger(pickedIndex) && pickedIndex >= 0 && pickedIndex < candidateUrls.length) {
-          winnerIndex = pickedIndex;
-        }
-      } catch {
-        console.warn(`[explainer-generation] Vision pick unavailable for scene ${sceneIndex}; using candidate 0`);
-      }
-
-      if (sceneIndex === 0) await stampStage({ stage_label: 'Animating…' });
-      const clip = await animateScene(
-        candidateUrls[winnerIndex]!,
-        scene.motion_prompt,
-        def.omni_model,
-        aspectRatio,
-        stem.durationSeconds,
-        data.generationId,
+      // Swappable visual stage (CLAUDE.md rule 6): illustrated = gpt-image-2-low still -> ffmpeg
+      // Ken-Burns; animated = still -> Omni. The stage generates its own still internally.
+      const { clipR2Key } = await resolveVisualStage(data.visualMethod).generateSceneClip({
+        generationId: data.generationId,
         sceneIndex,
-      );
-      clipKeys.push(clip.r2Key);
+        visualPrompt: scene.visual_prompt,
+        motionPrompt: scene.motion_prompt,
+        styleAnchorUrl: anchorUrl,
+        imageModel: def.image_model,
+        omniModel: def.omni_model,
+        narrationDurationSeconds: stem.durationSeconds,
+        aspectRatio,
+      });
+      clipKeys.push(clipR2Key);
     }
 
     const stemBuffers = await Promise.all(stems.map((stem) => downloadArchivedBuffer(stem.r2Key)));

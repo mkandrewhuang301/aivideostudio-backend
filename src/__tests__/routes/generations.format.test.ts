@@ -218,6 +218,7 @@ describe('POST /api/generations — format', () => {
       userId: 'user-owned',
       cost: 470,
       formatId: 'explainer',
+      visualMethod: 'animated',
       topic: 'Why do leaves change color?',
       styleId: 'pixel-art',
       voiceId: 'Kore',

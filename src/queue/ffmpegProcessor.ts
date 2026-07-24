@@ -20,7 +20,13 @@ import { Upload } from '@aws-sdk/lib-storage';
 import { r2, R2_BUCKET } from '../storage/r2';
 import { getGenerationPresignedUrl } from '../services/archivalService';
 import { buildAssFile, buildTextOverlayAss } from '../services/assCaptionBuilder';
-import type { FfmpegJobData, ComposeSpec, ExplainerComposeSpec } from './ffmpegWorker';
+import type {
+  FfmpegJobData,
+  ComposeSpec,
+  ExplainerComposeSpec,
+  SummaryComposeSpec,
+  SummarySourceFraming,
+} from './ffmpegWorker';
 
 const execFileAsync = promisify(execFile);
 
@@ -231,8 +237,10 @@ export function buildExplainerComposeArgs(input: BuildExplainerComposeArgsInput)
   let audioMap = `${narrationInputIndex}:a`;
   if (musicPath) {
     filterParts.push(`[${musicInputIndex}:a]volume=${spec.musicVolume}[bed]`);
+    // normalize=0 keeps narration at FULL volume (amix's default normalize=1 would halve every
+    // input) so the voice stays dominant and the music sits quietly underneath at musicVolume.
     filterParts.push(
-      `[${narrationInputIndex}:a][bed]amix=inputs=2:duration=first:dropout_transition=0[aout]`,
+      `[${narrationInputIndex}:a][bed]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]`,
     );
     audioMap = '[aout]';
   }
@@ -244,6 +252,121 @@ export function buildExplainerComposeArgs(input: BuildExplainerComposeArgsInput)
   args.push('-map', '[vout]', '-map', audioMap);
   args.push('-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', outPath);
 
+  return args;
+}
+
+export interface BuildSummaryComposeArgsInput {
+  spec: SummaryComposeSpec;
+  sourcePath: string;
+  narrationPath: string;
+  musicPath: string | null;
+  captionAssPath: string;
+  fontsDir: string;
+  outPath: string;
+}
+
+/** Minimum frame aspect preserved inside the square window when framing is `balanced`. */
+const SUMMARY_BALANCED_ASPECT = 4 / 3;
+
+/**
+ * Video-window sizing for one summary clip.
+ *
+ * A landscape canvas fills edge to edge. A square window — the whole canvas on 1:1, the square on
+ * 9:16 — honours `sourceFraming`: `fill` crops the source to a hard square (a 16:9 source loses
+ * ~44% of its width), while `balanced`/`fit` crop less and letterbox the remainder INSIDE the
+ * square, so more of each scene survives.
+ *
+ * On PORTRAIT the square is placed `portraitSquareTopPx` from the canvas top (default centered),
+ * biased upward so the black band BELOW it can hold captions clear of the footage — a bright or
+ * dark scene never fights the text. Horizontal placement is always centered.
+ */
+export function buildSummarySizingFilter(
+  spec: Pick<SummaryComposeSpec, 'width' | 'height'> & {
+    sourceFraming?: SummarySourceFraming;
+    portraitSquareTopPx?: number;
+  },
+): string {
+  const { width, height } = spec;
+  if (width > height) {
+    return `scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height}`;
+  }
+
+  const square = width;
+  const framing = spec.sourceFraming ?? 'fill';
+  const windowFilter = framing === 'fill'
+    ? `scale=${square}:${square}:force_original_aspect_ratio=increase,crop=${square}:${square}`
+    : [
+      // `fit` never crops. `balanced` crops only down to SUMMARY_BALANCED_ASPECT and no further —
+      // the min() pair leaves a source already narrower than that aspect completely untouched.
+      ...(framing === 'fit'
+        ? []
+        : [`crop='min(iw,ih*${SUMMARY_BALANCED_ASPECT})':'min(ih,iw/${SUMMARY_BALANCED_ASPECT})'`]),
+      `scale=${square}:${square}:force_original_aspect_ratio=decrease`,
+      `pad=${square}:${square}:(ow-iw)/2:(oh-ih)/2:color=black`,
+    ].join(',');
+
+  if (height <= width) return windowFilter;
+  // Undefined keeps the old centered placement (symbolic, byte-identical to legacy payloads);
+  // a set value clamps so the square always fits and lifts it toward the top.
+  const topPad = spec.portraitSquareTopPx == null
+    ? '(oh-ih)/2'
+    : String(Math.max(0, Math.min(height - square, Math.round(spec.portraitSquareTopPx))));
+  return `${windowFilter},pad=${width}:${height}:(ow-iw)/2:${topPad}:color=black`;
+}
+
+/**
+ * Cuts every timestamp range from one episode input, retimes each range to its narration beat,
+ * places a centered square edit inside portrait output (or fills non-portrait canvases), then
+ * concatenates and mixes narration with an optional original music bed.
+ */
+export function buildSummaryComposeArgs(input: BuildSummaryComposeArgsInput): string[] {
+  const { spec, sourcePath, narrationPath, musicPath, captionAssPath, fontsDir, outPath } = input;
+  // Lanczos over swscale's bilinear default: every summary rescales its source into a 1080-wide
+  // window, and a sub-1080p upload is upscaled outright — the default visibly softens both.
+  const args: string[] = [
+    '-y', '-sws_flags', 'lanczos+accurate_rnd+full_chroma_int',
+    '-i', sourcePath, '-i', narrationPath,
+  ];
+  const filterParts: string[] = [];
+  const sourceLabels = spec.clips.map((_, index) => `[src${index}]`).join('');
+  filterParts.push(`[0:v]split=${spec.clips.length}${sourceLabels}`);
+
+  const sizingFilter = buildSummarySizingFilter(spec);
+  spec.clips.forEach((clip, index) => {
+    const sourceDuration = Math.max(0.1, clip.endSeconds - clip.startSeconds);
+    const outputDuration = Math.max(0.1, clip.outputDurationSeconds);
+    const ptsScale = outputDuration / sourceDuration;
+    filterParts.push(
+      `[src${index}]trim=start=${clip.startSeconds}:end=${clip.endSeconds},setpts=${ptsScale}*(PTS-STARTPTS),fps=30,${sizingFilter},setsar=1[v${index}]`,
+    );
+  });
+
+  filterParts.push(`${spec.clips.map((_, index) => `[v${index}]`).join('')}concat=n=${spec.clips.length}:v=1:a=0[vconcat]`);
+  filterParts.push(`[vconcat]ass=filename=${captionAssPath}:fontsdir=${fontsDir}[vout]`);
+
+  let audioMap = '1:a';
+  if (musicPath) {
+    args.push('-stream_loop', '-1', '-i', musicPath);
+    filterParts.push(`[2:a]volume=${spec.musicVolume}[bed]`);
+    filterParts.push('[1:a][bed]amix=inputs=2:duration=first:dropout_transition=0[aout]');
+    audioMap = '[aout]';
+  }
+
+  args.push('-filter_complex', filterParts.join(';'));
+  args.push('-map', '[vout]', '-map', audioMap);
+  // Explicit rate control instead of libx264's CRF 23 default: the source is re-encoded exactly
+  // once here, and outlined caption edges plus anime flat-colour gradients are what CRF 23 spends
+  // its bit budget on last. CRF 18 is visually transparent at this resolution.
+  args.push(
+    '-c:v', 'libx264', '-preset', 'medium', '-crf', '18',
+    '-profile:v', 'high', '-level', '4.2', '-pix_fmt', 'yuv420p',
+    '-c:a', 'aac', '-b:a', '192k',
+    // Episode rips routinely carry a QT chapter/data track. Without these it rides through into
+    // the cut, keeping the SOURCE's full duration — so the container advertises a 24-minute file
+    // for a 60-second recap and players size their scrubber from that, not from the real streams.
+    '-dn', '-map_chapters', '-1',
+    '-movflags', '+faststart', outPath,
+  );
   return args;
 }
 
@@ -368,6 +491,43 @@ export async function runFfmpegOp(data: FfmpegJobData): Promise<{ r2Key: string;
         musicPath,
         captionAssPath,
         fontsDir,
+        outPath,
+      });
+      await runFfmpeg(args);
+
+      const r2Key = `generations/${generationId}.mp4`;
+      await uploadFileToR2(outPath, r2Key);
+      return { r2Key };
+    } else if (op === 'summary_compose') {
+      const spec = data.summaryCompose;
+      if (!spec || spec.clips.length === 0) {
+        throw new Error('ffmpeg summary_compose op requires clips');
+      }
+
+      const sourcePath = path.join(tempDir, 'source.mp4');
+      await downloadR2KeyToFile(spec.sourceR2Key, sourcePath);
+      const narrationPath = path.join(tempDir, 'narration.wav');
+      await downloadR2KeyToFile(spec.narrationR2Key, narrationPath);
+
+      let musicPath: string | null = null;
+      if (spec.musicR2Key) {
+        musicPath = path.join(tempDir, 'music.wav');
+        await downloadR2KeyToFile(spec.musicR2Key, musicPath);
+      }
+
+      const captionAssPath = path.join(tempDir, 'captions.ass');
+      await writeFile(
+        captionAssPath,
+        buildAssFile(spec.captionCues, spec.captionStyle, { width: spec.width, height: spec.height }),
+        'utf-8',
+      );
+      const args = buildSummaryComposeArgs({
+        spec,
+        sourcePath,
+        narrationPath,
+        musicPath,
+        captionAssPath,
+        fontsDir: path.resolve('assets/fonts'),
         outPath,
       });
       await runFfmpeg(args);

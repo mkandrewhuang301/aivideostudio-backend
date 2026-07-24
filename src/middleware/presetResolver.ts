@@ -23,6 +23,7 @@ import { db } from '../db/client';
 import { referenceUploads } from '../db/schema';
 import { getUploadPresignedUrl } from '../services/archivalService';
 import { SERVER_PRESETS, type PresetDef } from '../config/presets';
+import type { Tier } from '../config/tiers';
 import { PERMISSIVE_I2V_MODEL } from '../services/generationService';
 import { expandScript } from '../services/openaiScriptService';
 import { FAL_VIDEO_BACKGROUND_REMOVAL_MODEL } from '../services/providers/FalProvider';
@@ -41,10 +42,15 @@ declare global {
       _preset?: {
         preset_id: string;
         input_upload_ids: Array<string | null>;
+        // Validated style-grid id, retained so Remix can reopen with the same choice selected.
+        style_id?: string;
         // Magic Editor's alpha mask is replayable generation input just like the source slot.
         // Persist only its owned upload id; the short-lived presigned URL stays server-side.
         mask_upload_id?: string;
         postprocess?: { op: 'mux' | 'concat'; audio_r2_key?: string };
+        // Preset-declared access tier, overriding the underlying model's MODEL_MIN_TIER in
+        // entitlementGate. Present only when the preset opts out of the model's default.
+        min_tier?: Tier;
       };
     }
   }
@@ -82,6 +88,7 @@ export async function presetResolver(req: Request, res: Response, next: NextFunc
   try {
     // Style grid validation (e.g. hairstyle) — 400 if the sent style id isn't in the def.
     let styleLabel: string | undefined;
+    let resolvedStyleId: string | undefined;
     // When the matched style option carries a thumb_url, it doubles as the reference image sent
     // to the model alongside the user's own photo (appended in the 'image' case below).
     let styleReferenceUrl: string | undefined;
@@ -95,6 +102,7 @@ export async function presetResolver(req: Request, res: Response, next: NextFunc
         res.status(400).json({ error: 'Unknown or missing style', code: 'INVALID_STYLE' });
         return;
       }
+      resolvedStyleId = match.id;
       styleLabel = match.label;
       styleReferenceUrl = match.thumb_url;
       styleDrivingVideoUrl = match.driving_video_url;
@@ -153,7 +161,13 @@ export async function presetResolver(req: Request, res: Response, next: NextFunc
         return;
       }
       const dialogueTemplate = def.dialogue_prompt_template || def.prompt_template || '{script}';
-      req.body.prompt = await expandScript({ userScript, dialogueTemplate });
+      // Sizes the spoken-word budget to the clip the user actually gets (gorilla vlogs = 5s), so
+      // the expansion can't out-write the video and force chipmunk-speed delivery.
+      req.body.prompt = await expandScript({
+        userScript,
+        dialogueTemplate,
+        durationSeconds: def.cost?.type === 'per_second' ? def.cost.max_seconds : undefined,
+      });
       // Dialogue needs synthesized speech — Seedance's audio-on ref-to-video path (D-05).
       req.body.audio_enabled = true;
     }
@@ -336,8 +350,10 @@ export async function presetResolver(req: Request, res: Response, next: NextFunc
     req._preset = {
       preset_id,
       input_upload_ids: uploadIds,
+      ...(resolvedStyleId ? { style_id: resolvedStyleId } : {}),
       ...(maskUploadId ? { mask_upload_id: maskUploadId } : {}),
       ...(def.postprocess ? { postprocess: def.postprocess } : {}),
+      ...(def.min_tier ? { min_tier: def.min_tier } : {}),
     };
     next();
   } catch (err) {

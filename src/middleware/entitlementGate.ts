@@ -26,7 +26,16 @@ export async function entitlementGate(req: Request, res: Response, next: NextFun
     return;
   }
 
-  const required = maxTier(modelMinTier(resolved.model), resolutionMinTier(resolved.resolution));
+  // Presets are tier-agnostic by product principle: a curated preset is open to EVERY user,
+  // regardless of which (possibly pro) model or resolution powers it. Tier gating exists only for
+  // freeform surfaces where the user picks the model/resolution themselves (Create, and later the
+  // Movie Creator). So a preset request defaults to basic and NEVER inherits the model's tier —
+  // this makes "no preset can accidentally 403" true by construction, not by remembering to stamp
+  // every new preset with min_tier: 'basic'. A preset may still explicitly opt into a higher tier
+  // via min_tier, but the default is open. Freeform (no _preset) keeps the model + resolution gate.
+  const required: Tier = req._preset
+    ? (req._preset.min_tier ?? 'basic')
+    : maxTier(modelMinTier(resolved.model), resolutionMinTier(resolved.resolution));
 
   try {
     const tier = await getUserTier(dbUserId);

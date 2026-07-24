@@ -41,7 +41,7 @@ const connectionOptions = {
   enableReadyCheck: false,
 };
 
-export type FfmpegOp = 'mux' | 'concat' | 'compose' | 'explainer_compose';
+export type FfmpegOp = 'mux' | 'concat' | 'compose' | 'explainer_compose' | 'summary_compose';
 
 // Phase 13 (Edit Studio) — 'compose' job type contract. Defines the shape the export pipeline
 // (plans 06/07) dispatches into the queue; this plan only defines the contract, it does NOT
@@ -84,6 +84,13 @@ export interface ComposeCaptionStyle {
   fontSize: number;
   color: string;
   highlightColor: string;
+  /** False renders each cue as ordinary static text instead of a word-level karaoke sweep. */
+  karaoke?: boolean;
+  /** Optional glyph outline and drop-shadow controls for burned captions. */
+  outlineWidth?: number;
+  shadowDepth?: number;
+  /** False uses an outlined glyph instead of the default solid background pill. */
+  backgroundBox?: boolean;
   position: 'top' | 'middle' | 'bottom';
   /** Item 3: optional continuous vertical anchor (0..1, box center) — see
    * assCaptionBuilder.ts's CaptionStyle.yOffsetNorm doc comment for the full contract. */
@@ -127,6 +134,38 @@ export interface ExplainerComposeSpec {
   captionStyle: ComposeCaptionStyle;
 }
 
+export interface SummarySourceClipSpec {
+  startSeconds: number;
+  endSeconds: number;
+  /** Rendered duration. Summaries keep this equal to the selected source duration (natural speed). */
+  outputDurationSeconds: number;
+}
+
+/**
+ * How much of each source frame survives inside the square video window.
+ * - `fill`     — full-bleed square crop (a 16:9 source loses ~44% of its width).
+ * - `balanced` — crop no tighter than 4:3, then letterbox that inside the square (~25% width loss).
+ * - `fit`      — whole source frame letterboxed inside the square (nothing cropped).
+ * Only affects square windows (1:1 output, and the centered square inside 9:16).
+ */
+export type SummarySourceFraming = 'fill' | 'balanced' | 'fit';
+
+export interface SummaryComposeSpec {
+  width: number;
+  height: number;
+  /** Defaults to 'fill' when absent, preserving pre-existing job payloads. */
+  sourceFraming?: SummarySourceFraming;
+  /** Portrait only: square's top-edge offset in canvas px. Absent = centered (legacy payloads). */
+  portraitSquareTopPx?: number;
+  sourceR2Key: string;
+  clips: SummarySourceClipSpec[];
+  narrationR2Key: string;
+  musicR2Key: string | null;
+  musicVolume: number;
+  captionCues: ComposeCaptionCue[];
+  captionStyle: ComposeCaptionStyle;
+}
+
 export interface FfmpegJobData {
   generationId: string;
   userId: string;
@@ -141,6 +180,8 @@ export interface FfmpegJobData {
   compose?: ComposeSpec;
   /** Required for op:'explainer_compose'. */
   explainerCompose?: ExplainerComposeSpec;
+  /** Required for op:'summary_compose'. */
+  summaryCompose?: SummaryComposeSpec;
 }
 
 export const ffmpegQueue = new Queue<FfmpegJobData>(QUEUE_NAME, {

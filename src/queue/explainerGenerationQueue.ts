@@ -2,6 +2,7 @@
 // from FORMATS_BY_ID so Redis carries only validated ids and primitives, never stale descriptors.
 
 import { Queue } from 'bullmq';
+import type { ExplainerVisualMethod } from '../config/formats';
 
 const QUEUE_NAME = 'explainer-generation';
 
@@ -21,6 +22,8 @@ export interface ExplainerGenerationJob {
   userId: string;
   cost: number;
   formatId: string;
+  /** Explainer tier: 'illustrated' (still + Ken-Burns) or 'animated' (still + Omni). */
+  visualMethod: ExplainerVisualMethod;
   topic: string;
   styleId: string;
   voiceId: string;

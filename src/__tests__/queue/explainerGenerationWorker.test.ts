@@ -16,7 +16,6 @@ jest.mock('../../services/providers/ReplicateProvider', () => ({
 
 jest.mock('../../services/openaiScriptService', () => ({
   expandExplainerScript: jest.fn(),
-  pickBestCandidateIndex: jest.fn(),
 }));
 
 jest.mock('../../services/sourceGroundingService', () => ({
@@ -29,6 +28,11 @@ jest.mock('../../services/geminiTtsService', () => ({
 
 jest.mock('../../services/omniService', () => ({
   animateScene: jest.fn(),
+}));
+
+const mockGenerateSceneClip = jest.fn();
+jest.mock('../../services/explainerVisualStage', () => ({
+  resolveVisualStage: jest.fn(() => ({ method: 'animated', generateSceneClip: mockGenerateSceneClip })),
 }));
 
 jest.mock('../../services/lyriaService', () => ({
@@ -68,13 +72,11 @@ jest.mock('../../queue/ffmpegWorker', () => ({
 
 import { processExplainerGeneration } from '../../queue/explainerGenerationWorker';
 import { generateStyledStill } from '../../services/providers/ReplicateProvider';
-import {
-  expandExplainerScript,
-  pickBestCandidateIndex,
-} from '../../services/openaiScriptService';
+import { expandExplainerScript } from '../../services/openaiScriptService';
 import { buildGroundingText } from '../../services/sourceGroundingService';
 import { generateNarrationForScene } from '../../services/geminiTtsService';
 import { animateScene } from '../../services/omniService';
+import { resolveVisualStage } from '../../services/explainerVisualStage';
 import { generateMusicBed } from '../../services/lyriaService';
 import { getWordTimings } from '../../services/whisperxService';
 import {
@@ -98,6 +100,7 @@ const JOB: ExplainerGenerationJob = {
   userId: 'user-1',
   cost: 470,
   formatId: 'explainer',
+  visualMethod: 'animated',
   topic: 'How eclipses happen',
   styleId: 'pixel-art',
   voiceId: 'Kore',
@@ -140,12 +143,12 @@ function signedUrlFor(key: string): string {
   return `https://r2.example.com/${encodeURIComponent(key)}`;
 }
 
-function candidateKey(sceneIndex: number, candidateIndex: number): string {
-  return `generations/gen-explainer-1.scene${sceneIndex}.candidate${candidateIndex}.png`;
+function stillKey(sceneIndex: number): string {
+  return `generations/gen-explainer-1.scene${sceneIndex}.png`;
 }
 
-function candidateUrl(sceneIndex: number, candidateIndex: number): string {
-  return signedUrlFor(candidateKey(sceneIndex, candidateIndex));
+function stillUrl(sceneIndex: number): string {
+  return signedUrlFor(stillKey(sceneIndex));
 }
 
 function resetHappyPath(): void {
@@ -166,11 +169,15 @@ function resetHappyPath(): void {
       Promise.resolve(`generations/${outputKey}.png`)
     ),
   );
-  (pickBestCandidateIndex as jest.Mock).mockResolvedValue(1);
   (scanForCsam as jest.Mock).mockResolvedValue({ flagged: false });
-  (animateScene as jest.Mock)
-    .mockResolvedValueOnce({ r2Key: 'generations/gen-explainer-1.scene0.mp4' })
-    .mockResolvedValueOnce({ r2Key: 'generations/gen-explainer-1.scene1.mp4' });
+  // resolveVisualStage returns a stage whose generateSceneClip yields one archived clip per scene.
+  (resolveVisualStage as jest.Mock).mockReturnValue({
+    method: 'animated',
+    generateSceneClip: mockGenerateSceneClip,
+  });
+  mockGenerateSceneClip
+    .mockResolvedValueOnce({ clipR2Key: 'generations/gen-explainer-1.scene0.mp4' })
+    .mockResolvedValueOnce({ clipR2Key: 'generations/gen-explainer-1.scene1.mp4' });
   (concatWavBuffers as jest.Mock).mockReturnValue(Buffer.from('combined wav'));
   (uploadBufferToR2 as jest.Mock).mockResolvedValue(undefined);
   (getWordTimings as jest.Mock).mockResolvedValue(GLOBAL_WORDS);
@@ -188,38 +195,28 @@ function resetHappyPath(): void {
 beforeEach(resetHappyPath);
 
 describe('processExplainerGeneration', () => {
-  it('runs the full pipeline with N stills, one winning Omni clip per scene, structured params, and one compose job', async () => {
+  it('runs the full pipeline with one still and one Omni clip per scene, structured params, and one compose job', async () => {
     await processExplainerGeneration(JOB);
 
-    expect(generateStyledStill).toHaveBeenCalledTimes(6);
-    expect(pickBestCandidateIndex).toHaveBeenCalledTimes(2);
-    expect(pickBestCandidateIndex).toHaveBeenNthCalledWith(
-      1,
-      [candidateUrl(0, 0), candidateUrl(0, 1), candidateUrl(0, 2)],
-      SCRIPT.scenes[0].visual_prompt,
-      'lower_third',
-    );
-    expect(animateScene).toHaveBeenCalledTimes(2);
-    expect(animateScene).toHaveBeenNthCalledWith(
-      1,
-      candidateUrl(0, 1),
-      SCRIPT.scenes[0].motion_prompt,
-      'google/gemini-omni-flash/image-to-video',
-      '16:9',
-      1,
-      JOB.generationId,
-      0,
-    );
-    expect(animateScene).toHaveBeenNthCalledWith(
-      2,
-      candidateUrl(1, 1),
-      SCRIPT.scenes[1].motion_prompt,
-      'google/gemini-omni-flash/image-to-video',
-      '16:9',
-      2,
-      JOB.generationId,
-      1,
-    );
+    expect(resolveVisualStage).toHaveBeenCalledWith('animated');
+    expect(mockGenerateSceneClip).toHaveBeenCalledTimes(2);
+    expect(mockGenerateSceneClip).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      generationId: JOB.generationId,
+      sceneIndex: 0,
+      visualPrompt: SCRIPT.scenes[0].visual_prompt,
+      motionPrompt: SCRIPT.scenes[0].motion_prompt,
+      imageModel: 'openai/gpt-image-2-low',
+      omniModel: 'google/gemini-omni-flash/image-to-video',
+      narrationDurationSeconds: 1,
+      aspectRatio: '16:9',
+    }));
+    expect(mockGenerateSceneClip).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      sceneIndex: 1,
+      visualPrompt: SCRIPT.scenes[1].visual_prompt,
+      motionPrompt: SCRIPT.scenes[1].motion_prompt,
+      narrationDurationSeconds: 2,
+      aspectRatio: '16:9',
+    }));
 
     expect(uploadBufferToR2).toHaveBeenCalledWith(
       expect.any(Buffer),
@@ -317,14 +314,14 @@ describe('processExplainerGeneration', () => {
 
   it('short-circuits music none and resolves auto to the script mood', async () => {
     await processExplainerGeneration({ ...JOB, music: 'none' });
-    expect(generateMusicBed).toHaveBeenCalledWith('none', 'fal-ai/lyria2', JOB.generationId);
+    expect(generateMusicBed).toHaveBeenCalledWith('none', 'lyria-3-clip-preview', JOB.generationId);
     expect(ffmpegAdd).toHaveBeenCalledWith('generate', expect.objectContaining({
       explainerCompose: expect.objectContaining({ musicR2Key: null }),
     }));
 
     resetHappyPath();
     await processExplainerGeneration({ ...JOB, music: 'auto' });
-    expect(generateMusicBed).toHaveBeenCalledWith('dramatic', 'fal-ai/lyria2', JOB.generationId);
+    expect(generateMusicBed).toHaveBeenCalledWith('dramatic', 'lyria-3-clip-preview', JOB.generationId);
   });
 
   it('never marks the generation completed inside the orchestrator', async () => {
@@ -333,27 +330,8 @@ describe('processExplainerGeneration', () => {
     expect(markCompleted).not.toHaveBeenCalled();
   });
 
-  it('falls back to candidate zero when the vision pick rejects without refunding', async () => {
-    (pickBestCandidateIndex as jest.Mock).mockRejectedValue(new Error('vision unavailable'));
-
-    await processExplainerGeneration(JOB);
-
-    expect(animateScene).toHaveBeenNthCalledWith(
-      1,
-      candidateUrl(0, 0),
-      expect.any(String),
-      expect.any(String),
-      '16:9',
-      1,
-      JOB.generationId,
-      0,
-    );
-    expect(refundCredits).not.toHaveBeenCalled();
-    expect(ffmpegAdd).toHaveBeenCalledTimes(1);
-  });
-
   it('treats an Omni failure as a hard full-refund failure', async () => {
-    (animateScene as jest.Mock).mockReset().mockRejectedValue(new Error('content policy'));
+    mockGenerateSceneClip.mockReset().mockRejectedValue(new Error('content policy'));
 
     await processExplainerGeneration(JOB);
 
@@ -364,17 +342,17 @@ describe('processExplainerGeneration', () => {
   it('does not output-scan Explainer stills and proceeds directly to animation', async () => {
     await processExplainerGeneration(JOB);
     expect(scanForCsam).not.toHaveBeenCalled();
-    expect(animateScene).toHaveBeenCalledTimes(JOB.sceneCount);
+    expect(mockGenerateSceneClip).toHaveBeenCalledTimes(JOB.sceneCount);
     expect(ffmpegAdd).toHaveBeenCalledTimes(1);
     expect(refundCredits).not.toHaveBeenCalled();
   });
 
-  it('forwards the non-default per-request aspect ratio to every animate call', async () => {
+  it('forwards the non-default per-request aspect ratio to every scene clip', async () => {
     await processExplainerGeneration(JOB);
 
-    expect(animateScene).toHaveBeenCalledTimes(JOB.sceneCount);
-    for (const call of (animateScene as jest.Mock).mock.calls) {
-      expect(call[3]).toBe(JOB.aspectRatio);
+    expect(mockGenerateSceneClip).toHaveBeenCalledTimes(JOB.sceneCount);
+    for (const call of mockGenerateSceneClip.mock.calls) {
+      expect(call[0].aspectRatio).toBe(JOB.aspectRatio);
     }
   });
 
@@ -413,8 +391,7 @@ describe('processExplainerGeneration', () => {
 
     expect(expandExplainerScript).not.toHaveBeenCalled();
     expect(generateNarrationForScene).not.toHaveBeenCalled();
-    expect(generateStyledStill).not.toHaveBeenCalled();
-    expect(animateScene).not.toHaveBeenCalled();
+    expect(mockGenerateSceneClip).not.toHaveBeenCalled();
     expect(markFailed).not.toHaveBeenCalled();
     expect(refundCredits).not.toHaveBeenCalled();
   });
@@ -428,8 +405,7 @@ describe('processExplainerGeneration', () => {
       (buildGroundingText as jest.Mock).mock.invocationCallOrder[0]!,
       (expandExplainerScript as jest.Mock).mock.invocationCallOrder[0]!,
       (generateNarrationForScene as jest.Mock).mock.invocationCallOrder[0]!,
-      (generateStyledStill as jest.Mock).mock.invocationCallOrder[0]!,
-      (animateScene as jest.Mock).mock.invocationCallOrder[0]!,
+      mockGenerateSceneClip.mock.invocationCallOrder[0]!,
     );
     expect((markProcessing as jest.Mock).mock.invocationCallOrder[0]).toBeLessThan(firstStageOrder);
   });

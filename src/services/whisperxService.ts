@@ -144,14 +144,98 @@ export function reconcileScriptWithTiming(
   return reconciled;
 }
 
-/** PURE: groups flattened per-scene word timings into one offset cue per narration line. */
+// ─── Clause-aware cue builder (B7) ──────────────────────────────────────────────────────────
+// Ported from the spikeCustomSync.ts throwaway rebuild's clauseLens/cues logic (the validated
+// fix for the "…the sun. Plants…" and "…a plant's very own superpower" cases). Count-based
+// chunking (fixed word/char caps) can strand a lone function word ("a") at a chunk boundary or
+// split a clause mid-thought; breaking on punctuation FIRST avoids both.
+const MAX_CLAUSE_WORDS = 6;
+
+// Words a cue should never END on — they belong with what follows (articles, conjunctions,
+// prepositions, possessives). Mirrors spikeCustomSync.ts's BAD_TRAILING set.
+const BAD_TRAILING_WORDS = new Set([
+  'a', 'an', 'the', 'and', 'or', 'but', 'to', 'of', 'with', 'that', 'this',
+  'their', 'his', 'her', 'its', 'our', 'your', 'my', 'in', 'on', 'for', 'at',
+  'from', 'up', 'into', 'over', 'very',
+]);
+
+function isBadTrailingWord(word: string): boolean {
+  return BAD_TRAILING_WORDS.has(word.toLowerCase().replace(/[^a-z']/g, ''));
+}
+
+/**
+ * PURE: splits one scene's punctuated narration_line into clause-aware cue boundaries and slices
+ * the (already index-aligned) word-timing array accordingly.
+ *   1. Break on punctuation FIRST — commas and sentence terminators are hard cue boundaries.
+ *   2. Sub-split only clauses longer than MAX_CLAUSE_WORDS, into BALANCED pieces (not greedy).
+ *   3. Never end a non-final piece of a sub-split clause on a function word — defer it forward.
+ *   4. A cue never crosses a clause's parent scene (the caller only ever passes one scene's
+ *      words), so it can never cross a scene boundary either.
+ * `words` must be 1:1 index-aligned with `narration`'s whitespace-token count — guaranteed
+ * upstream because reconcileScriptWithTiming always returns exactly scriptWords.length entries,
+ * and scriptWords is built the same way (`narration_line.split(/\s+/)`) as this function's own
+ * clause tokenization. If a caller ever violates that (drift), this degrades to one cue for the
+ * whole scene rather than mis-indexing into `words`.
+ */
+export function buildClauseAwareCues(
+  narration: string,
+  words: CaptionWordDraft[],
+): CaptionCueDraft[] {
+  if (words.length === 0) return [];
+
+  const clauseLengths = narration
+    .split(/(?<=[,.?!;:])\s+/)
+    .map((clause) => clause.trim().replace(/[,.?!;:]+$/, '').trim())
+    .filter(Boolean)
+    .map((clause) => clause.split(/\s+/).length);
+
+  const clauseTotal = clauseLengths.reduce((sum, length) => sum + length, 0);
+  const effectiveClauseLengths = clauseTotal === words.length ? clauseLengths : [words.length];
+
+  const boundaries: Array<[start: number, end: number]> = [];
+  let cursor = 0;
+  for (const clauseLength of effectiveClauseLengths) {
+    let remaining = clauseLength;
+    let pieceCount = Math.ceil(clauseLength / MAX_CLAUSE_WORDS);
+    let start = cursor;
+    while (pieceCount > 0) {
+      let end = start + Math.ceil(remaining / pieceCount) - 1;
+      // Only a SUB-SPLIT piece (there's a next piece in this same clause to defer into) needs
+      // the bad-trailing-word guard — a clause's own natural (punctuation) boundary is authored
+      // by the script and essentially never ends mid-thought.
+      if (pieceCount > 1) {
+        while (end > start && isBadTrailingWord(words[end]!.text)) end -= 1;
+      }
+      boundaries.push([start, end]);
+      remaining -= end - start + 1;
+      start = end + 1;
+      pieceCount -= 1;
+    }
+    cursor += clauseLength;
+  }
+
+  return boundaries.map(([start, end]) => {
+    const cueWords = words.slice(start, end + 1);
+    return {
+      startSeconds: cueWords[0]!.startSeconds,
+      endSeconds: cueWords[cueWords.length - 1]!.endSeconds,
+      words: cueWords,
+    };
+  });
+}
+
+/** PURE: groups flattened per-scene word timings into clause-aware cues per narration line, each
+ * offset into the concatenated narration timeline. A scene's narration may produce multiple
+ * cues (B7); a cue never crosses a scene boundary because clause splitting runs per scene. */
 export function buildSceneCues(
   sceneNarrations: string[],
   words: CaptionWordDraft[],
   sceneStartOffsets: number[],
 ): CaptionCueDraft[] {
   let wordCursor = 0;
-  return sceneNarrations.map((narration, sceneIndex) => {
+  const cues: CaptionCueDraft[] = [];
+
+  sceneNarrations.forEach((narration, sceneIndex) => {
     const wordCount = narration.trim() ? narration.trim().split(/\s+/).length : 0;
     const offset = sceneStartOffsets[sceneIndex] ?? 0;
     const sceneWords = words.slice(wordCursor, wordCursor + wordCount).map((word) => ({
@@ -161,12 +245,10 @@ export function buildSceneCues(
     }));
     wordCursor += wordCount;
 
-    return {
-      startSeconds: sceneWords[0]?.startSeconds ?? offset,
-      endSeconds: sceneWords[sceneWords.length - 1]?.endSeconds ?? offset,
-      words: sceneWords,
-    };
+    cues.push(...buildClauseAwareCues(narration, sceneWords));
   });
+
+  return cues;
 }
 
 /** I/O wrapper: presigned narration URL to script-truth word drafts. */

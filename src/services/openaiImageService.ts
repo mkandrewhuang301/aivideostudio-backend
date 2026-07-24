@@ -6,6 +6,7 @@
 import { config } from '../config';
 import sharp from 'sharp';
 import { archiveToR2, archiveBase64ToR2, uploadBufferToR2 } from './archivalService';
+import { nanoImageEditWithMaskGuidance } from './geminiImageService';
 
 function sizeFromAspectRatio(ar: string): string {
   const landscape = ['4:3', '16:9', '3:2', '21:9'].includes(ar);
@@ -71,57 +72,60 @@ export async function generateImageEditWithMask(
     );
   }
 
-  // The source image's content-type must match its actual bytes — the iOS client uploads it as
-  // JPEG (2026-07-12: switched from PNG to cut Magic Editor's submit-to-navigate time, since a
-  // 2048px photo PNG can run several MB vs. a few hundred KB as JPEG). Read it from R2's response
-  // instead of assuming a fixed type, so this stays correct regardless of what the client sends.
-  // The mask must stay PNG (needs an alpha channel — JPEG has none), unaffected by this.
-  const imageContentType = imgRes.headers.get('content-type') || 'image/png';
-  const imageExt = imageContentType.includes('jpeg') || imageContentType.includes('jpg') ? 'jpg' : 'png';
+  // Shared user intent for either provider; an empty prompt is a plain "remove + fill" request.
+  const editInstruction = prompt && prompt.trim().length > 0
+    ? prompt.trim()
+    : 'remove whatever is inside this area and fill it in naturally to match the surrounding image';
 
-  const form = new FormData();
-  form.append('model', 'gpt-image-2');
-  form.append('image', new Blob([sourceBuffer], { type: imageContentType }), `source.${imageExt}`);
-  form.append('mask', new Blob([maskBuffer], { type: 'image/png' }), 'mask.png');
-  // Keep the model output in the source coordinate space. Without an explicit size, an edit can
-  // come back at a different aspect ratio; stretching that result would move the generated
-  // content away from the user's painted mask before the locality composite below.
-  form.append('size', `${width}x${height}`);
-  form.append(
-    'prompt',
-    prompt && prompt.trim().length > 0
-      ? `Apply this change only inside the transparent mask region: ${prompt.trim()} ` +
-        'Keep the rest of the image unchanged and return the complete image.'
-      : 'Remove the masked region and fill it in naturally; the rest of the image must not change.',
-  );
-
-  // NOTE: gpt-image-2 rejects the "fidelity" param some other OpenAI image endpoints accept —
-  // deliberately not sent here (RESEARCH — verified).
-  const response = await fetch('https://api.openai.com/v1/images/edits', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${config.openaiApiKey}`,
-      // No Content-Type — fetch's FormData sets the multipart boundary itself.
-    },
-    body: form,
-  });
-
-  if (!response.ok) {
-    const body = await response.text();
-    throw new Error(`OpenAI mask edit failed (${response.status}): ${body}`);
-  }
-
-  const json = await response.json() as { data: Array<{ url?: string; b64_json?: string }> };
-  const item = json.data?.[0];
   let generatedBuffer: Buffer;
-  if (item?.url) {
-    const generatedResponse = await fetch(item.url);
-    if (!generatedResponse.ok) throw new Error('Failed to fetch OpenAI mask-edit output');
-    generatedBuffer = Buffer.from(await generatedResponse.arrayBuffer());
-  } else if (item?.b64_json) {
-    generatedBuffer = Buffer.from(item.b64_json, 'base64');
+  if (config.magicEditorProvider === 'nano') {
+    // Nano Banana (default, 2026-07-23): ~4x cheaper than gpt-image-2 and edits more surgically.
+    // The painted mask becomes an in-image guide; compositeMaskedEdit() below still enforces the
+    // exact painted region as the hard boundary, so this only steers WHERE Nano edits.
+    generatedBuffer = await nanoImageEditWithMaskGuidance(
+      sourceBuffer, maskBuffer, editInstruction, width, height,
+    );
   } else {
-    throw new Error('OpenAI returned no image');
+    // OpenAI /v1/images/edits fallback (set MAGIC_EDITOR_PROVIDER=openai) — the prior path.
+    // The source content-type must match its actual bytes — the iOS client uploads JPEG
+    // (2026-07-12: PNG→JPEG cut Magic Editor submit-to-navigate time). Read it from R2's response
+    // rather than assuming a type. The mask must stay PNG (needs an alpha channel).
+    const imageContentType = imgRes.headers.get('content-type') || 'image/png';
+    const imageExt = imageContentType.includes('jpeg') || imageContentType.includes('jpg') ? 'jpg' : 'png';
+
+    const form = new FormData();
+    form.append('model', 'gpt-image-2');
+    form.append('image', new Blob([sourceBuffer], { type: imageContentType }), `source.${imageExt}`);
+    form.append('mask', new Blob([maskBuffer], { type: 'image/png' }), 'mask.png');
+    // Keep the model output in the source coordinate space so it stays aligned to the mask.
+    form.append('size', `${width}x${height}`);
+    form.append(
+      'prompt',
+      `Apply this change only inside the transparent mask region: ${editInstruction} ` +
+        'Keep the rest of the image unchanged and return the complete image.',
+    );
+
+    // NOTE: gpt-image-2 rejects the "fidelity" param some other OpenAI image endpoints accept.
+    const response = await fetch('https://api.openai.com/v1/images/edits', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${config.openaiApiKey}` },
+      body: form,
+    });
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(`OpenAI mask edit failed (${response.status}): ${body}`);
+    }
+    const json = await response.json() as { data: Array<{ url?: string; b64_json?: string }> };
+    const item = json.data?.[0];
+    if (item?.url) {
+      const generatedResponse = await fetch(item.url);
+      if (!generatedResponse.ok) throw new Error('Failed to fetch OpenAI mask-edit output');
+      generatedBuffer = Buffer.from(await generatedResponse.arrayBuffer());
+    } else if (item?.b64_json) {
+      generatedBuffer = Buffer.from(item.b64_json, 'base64');
+    } else {
+      throw new Error('OpenAI returned no image');
+    }
   }
 
   // GPT Image treats a mask as guidance and can still alter distant, unrelated pixels. Enforce

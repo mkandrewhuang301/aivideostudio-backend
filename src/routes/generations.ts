@@ -71,7 +71,7 @@ import type { GenerationInput } from '../services/providers/ModelProvider';
 import { db } from '../db/client';
 import { referenceUploads } from '../db/schema';
 import { eq, inArray, and, sql } from 'drizzle-orm';
-import type { FormatDef, FormatDurationTier } from '../config/formats';
+import type { FormatDef, FormatDurationTier, ExplainerVisualMethod } from '../config/formats';
 import { probeVideoFrameCount } from '../services/mediaProbe';
 import { isRealFaceGenerationPath } from '../config/faceInputPresets';
 
@@ -136,6 +136,7 @@ interface ResolvedGenerationRequest {
 
 interface ResolvedFormatInputs {
   style_id: string;
+  visual_method: ExplainerVisualMethod;
   topic: string;
   voice_id: string;
   music: string;
@@ -281,8 +282,10 @@ async function prepareCost(req: Request, res: Response, next: NextFunction): Pro
       return;
     }
     // Cost comes ENTIRELY from the server format registry's matched duration tier — the client's
-    // cost, model, and media type values are never read (T-14-COST, mirrors T-09.6-09).
-    const cost = tier.credits;
+    // cost, model, and media type values are never read (T-14-COST, mirrors T-09.6-09). The tier
+    // carries a price per visual method: Illustrated (still + Ken-Burns + capped Nano edits) is far
+    // cheaper than Animated (Omni per scene).
+    const cost = inputs.visual_method === 'illustrated' ? tier.illustrated_credits : tier.credits;
     req.body.cost_credits = cost;
     req._resolved = {
       prompt: inputs.topic,
@@ -915,6 +918,7 @@ generationsRouter.post('/', promptModerationMiddleware, presetResolver, formatRe
       ? {
           preset_id: req._preset.preset_id,
           preset_input_upload_ids: req._preset.input_upload_ids,
+          ...(req._preset.style_id ? { style_id: req._preset.style_id } : {}),
           // Persist the owned upload id, never the expiring mask_url. This lets Magic Editor
           // history render the prior selection and lets Regen replay the exact edit.
           ...(req._preset.mask_upload_id ? { mask_upload_id: req._preset.mask_upload_id } : {}),
@@ -959,11 +963,15 @@ generationsRouter.post('/', promptModerationMiddleware, presetResolver, formatRe
           userId: req.user.dbUserId,
           cost: resolved.cost,
           formatId: req.body.format_id,
+          visualMethod: inputs.visual_method,
           topic: inputs.topic,
           styleId: inputs.style_id,
           voiceId: inputs.voice_id,
           music: inputs.music,
-          sceneCount: tier.scene_count,
+          // Illustrated packs more, shorter beats than Animated.
+          sceneCount: inputs.visual_method === 'illustrated'
+            ? tier.illustrated_scene_count
+            : tier.scene_count,
           durationSeconds: tier.seconds,
           aspectRatio: inputs.aspectRatio,
           attachments: inputs.attachments,
@@ -1216,7 +1224,8 @@ generationsRouter.post('/', promptModerationMiddleware, presetResolver, formatRe
 //   video / never loads" bug without an app update for existing installs).
 // - D-G: preset rows must never leak model/infra to the client — null the model (mirrors the
 //   existing prompt:null treatment) and strip params down to just preset_id +
-//   preset_input_upload_ids (drops swap_image/target_image/mask_url/hair_source + any R2 URLs).
+//   preset_input_upload_ids plus client-safe replay choices (drops provider fields, expanded
+//   prompts, swap_image/target_image/mask_url/hair_source, and any R2 URLs).
 function presetSafeSerialization(item: {
   media_type: string;
   model: string | null;
@@ -1237,6 +1246,8 @@ function presetSafeSerialization(item: {
       ? {
           preset_id: p!.preset_id,
           preset_input_upload_ids: p!.preset_input_upload_ids ?? [],
+          ...(typeof p!.style_id === 'string' ? { style_id: p!.style_id } : {}),
+          ...(typeof p!.aspect_ratio === 'string' ? { aspect_ratio: p!.aspect_ratio } : {}),
           // An opaque, user-owned upload id is safe to return and is required for exact replay.
           // No provider URL or internal expanded prompt is exposed.
           ...(p!.preset_id === 'magic-editor' && typeof p!.mask_upload_id === 'string'

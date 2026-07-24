@@ -42,8 +42,26 @@ export async function formatResolver(req: Request, res: Response, next: NextFunc
   }
 
   const styleId = typeof body.style_id === 'string' ? body.style_id : '';
-  if (!def.style_grid.some((style) => style.id === styleId)) {
+  const style = def.style_grid.find((candidate) => candidate.id === styleId);
+  if (!style) {
     res.status(400).json({ error: 'Invalid style', code: 'INVALID_STYLE' });
+    return;
+  }
+
+  // Explainer tier. When the client omits it, default to a method the chosen style supports —
+  // preferring 'illustrated' (the cheaper default per the locked contract) when available, else the
+  // style's own method (some styles are animated-only, e.g. pixel-art). An explicit value must be a
+  // valid method the style supports (style_grid rows are tagged with the methods they belong to).
+  let visualMethod: 'illustrated' | 'animated';
+  if (body.visual_method === undefined) {
+    visualMethod = style.methods.includes('illustrated') ? 'illustrated' : style.methods[0]!;
+  } else if (
+    (body.visual_method === 'illustrated' || body.visual_method === 'animated')
+    && style.methods.includes(body.visual_method)
+  ) {
+    visualMethod = body.visual_method;
+  } else {
+    res.status(400).json({ error: 'Invalid visual method', code: 'INVALID_VISUAL_METHOD' });
     return;
   }
 
@@ -143,6 +161,7 @@ export async function formatResolver(req: Request, res: Response, next: NextFunc
     req.body.__format_tier = matchedTier;
     req.body.__format_inputs = {
       style_id: styleId,
+      visual_method: visualMethod,
       topic,
       voice_id: voiceId,
       music,

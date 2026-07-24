@@ -71,10 +71,14 @@ interface FfprobeJson {
  */
 export async function probeVideoMeta(input: string): Promise<ProbedVideoMeta> {
   try {
+    // Deliberately NOT `-show_entries ...:stream_side_data=rotation`: that section name does not
+    // exist in ffprobe 4.x, which rejects the whole option and makes EVERY probe return nulls.
+    // Full -show_streams output is version-stable and still carries side_data_list.rotation.
     const { stdout } = await execFileAsync('ffprobe', [
       '-v', 'error',
       '-select_streams', 'v:0',
-      '-show_entries', 'stream=width,height,duration:stream_tags=rotate:stream_side_data=rotation:format=duration',
+      '-show_streams',
+      '-show_format',
       '-of', 'json',
       input,
     ]);

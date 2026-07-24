@@ -16,6 +16,33 @@ export interface WhisperXWord {
   end: number;
 }
 
+/**
+ * Runs a Replicate call with bounded retry on HTTP 429 (throttling). Replicate drops the
+ * prediction-creation limit to ~6/min while an account is under $5 credit, and a burst of narration
+ * + WhisperX calls trips it; the throttle resets within ~1s, so a short backoff clears it without
+ * failing the job. Honors the server's `retry_after` when present. Non-429 errors rethrow at once.
+ */
+const REPLICATE_429_ATTEMPTS = 5;
+async function withReplicateRetry<T>(fn: () => Promise<T>, label: string): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < REPLICATE_429_ATTEMPTS; attempt += 1) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error;
+      const msg = error instanceof Error ? error.message : String(error);
+      if (!/\b429\b|too many requests|throttl/i.test(msg) || attempt === REPLICATE_429_ATTEMPTS - 1) {
+        throw error;
+      }
+      const retryAfter = Number(/retry_after"?\s*:?\s*(\d+)/i.exec(msg)?.[1]);
+      const delayMs = (Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : 2 ** attempt) * 1000;
+      console.warn(`[replicate] ${label} throttled (429); retrying in ${delayMs}ms (attempt ${attempt + 1})`);
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+  throw lastError;
+}
+
 /** Keeps Replicate's SDK webhook verifier behind the same provider boundary as every SDK call. */
 export async function validateReplicateWebhook(
   args: Parameters<typeof validateWebhook>[0],
@@ -38,13 +65,13 @@ interface WhisperXOutput {
  * the authenticated live schema captured by Plan 14-01.
  */
 export async function transcribeWordTimings(audioUrl: string): Promise<WhisperXWord[]> {
-  const output = (await replicate.run(WHISPERX_MODEL, {
+  const output = (await withReplicateRetry(() => replicate.run(WHISPERX_MODEL, {
     input: {
       audio_file: audioUrl,
       align_output: true,
       language: 'en',
     },
-  })) as unknown as WhisperXOutput;
+  }), 'whisperx')) as unknown as WhisperXOutput;
 
   const words = Array.isArray(output?.segments)
     ? output.segments.flatMap((segment) => (
@@ -66,6 +93,68 @@ export async function transcribeWordTimings(audioUrl: string): Promise<WhisperXW
     throw new Error('whisperx returned no word timings');
   }
   return words;
+}
+
+// ─── qwen3-tts narration (single TTS engine, per 2026-07-23 TTS strategy) ──────
+// Live schema verified 2026-07-23 (GET api.replicate.com/v1/models/qwen/qwen3-tts): output is a
+// WAV URI (RIFF, audio/wav) so no transcode is needed downstream. One model, three modes:
+// custom_voice (preset speakers: Aiden/Dylan/Eric/Ono_anna/Ryan/Serena/Sohee/Uncle_fu/Vivian),
+// voice_clone (reference_audio URL + reference_text), voice_design (held). style_instruction is
+// the natural-language delivery lever; timbre is fixed by the speaker/clone.
+
+export type QwenTtsMode = 'custom_voice' | 'voice_clone';
+
+export interface QwenTtsInput {
+  text: string;
+  mode: QwenTtsMode;
+  /** custom_voice only — one of the preset speaker names. */
+  speaker?: string;
+  /** voice_clone only — a URL Replicate can fetch (e.g. a presigned R2 link to the reference clip). */
+  referenceAudioUrl?: string;
+  /** voice_clone only — transcript of the reference clip (strongly recommended; raw clones look worse). */
+  referenceText?: string;
+  /** Natural-language pace/emotion direction; timbre is unaffected. */
+  styleInstruction?: string;
+  /** Defaults to 'auto'. */
+  language?: string;
+}
+
+const QWEN_TTS_MODEL = 'qwen/qwen3-tts';
+
+/** Synthesizes one narration line to a WAV buffer via qwen3-tts. Throws on any failure so the
+ *  caller can apply its own retry / provider-fallback policy. */
+export async function replicateQwenTts(input: QwenTtsInput): Promise<Buffer> {
+  const replicateInput: Record<string, unknown> = {
+    text: input.text,
+    mode: input.mode,
+    language: input.language ?? 'auto',
+  };
+  if (input.styleInstruction) replicateInput.style_instruction = input.styleInstruction;
+  if (input.mode === 'custom_voice') {
+    replicateInput.speaker = input.speaker ?? 'Serena';
+  } else {
+    if (!input.referenceAudioUrl) throw new Error('qwen voice_clone requires referenceAudioUrl');
+    replicateInput.reference_audio = input.referenceAudioUrl;
+    if (input.referenceText) replicateInput.reference_text = input.referenceText;
+  }
+
+  const output = (await withReplicateRetry(
+    () => replicate.run(QWEN_TTS_MODEL, { input: replicateInput }),
+    'qwen3-tts',
+  )) as unknown;
+  const first = Array.isArray(output) ? output[0] : output;
+  const url = typeof first === 'string'
+    ? first
+    : (first && typeof (first as { url?: unknown }).url === 'function')
+      ? String((first as { url: () => unknown }).url())
+      : '';
+  if (!url) throw new Error('qwen3-tts returned no audio output');
+
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`qwen3-tts audio download failed (${response.status})`);
+  const audio = Buffer.from(await response.arrayBuffer());
+  if (audio.length === 0) throw new Error('qwen3-tts returned an empty audio file');
+  return audio;
 }
 
 // ─── Chained-job image stage: Wan 2.7 Image (09.6-05) ─────────────────────────
@@ -132,9 +221,21 @@ export async function generateStyledStill(
   const quality = qualityByModel[imageModel];
   if (!quality) throw new Error(`Unsupported styled-still model: ${imageModel}`);
 
+  // STYLE-ONLY framing (2026-07-23): the anchor is passed as input_images purely to lock the ART
+  // STYLE (palette, line weight, shape language, shading). Without this instruction gpt-image-2
+  // treats the anchor as a COMPOSITION reference and reproduces its subjects/background/layout in
+  // every scene — the "same lighthouse landscape over and over" bleed. This forces a fresh,
+  // distinct composition per scene while keeping the style consistent.
+  const styleLockedPrompt =
+    'Use the attached reference image ONLY as an ART-STYLE guide: match its illustration style, '
+    + 'color palette, line weight, shape language, and shading approach. Do NOT copy its composition, '
+    + 'layout, subjects, background, or scenery — those must come entirely from the scene description '
+    + 'below and depict a completely new, distinct scene.\n\nSCENE:\n'
+    + visualPrompt;
+
   const output = (await replicate.run('openai/gpt-image-2', {
     input: {
-      prompt: visualPrompt,
+      prompt: styleLockedPrompt,
       input_images: [styleAnchorUrl],
       aspect_ratio: '9:16',
       quality,

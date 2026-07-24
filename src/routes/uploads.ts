@@ -136,7 +136,11 @@ uploadsRouter.get('/', async (req: Request, res: Response) => {
     // library. An explicit ?kind= request is still honored verbatim. (2026-07-13)
     const whereClause = kindFilter
       ? and(eq(referenceUploads.user_id, req.user.dbUserId), eq(referenceUploads.kind, kindFilter))
-      : and(eq(referenceUploads.user_id, req.user.dbUserId), ne(referenceUploads.kind, 'mask'));
+      : and(
+          eq(referenceUploads.user_id, req.user.dbUserId),
+          ne(referenceUploads.kind, 'mask'),
+          ne(referenceUploads.kind, 'summary_source'),
+        );
 
     const rows = await db
       .select()

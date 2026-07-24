@@ -91,6 +91,13 @@ export interface CaptionStyle {
   /** Active/swept-word highlight color, hex. Rendered as the ASS Style's PrimaryColour — this is
    * what `\k` sweeps Secondary -> Primary into as each word's karaoke duration elapses. */
   highlightColor: string;
+  /** False renders each complete cue in `color`, without word-by-word karaoke highlighting. */
+  karaoke?: boolean;
+  /** Optional glyph outline and drop-shadow controls for burned captions. */
+  outlineWidth?: number;
+  shadowDepth?: number;
+  /** False uses an outlined glyph instead of the default solid background pill. */
+  backgroundBox?: boolean;
   position: 'top' | 'middle' | 'bottom';
   /** Item 3 (Andrew review, 2026-07-17): optional continuous vertical anchor, 0..1, of the caption
    * block's CENTER — same "box CENTER, matching SwiftUI .position(...) semantics" convention
@@ -138,12 +145,22 @@ export interface CaptionCanvas {
 export function buildAssFile(cues: CaptionCue[], style: CaptionStyle, canvas: CaptionCanvas): string {
   // PrimaryColour = already-swept/active fill (highlight); SecondaryColour = pre-sweep base color
   // — this is exactly how `\k` sweeps Secondary -> Primary as playback crosses each word.
-  const primaryColour = hexToAssColor(style.highlightColor);
+  const primaryColour = hexToAssColor(style.karaoke === false ? style.color : style.highlightColor);
   const secondaryColour = hexToAssColor(style.color);
   const outlineColour = '&H00000000';
   // Semi-transparent black background pill per 13-UI-SPEC.md's default Caption Style contract
   // (BorderStyle=3 renders BackColour as an opaque box behind the text, not just an outline).
   const backColour = '&H80000000';
+  const borderStyle = style.backgroundBox === false ? 1 : 3;
+  const outlineWidth = Math.max(0, style.outlineWidth ?? 0);
+  const shadowDepth = Math.max(0, style.shadowDepth ?? 0);
+  // Horizontal safe margins keep captions in a CENTERED column clear of platform UI overlays
+  // (e.g. TikTok's right-side action bar + bottom caption). ASS still uses MarginL/R to compute
+  // wrap width even under the per-line \pos override, so a larger symmetric value narrows the
+  // wrap and centers it. Default ~14% of width each side.
+  const sideMargin = Math.round(
+    ((style as { safeMarginFrac?: number }).safeMarginFrac ?? 0.14) * canvas.width,
+  );
 
   // Item 3: every Dialogue line below carries an explicit `\an5\pos(x,y)` override (box-CENTER
   // anchor, same convention buildTextOverlayAss already uses), so the Style row's Alignment field
@@ -174,7 +191,7 @@ export function buildAssFile(cues: CaptionCue[], style: CaptionStyle, canvas: Ca
     // our bundled assets/fonts/Inter-Bold.ttf (confirmed: `fontselect: (Inter, 400, 0) ->
     // Inter-Bold, 0, Inter-Bold`). Bold weight (400 base + Bold=0 below is the ASS bold-toggle,
     // unrelated to font selection) comes from this being the only style in the bundled font file.
-    `Style: Caption,Inter,${style.fontSize},${primaryColour},${secondaryColour},${outlineColour},${backColour},0,0,0,0,100,100,0,0,3,0,0,5,10,10,10,1`,
+    `Style: Caption,Inter,${style.fontSize},${primaryColour},${secondaryColour},${outlineColour},${backColour},0,0,0,0,100,100,0,0,${borderStyle},${outlineWidth},${shadowDepth},5,${sideMargin},${sideMargin},10,1`,
     '',
   ];
 
@@ -184,12 +201,14 @@ export function buildAssFile(cues: CaptionCue[], style: CaptionStyle, canvas: Ca
   ];
 
   const dialogueLines = cues.map((cue) => {
-    const words = cue.words
-      .map((word) => {
-        const durationCentiseconds = Math.max(0, Math.round((word.endSeconds - word.startSeconds) * 100));
-        return `{\\k${durationCentiseconds}}${escapeAssText(word.text)}`;
-      })
-      .join(' ');
+    const words = style.karaoke === false
+      ? cue.words.map((word) => escapeAssText(word.text)).join(' ')
+      : cue.words
+        .map((word) => {
+          const durationCentiseconds = Math.max(0, Math.round((word.endSeconds - word.startSeconds) * 100));
+          return `{\\k${durationCentiseconds}}${escapeAssText(word.text)}`;
+        })
+        .join(' ');
     const text = `{\\an5\\pos(${centerX},${centerY})}${words}`;
     const start = formatAssTimestamp(cue.startSeconds);
     const end = formatAssTimestamp(cue.endSeconds);

@@ -45,13 +45,17 @@ describe('probeVideoMeta', () => {
     expect(mockExecFile).toHaveBeenCalledTimes(1);
     const [file, args] = mockExecFile.mock.calls[0];
     expect(file).toBe('ffprobe');
+    // Must NOT use `-show_entries ...:stream_side_data=rotation` — no ffprobe release defines that
+    // section, so the option is rejected outright and every probe silently returns nulls.
     expect(args).toEqual([
       '-v', 'error',
       '-select_streams', 'v:0',
-      '-show_entries', 'stream=width,height,duration:stream_tags=rotate:stream_side_data=rotation:format=duration',
+      '-show_streams',
+      '-show_format',
       '-of', 'json',
       '/tmp/some-video.mp4',
     ]);
+    expect(args.join(' ')).not.toContain('stream_side_data');
   });
 
   it('accepts an https URL as input (ffprobe supports both local paths and URLs)', async () => {

@@ -13,18 +13,21 @@ import { generationsRouter } from './routes/generations';
 import { scheduleReaper } from './queue/reaperWorker';
 import { scheduleUploadReaper } from './queue/uploadReaperWorker';
 import { scheduleYearlyGrant } from './queue/yearlyGrantWorker';
+import { scheduleSoundtrackReaper } from './queue/soundtrackReaperWorker';
 import './queue/hiveScanWorker';
 import './queue/ncmecReportWorker';
 import './queue/openaiGenerationWorker';
 import './queue/falImageToolWorker';
 import './queue/chainGenerationWorker';
 import './queue/explainerGenerationWorker';
+import './queue/videoSummaryWorker';
 import './queue/influencerProWorker';
 import './queue/ffmpegWorker';
 import { banCheckMiddleware } from './middleware/banCheck';
 import { reportsRouter } from './routes/reports';
 import { uploadsRouter } from './routes/uploads';
 import { projectsRouter } from './routes/projects';
+import { aiMusicRouter } from './routes/aiMusic';
 import { privacyRouter } from './routes/privacy';
 import { termsRouter } from './routes/terms';
 import { ratesRouter } from './routes/rates';
@@ -33,6 +36,7 @@ import { formatsRouter } from './routes/formats';
 import { charactersRouter } from './routes/characters';
 import { promptRouter } from './routes/prompt';
 import { videoTranslationRouter } from './routes/videoTranslation';
+import { videoSummariesRouter } from './routes/videoSummaries';
 
 // Eagerly initialize Firebase Admin at startup — prevents double-init on concurrent requests
 getFirebaseAdmin();
@@ -42,6 +46,7 @@ getFirebaseAdmin();
 scheduleReaper().catch((err) => console.error('[server] Failed to schedule reaper:', err));
 scheduleUploadReaper().catch((err) => console.error('[server] Failed to schedule upload reaper:', err));
 scheduleYearlyGrant().catch((err) => console.error('[server] Failed to schedule yearly grant:', err));
+scheduleSoundtrackReaper().catch((err) => console.error('[server] Failed to schedule soundtrack reaper:', err));
 
 // Policy v2: this switch can only activate output scanning for persisted real-face paths.
 console.log(`[server] Hive real-face-path output scanning: ${config.hiveScanRealFacePaths ? 'ENABLED' : 'DISABLED'}`);
@@ -102,9 +107,11 @@ app.use('/api', authMiddleware, banCheckMiddleware);
 app.use('/api/me', meRouter);
 app.use('/api/generations', videoTranslationRouter);
 app.use('/api/generations', generationsRouter);
+app.use('/api/video-summaries', videoSummariesRouter);
 app.use('/api/reports', reportsRouter);
 app.use('/api/uploads', uploadsRouter);
 app.use('/api/projects', projectsRouter);
+app.use('/api', aiMusicRouter);
 app.use('/api/prompt', promptRouter);
 
 app.use('/privacy', privacyRouter);

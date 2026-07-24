@@ -1232,6 +1232,7 @@ describe('POST /api/generations — presets', () => {
         params: expect.objectContaining({
           preset_id: 'hairstyle',
           preset_input_upload_ids: ['upload-photo'],
+          style_id: 'bob',
         }),
       }),
     );
@@ -1239,6 +1240,7 @@ describe('POST /api/generations — presets', () => {
       expect.objectContaining({
         mediaType: 'image',
         model: 'openai/gpt-image-2-medium',
+        prompt: expect.stringMatching(/hair-only edit[\s\S]*preserve the exact identity[\s\S]*body pose[\s\S]*Do not copy the person/i),
         referenceImages: [
           'https://r2.example.com/signed/uploads/test-user-id/photo.jpg',
           'https://pub-cec5aa79de50452fa7eac827a03d7e04.r2.dev/presets/hairstyle/styles/bob-v1.jpg',
@@ -1945,7 +1947,12 @@ describe('GET /api/generations', () => {
       ...completedItem,
       id: 'gen-preset-1',
       prompt: 'the full expanded server template that must never leak to the client',
-      params: { preset_id: 'hairstyle', preset_input_upload_ids: ['upload-1'] },
+      params: {
+        preset_id: 'hairstyle',
+        preset_input_upload_ids: ['upload-1'],
+        style_id: 'bob',
+        aspect_ratio: '2:3',
+      },
     };
     (listGenerations as jest.Mock).mockResolvedValue([presetItem]);
 
@@ -1955,6 +1962,8 @@ describe('GET /api/generations', () => {
     expect(res.body.items[0].prompt).toBeNull();
     expect(res.body.items[0].params.preset_id).toBe('hairstyle');
     expect(res.body.items[0].params.preset_input_upload_ids).toEqual(['upload-1']);
+    expect(res.body.items[0].params.style_id).toBe('bob');
+    expect(res.body.items[0].params.aspect_ratio).toBe('2:3');
   });
 
   it('returns the user-authored Magic Editor prompt without exposing other preset templates (list)', async () => {
@@ -2141,7 +2150,12 @@ describe('GET /api/generations/:id', () => {
     (getGenerationById as jest.Mock).mockResolvedValue({
       ...completedGen,
       prompt: 'the full expanded server template that must never leak to the client',
-      params: { preset_id: 'hairstyle', preset_input_upload_ids: ['upload-1'] },
+      params: {
+        preset_id: 'hairstyle',
+        preset_input_upload_ids: ['upload-1'],
+        style_id: 'bob',
+        aspect_ratio: '2:3',
+      },
     });
 
     const res = await request(app).get('/api/generations/gen-001');
@@ -2150,6 +2164,8 @@ describe('GET /api/generations/:id', () => {
     expect(res.body.prompt).toBeNull();
     expect(res.body.params.preset_id).toBe('hairstyle');
     expect(res.body.params.preset_input_upload_ids).toEqual(['upload-1']);
+    expect(res.body.params.style_id).toBe('bob');
+    expect(res.body.params.aspect_ratio).toBe('2:3');
   });
 
   it('returns the user-authored Magic Editor prompt from the detail endpoint', async () => {

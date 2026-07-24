@@ -2,9 +2,20 @@ import sharp from 'sharp';
 
 const mockUploadBufferToR2 = jest.fn().mockResolvedValue(undefined);
 
-jest.mock('../../config', () => ({
-  config: { openaiApiKey: 'test-openai-key' },
-}));
+// Mutable so a test can flip the Magic Editor provider to exercise the OpenAI fallback path.
+const mockConfig: {
+  openaiApiKey: string;
+  geminiApiKey: string;
+  nanoImageModel: string;
+  magicEditorProvider: string;
+} = {
+  openaiApiKey: 'test-openai-key',
+  geminiApiKey: 'test-gemini-key',
+  nanoImageModel: 'gemini-3.1-flash-image-preview',
+  magicEditorProvider: 'nano',
+};
+
+jest.mock('../../config', () => ({ config: mockConfig }));
 
 jest.mock('../../services/archivalService', () => ({
   archiveToR2: jest.fn(),
@@ -48,6 +59,7 @@ async function paintedSquareMask(
 describe('Magic Editor mask enforcement', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockConfig.magicEditorProvider = 'nano';
     (global as unknown as { fetch: jest.Mock }).fetch = jest.fn();
   });
 
@@ -74,7 +86,59 @@ describe('Magic Editor mask enforcement', () => {
     expect(pixel(0, 0)).toEqual([0, 0, 255]); // unrelated distant content is original
   });
 
-  it('uploads the mask, requests source-sized output, then archives the locality-composited result', async () => {
+  it('edits via Nano (mask-guided) by default, then archives the locality-composited result', async () => {
+    const width = 16;
+    const height = 16;
+    const source = await solidImage(width, height, { r: 0, g: 0, b: 255 }, 'jpeg');
+    const generated = await solidImage(width, height, { r: 255, g: 0, b: 0 });
+    const mask = await paintedSquareMask(width, height, 8, 8, 2);
+
+    (global.fetch as jest.Mock)
+      .mockResolvedValueOnce(new Response(source, { headers: { 'content-type': 'image/jpeg' } }))
+      .mockResolvedValueOnce(new Response(mask, { headers: { 'content-type': 'image/png' } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        candidates: [{ content: { parts: [{ inline_data: { data: generated.toString('base64') } }] } }],
+      }), { headers: { 'content-type': 'application/json' } }));
+
+    const key = await generateImageEditWithMask(
+      'https://r2.example/source.jpg',
+      'https://r2.example/mask.png',
+      'replace the flower with a candle',
+      'gen-mask',
+    );
+
+    const apiRequest = (global.fetch as jest.Mock).mock.calls[2];
+    expect(apiRequest[0]).toBe(
+      'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-image-preview:generateContent',
+    );
+    const body = JSON.parse(apiRequest[1].body as string);
+    const parts = body.contents[0].parts;
+    // A guide image is sent inline, plus a text instruction that references the painted region and
+    // carries the user's edit intent.
+    expect(parts.some((p: { inline_data?: { data?: string } }) => p.inline_data?.data)).toBe(true);
+    const text = parts.find((p: { text?: string }) => typeof p.text === 'string').text as string;
+    expect(text).toContain('replace the flower with a candle');
+    expect(text).toContain('green-highlighted');
+
+    expect(key).toBe('generations/gen-mask.png');
+    expect(mockUploadBufferToR2).toHaveBeenCalledWith(
+      expect.any(Buffer),
+      'generations/gen-mask.png',
+      'image/png',
+    );
+
+    const uploaded = mockUploadBufferToR2.mock.calls[0][0] as Buffer;
+    const { data } = await sharp(uploaded).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+    // A distant pixel must still be blue/source-derived; the transparent-mask center is the
+    // Nano-generated red (composite enforces the painted region regardless of provider).
+    expect(data[2]).toBeGreaterThan(200);
+    expect(data[0]).toBeLessThan(30);
+    const centerOffset = (8 * width + 8) * 3;
+    expect([...data.subarray(centerOffset, centerOffset + 3)]).toEqual([255, 0, 0]);
+  });
+
+  it('falls back to OpenAI /v1/images/edits when MAGIC_EDITOR_PROVIDER=openai', async () => {
+    mockConfig.magicEditorProvider = 'openai';
     const width = 16;
     const height = 16;
     const source = await solidImage(width, height, { r: 0, g: 0, b: 255 }, 'jpeg');
@@ -101,22 +165,7 @@ describe('Magic Editor mask enforcement', () => {
     expect(form.get('mask')).toBeInstanceOf(Blob);
     expect(form.get('size')).toBe('16x16');
     expect(form.get('prompt')).toContain('only inside the transparent mask region');
-
     expect(key).toBe('generations/gen-mask.png');
-    expect(mockUploadBufferToR2).toHaveBeenCalledWith(
-      expect.any(Buffer),
-      'generations/gen-mask.png',
-      'image/png',
-    );
-
-    const uploaded = mockUploadBufferToR2.mock.calls[0][0] as Buffer;
-    const { data } = await sharp(uploaded).removeAlpha().raw().toBuffer({ resolveWithObject: true });
-    // JPEG compression can perturb the blue source slightly. A distant pixel must still be
-    // blue/source-derived, while the transparent-mask center is the generated red.
-    expect(data[2]).toBeGreaterThan(200);
-    expect(data[0]).toBeLessThan(30);
-    const centerOffset = (8 * width + 8) * 3;
-    expect([...data.subarray(centerOffset, centerOffset + 3)]).toEqual([255, 0, 0]);
   });
 
   it('rejects a mask whose dimensions do not match the source', async () => {

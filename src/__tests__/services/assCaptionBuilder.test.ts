@@ -88,6 +88,28 @@ describe('buildAssFile', () => {
     expect(kTags).toContain(`{\\k${Math.round((3.4 - 2.45) * 100)}}`);
   });
 
+  it('renders an ordinary whole-cue caption when karaoke is disabled', () => {
+    const cues = [{
+      startSeconds: 0,
+      endSeconds: 2,
+      words: [
+        { text: 'Yuji', startSeconds: 0, endSeconds: 1 },
+        { text: 'returns.', startSeconds: 1, endSeconds: 2 },
+      ],
+    }];
+    const ass = buildAssFile(cues, {
+      ...style,
+      karaoke: false,
+      outlineWidth: 3,
+      shadowDepth: 1.5,
+      backgroundBox: false,
+    }, canvas);
+    const dialogue = ass.split('\n').find((line) => line.startsWith('Dialogue:')) ?? '';
+    expect(dialogue).toContain('Yuji returns.');
+    expect(dialogue).not.toMatch(/\{\\k\d+\}/);
+    expect(ass).toContain(',1,3,1.5,5,10,10,10,1');
+  });
+
   it('produces 2 Dialogue lines for 2 cues with correct H:MM:SS.cc start/end timestamps', () => {
     const cues = [
       { startSeconds: 0, endSeconds: 1.5, words: [{ text: 'Hi', startSeconds: 0, endSeconds: 1.5 }] },

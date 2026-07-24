@@ -27,19 +27,75 @@ const EXPLAINER_MUSIC_MOODS = new Set(['uplifting', 'ambient', 'dramatic', 'play
 const FORMAT_TEXT_ZONES = new Set<FormatTextZone>(['lower_third', 'upper_third', 'center']);
 const BANNED_NARRATOR_FIGURE = /(a |the )?(narrator|presenter|host|talking head|speaker)( figure| standing| talking| explaining)?/gi;
 
-const SYSTEM_PROMPT =
-  "You expand a user's short script into a ready-to-shoot video prompt for an AI video model. " +
-  'The subject is a generic, fictional bundled character (no real person, no specific creator ' +
-  'likeness) — a selfie-cam vlogger. Expand the user\'s script into natural spoken dialogue lines ' +
-  'the character says on camera, plus brief selfie-cam vlog framing/staging description (handheld ' +
-  'phone framing, casual vlog energy). Keep it concise, concrete, and shootable. Output only the ' +
-  'expanded prompt text, no preamble or explanation.';
+/** Natural speaking pace. A 5s clip is ~12 words — the whole clip, not a paragraph. */
+const WORDS_PER_SECOND = 2.5;
+const DEFAULT_CLIP_SECONDS = 5;
+
+/**
+ * Voice quality direction. Seedance's synthesized speech reads as fake/announcer-ish next to
+ * Kling's, and the old prompt made it worse: telling the model "casual vlog energy" + "excitedly
+ * says" pushed it into an exaggerated influencer-presenter affect. Asking explicitly for an
+ * ordinary conversational human voice is the lever — there is no voice-selection parameter on the
+ * model's own audio.
+ */
+const VOICE_DIRECTION =
+  'Voice: an ordinary, natural human speaking voice with a neutral everyday accent — relaxed, '
+  + 'conversational, the way a real person talks to a friend. Even though the character is an '
+  + 'animal, it speaks with a normal human voice, not a cartoon or creature voice. NOT an '
+  + 'announcer, NOT a hyped-up influencer or YouTuber presenter voice, no exaggerated accent, no '
+  + 'performative intonation. Speak the line once, cleanly — no repeated words, no stutter, no '
+  + 'echo, no doubled phrases.';
+
+/**
+ * The audio direction appended to every expanded prompt. Seedance's `generate_audio` synthesizes a
+ * whole SCENE soundtrack (speech + score fused, unstrippable), which reads as "AI video" and blocks
+ * creators from laying trending audio over the clip. Naming speech-only in the prompt is the lever
+ * we have — there is no audio-only toggle on the model.
+ */
+const AUDIO_DIRECTION =
+  'Audio: spoken dialogue only — the character\'s voice and natural room tone. '
+  + 'No background music, no soundtrack, no score, no instrumental bed, no sound effects. '
+  + VOICE_DIRECTION;
+
+/**
+ * Creative where it helps (staging, framing), literal where it counts (the words and
+ * the length). The model must not invent extra beats, and must not out-write the clip: the earlier
+ * version happily produced a 60-second monologue for a 5-second clip, so every generation came out
+ * chipmunk-fast.
+ */
+function buildScriptSystemPrompt(durationSeconds: number): string {
+  const wordBudget = Math.max(6, Math.round(durationSeconds * WORDS_PER_SECOND));
+  return (
+    "You turn a user's short script into a ready-to-shoot video prompt for an AI video model. "
+    + 'The subject is a generic, fictional bundled character (no real person, no specific creator '
+    + 'likeness) — a selfie-cam vlogger.\n\n'
+    + 'Write the output in exactly two parts, in this order:\n'
+    + 'PART 1 — Visual direction (1–2 sentences). BE CREATIVE here: selfie-cam framing, handheld '
+    + 'phone held at arm\'s length, the setting, and the character\'s gestures and expression. Make '
+    + 'it vivid, concrete, and shootable. Keep the mood grounded and natural — a real person '
+    + 'filming themselves. Avoid hyped-up words like excited, enthusiastic, bouncing, energetic, '
+    + 'or eyes wide: they push the generated voice into a fake announcer performance.\n'
+    + 'PART 2 — The spoken line, wrapped in double quotes, introduced with: The character says: \n'
+    + 'Never write an "Audio:" section, a sound description, or any music direction — audio is '
+    + 'handled downstream and anything you write there will be discarded.\n\n'
+    + 'HARD LIMITS on Part 2 — these are not suggestions:\n'
+    + `1. LENGTH. The clip is ${durationSeconds} seconds. The spoken line must be AT MOST `
+    + `${wordBudget} words so it can be said at a natural, unrushed pace. If the user's script is `
+    + 'longer, cut it to its single strongest beat. Never pad it out.\n'
+    + "2. FIDELITY. Keep the user's meaning and voice. Do not invent new topics, sponsor reads, "
+    + 'sign-offs, or "like and subscribe" lines they did not write.\n'
+    + '3. ONE BEAT. A single continuous moment — no scene changes, no cuts, no time skips.\n\n'
+    + 'Output only the finished prompt text — no preamble, no explanation, no markdown, no part labels.'
+  );
+}
 
 interface ExpandScriptArgs {
   userScript: string;
   /** Server-side dialogue template; may include a `{script}` placeholder for the fail-open path. */
   dialogueTemplate: string;
   framingHint?: string;
+  /** Clip length; sets the spoken-word budget. Defaults to the 5s preset norm when unknown. */
+  durationSeconds?: number;
 }
 
 interface OpenAIChatCompletionResponse {
@@ -55,18 +111,24 @@ export interface ExpandExplainerScriptArgs {
   groundingText?: string;
 }
 
+/** The templated path skips the LLM, so it appends the audio direction itself. */
 function templatedFallback(args: ExpandScriptArgs): string {
-  return args.dialogueTemplate.includes('{script}')
+  const base = args.dialogueTemplate.includes('{script}')
     ? args.dialogueTemplate.replaceAll('{script}', args.userScript)
     : args.dialogueTemplate || args.userScript;
+  return `${base.trim()} ${AUDIO_DIRECTION}`;
 }
 
 /**
- * Expands a user's short script into a Seedance-ready dialogue prompt via gpt-4o-mini.
+ * Expands a user's short script into a dialogue prompt via gpt-4o-mini: creative on staging and
+ * delivery, strict on word count (sized to the clip) and on speech-only audio.
  * Never throws — on any error, empty content, or non-OK response it falls back to the templated
- * prompt (dialogueTemplate with {script} substituted).
+ * prompt (dialogueTemplate with {script} substituted, plus the same audio direction).
  */
 export async function expandScript(args: ExpandScriptArgs): Promise<string> {
+  const durationSeconds = args.durationSeconds && args.durationSeconds > 0
+    ? args.durationSeconds
+    : DEFAULT_CLIP_SECONDS;
   try {
     const userContent = args.framingHint
       ? `${args.userScript}\n\nFraming hint: ${args.framingHint}`
@@ -81,7 +143,7 @@ export async function expandScript(args: ExpandScriptArgs): Promise<string> {
       body: JSON.stringify({
         model: SCRIPT_EXPANSION_MODEL,
         messages: [
-          { role: 'system', content: SYSTEM_PROMPT },
+          { role: 'system', content: buildScriptSystemPrompt(durationSeconds) },
           { role: 'user', content: userContent },
         ],
         max_tokens: MAX_TOKENS,
@@ -99,7 +161,11 @@ export async function expandScript(args: ExpandScriptArgs): Promise<string> {
     if (!content) {
       return templatedFallback(args);
     }
-    return content;
+    // The audio direction is load-bearing (it's the only lever against Seedance's fused music
+    // track), so it is stamped here rather than trusted to the LLM: drop whatever audio line the
+    // model wrote — it likes to paraphrase or truncate it — and append the canonical one exactly
+    // once.
+    return `${content.replace(/\s*Audio:[\s\S]*$/i, '').trim()} ${AUDIO_DIRECTION}`;
   } catch (err) {
     console.error('[openaiScriptService] OpenAI API unreachable, falling back to template:', err);
     return templatedFallback(args);
@@ -214,65 +280,5 @@ export async function expandExplainerScript(
   } catch (err) {
     console.error('[openaiScriptService] Explainer completion unavailable, using structural fallback:', err);
     return explainerFallback(args);
-  }
-}
-
-/**
- * D-16 soft quality signal: choose one rendered still for Omni animation. Every failure falls back
- * to candidate zero so a vision-ranking outage can never fail the paid generation pipeline.
- */
-export async function pickBestCandidateIndex(
-  candidateUrls: string[],
-  visualPrompt: string,
-  textZone: FormatTextZone,
-): Promise<number> {
-  if (candidateUrls.length <= 1) return 0;
-
-  try {
-    const response = await fetch(OPENAI_CHAT_COMPLETIONS_URL, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${config.openaiApiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: 'gpt-4o-mini',
-        response_format: { type: 'json_object' },
-        messages: [{
-          role: 'user',
-          content: [
-            {
-              type: 'text',
-              text: `Pick the best still for this scene. Visual intent: "${visualPrompt}". Rubric: closest style match to the visual intent, NO narrator/presenter/speaker/host figure, cleanest uncluttered ${textZone} region reserved for captions. Reply ONLY JSON {"winner_index": N} — 0-based index into the images below, in the order given.`,
-            },
-            ...candidateUrls.map((url) => ({
-              type: 'image_url',
-              image_url: { url },
-            })),
-          ],
-        }],
-        max_tokens: 50,
-        temperature: 0,
-      }),
-    });
-    if (!response.ok) return 0;
-
-    const data = (await response.json()) as OpenAIChatCompletionResponse;
-    const content = data.choices?.[0]?.message?.content;
-    if (!content) return 0;
-
-    const parsed = JSON.parse(content) as Record<string, unknown>;
-    const index = parsed.winner_index;
-    if (
-      typeof index !== 'number'
-      || !Number.isInteger(index)
-      || index < 0
-      || index >= candidateUrls.length
-    ) {
-      return 0;
-    }
-    return index;
-  } catch {
-    return 0;
   }
 }
