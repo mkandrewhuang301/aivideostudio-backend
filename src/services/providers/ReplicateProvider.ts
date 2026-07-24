@@ -52,12 +52,79 @@ export async function validateReplicateWebhook(
 
 interface WhisperXOutput {
   segments?: Array<{
+    start?: unknown;
+    end?: unknown;
     words?: Array<{
       word?: unknown;
       start?: unknown;
       end?: unknown;
     }>;
   }>;
+}
+
+const asFiniteNumber = (value: unknown): number | null =>
+  (typeof value === 'number' && Number.isFinite(value)) ? value : null;
+
+/**
+ * PURE: flattens WhisperX's segmented alignment into a dense, monotonic word-timing list.
+ *
+ * WhisperX (`align_output: true`) routinely returns words — numerals, names, and whole
+ * poorly-aligned trailing segments — with null/absent `start`/`end`. The previous parser SILENTLY
+ * DROPPED those words, which stranded the matching script words with no timing anchor downstream;
+ * when a late segment failed word-alignment its entire run vanished and the script tail got
+ * crammed into the leftover span — the "captions drift, then burst in the last few seconds" bug.
+ *
+ * Instead of dropping, we FILL: every non-empty word is kept and any missing timestamp is linearly
+ * interpolated inside its segment's frame (explicit segment bounds, else neighbouring finite word
+ * times, else a carry from the previous segment), with a global monotonic non-decreasing clamp. So
+ * anchors stay dense from the first word to the last and the tail can no longer collapse.
+ */
+export function parseWhisperXWords(output: WhisperXOutput): WhisperXWord[] {
+  const result: WhisperXWord[] = [];
+  let prevEnd = 0;
+
+  for (const segment of output?.segments ?? []) {
+    const rawWords = (segment?.words ?? []).flatMap((w) => (
+      typeof w?.word === 'string' && w.word.length > 0
+        ? [{ text: w.word, start: asFiniteNumber(w.start) }]
+        : []
+    ));
+    if (rawWords.length === 0) continue;
+
+    // Segment frame: explicit segment bounds win, else the first/last finite word time, else carry.
+    const firstFinite = rawWords.find((w) => w.start !== null)?.start ?? prevEnd;
+    const lastFinite = [...rawWords].reverse().find((w) => w.start !== null)?.start ?? firstFinite;
+    const segStart = Math.max(prevEnd, asFiniteNumber(segment?.start) ?? firstFinite);
+    const segEnd = Math.max(segStart, asFiniteNumber(segment?.end) ?? lastFinite);
+
+    // Boundary times: times[i] = start of word i (known start anchors it, null = interpolate);
+    // times[n] = segEnd. Index 0 and n are pinned non-null so every interior null is bracketed.
+    const n = rawWords.length;
+    const times: Array<number | null> = rawWords.map((w) => w.start);
+    times.push(segEnd);
+    if (times[0] === null) times[0] = segStart;
+
+    let known = 0;
+    while (known < n) {
+      if (times[known] === null) { known += 1; continue; }
+      let next = known + 1;
+      while (next <= n && times[next] === null) next += 1;
+      const a = times[known]!;
+      const b = times[next]!;
+      const gap = next - known;
+      for (let k = 1; k < gap; k += 1) times[known + k] = a + (b - a) * (k / gap);
+      known = next;
+    }
+
+    for (let i = 0; i < n; i += 1) {
+      const start = Math.max(prevEnd, times[i]!);
+      const end = Math.max(start, times[i + 1]!);
+      result.push({ word: rawWords[i].text, start, end });
+      prevEnd = end;
+    }
+  }
+
+  return result;
 }
 
 /**
@@ -73,22 +140,7 @@ export async function transcribeWordTimings(audioUrl: string): Promise<WhisperXW
     },
   }), 'whisperx')) as unknown as WhisperXOutput;
 
-  const words = Array.isArray(output?.segments)
-    ? output.segments.flatMap((segment) => (
-      Array.isArray(segment.words)
-        ? segment.words.flatMap((word) => (
-          typeof word.word === 'string'
-          && typeof word.start === 'number'
-          && Number.isFinite(word.start)
-          && typeof word.end === 'number'
-          && Number.isFinite(word.end)
-            ? [{ word: word.word, start: word.start, end: word.end }]
-            : []
-        ))
-        : []
-    ))
-    : [];
-
+  const words = parseWhisperXWords(output);
   if (words.length === 0) {
     throw new Error('whisperx returned no word timings');
   }

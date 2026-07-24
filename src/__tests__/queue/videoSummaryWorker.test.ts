@@ -194,9 +194,9 @@ describe('videoSummaryWorker', () => {
     const PORTRAIT = { width: 1080, height: 1920 };
 
     it('places the caption in the black band just below the square, not over the footage', () => {
-      // Square top at y=180 → lower edge y=1260; caption 140px below → y=1400, in the black.
+      // Square top at y=180 → lower edge y=1260; caption 100px below → y=1360, in the black.
       const anchor = resolveSummaryCaptionAnchor({ canvas: PORTRAIT, squareTopPx: 180 })!;
-      expect(anchor * PORTRAIT.height).toBeCloseTo(1400, 5);
+      expect(anchor * PORTRAIT.height).toBeCloseTo(1360, 5);
       // Genuinely below the footage (the square's lower edge), i.e. in the black.
       expect(anchor * PORTRAIT.height).toBeGreaterThan(180 + PORTRAIT.width);
     });
@@ -245,8 +245,9 @@ describe('videoSummaryWorker', () => {
       expect.stringMatching(/brisk, energetic pace/i),
       // Pitch-preserving stretch applied AFTER synthesis — the delivery prompt stays untouched.
       VIDEO_SUMMARY_NARRATION_TEMPO,
-      // qwen voice config: default preset speaker (Kore isn't a qwen speaker → Serena fallback).
-      expect.objectContaining({ mode: 'custom_voice', speaker: 'Serena', language: 'English' }),
+      // Preset voice ids resolve to `undefined` — generateNarrationForScene falls through to its
+      // Google TTS path (voiceName = the raw voiceId, e.g. "Kore") instead of qwen.
+      undefined,
     );
     expect(generateMusicBed).toHaveBeenCalledWith(
       PLAN.musicMood,
@@ -298,13 +299,35 @@ describe('videoSummaryWorker', () => {
           outlineWidth: 3,
           shadowDepth: 1.5,
           backgroundBox: false,
-          // Square lifted to top=280 → lower edge y=1360; caption 140px below in the black, at y=1500.
-          yOffsetNorm: 1500 / 1920,
+          // Square lifted to top=280 → lower edge y=1360; caption 100px below in the black, at y=1460.
+          yOffsetNorm: 1460 / 1920,
         }),
         portraitSquareTopPx: 280,
       }),
     }));
     expect(refundCredits).not.toHaveBeenCalled();
+  });
+
+  it('renders "voiceA" through the qwen voice_clone path, never the preset speaker lookup', async () => {
+    await processVideoSummary({ ...JOB, voiceId: 'voiceA' });
+
+    expect(getUploadPresignedUrl).toHaveBeenCalledWith('reference-voices/voiceA-clipA.mp3');
+    expect(generateNarrationForScene).toHaveBeenNthCalledWith(
+      1,
+      PLAN.beats[0]!.narration,
+      'voiceA',
+      'gemini-tts-test',
+      JOB.generationId,
+      0,
+      expect.stringMatching(/brisk, energetic pace/i),
+      VIDEO_SUMMARY_NARRATION_TEMPO,
+      expect.objectContaining({
+        mode: 'voice_clone',
+        referenceAudioUrl: 'https://r2.example.com/episode.mp4',
+        referenceText: expect.stringContaining('crystal horn rabbit'),
+        language: 'English',
+      }),
+    );
   });
 
   it('fails and fully refunds when semantic planning fails', async () => {

@@ -129,6 +129,8 @@ export interface FormatStyleOption {
 export interface FormatVoiceOption {
   id: string;
   label: string;
+  /** Raw R2 key of a pre-generated audio sample for this voice, resolved client-side like thumb_url. */
+  preview_url?: string;
 }
 
 export interface FormatDurationTier {
@@ -401,13 +403,23 @@ MOTION (every scene must include a "motion" object):
     status: 'live',
     flow: 'video_summary',
     tile: {},
+    // Native-English Google/Gemini Chirp3-HD voices — the engine the summarizer presets actually
+    // render on (see geminiTtsService.generateTtsWav). A prior pass moved these presets onto
+    // qwen3-tts preset speakers, but qwen's preset voices carried a strong Chinese accent, so they
+    // were moved back to Google (2026-07-24). 'voiceA' is the one exception: a cloned anime-narrator
+    // voice that only qwen3-tts can clone — videoSummaryWorker's resolveSummaryVoice intercepts it
+    // before falling through to the Google path, so it renders through qwen voice_clone instead.
+    // preview_url is a raw R2 key of a pre-generated ~2-3s sample line for tap-to-preview (iOS
+    // resolves it the same way it resolves thumb_url) — genVoicePreviews.ts uploads to these exact
+    // keys.
     voices: [
-      { id: 'Kore', label: 'Kore · Clear' },
-      { id: 'Zephyr', label: 'Zephyr · Bright' },
-      { id: 'Aoede', label: 'Aoede · Warm' },
-      { id: 'Puck', label: 'Puck · Energetic' },
-      { id: 'Charon', label: 'Charon · Deep' },
-      { id: 'Orus', label: 'Orus · Calm' },
+      { id: 'Kore', label: 'Kore · Clear', preview_url: 'voice-previews/kore.wav' },
+      { id: 'Zephyr', label: 'Zephyr · Bright', preview_url: 'voice-previews/zephyr.wav' },
+      { id: 'Aoede', label: 'Aoede · Warm', preview_url: 'voice-previews/aoede.wav' },
+      { id: 'Puck', label: 'Puck · Energetic', preview_url: 'voice-previews/puck.wav' },
+      { id: 'Charon', label: 'Charon · Deep', preview_url: 'voice-previews/charon.wav' },
+      { id: 'Orus', label: 'Orus · Calm', preview_url: 'voice-previews/orus.wav' },
+      { id: 'voiceA', label: 'Anime Narrator', preview_url: 'voice-previews/voicea.wav' },
     ],
     voice_default: 'Kore',
     output_durations: [30, 60, 90],

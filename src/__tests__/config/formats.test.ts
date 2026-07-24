@@ -90,8 +90,22 @@ describe('formats registry config', () => {
     expect(format.flow).toBe('video_summary');
     expect(format.output_durations).toEqual([30, 60, 90]);
     expect(format.aspect_ratios).toEqual(['9:16', '1:1', '16:9']);
-    expect(format.voices).toHaveLength(6);
+    // Google Chirp3-HD preset voices (the engine the summarizer presets render on) plus the cloned
+    // "voiceA" anime narrator (the one voice on qwen3-tts), default Kore.
+    expect(format.voices).toHaveLength(7);
     expect(format.voice_default).toBe('Kore');
+    // Every advertised non-clone id must be a real Google preset voice — except 'voiceA', the one
+    // allowed qwen clone exception. Every voice must also carry a preview_url for tap-to-preview.
+    const googleVoices = new Set(['Kore', 'Zephyr', 'Aoede', 'Puck', 'Charon', 'Orus']);
+    const voiceA = format.voices.find((voice) => voice.id === 'voiceA');
+    expect(voiceA).toBeTruthy();
+    expect(voiceA?.preview_url).toBeTruthy();
+    expect(new Set(format.voices.filter((voice) => voice.id !== 'voiceA').map((voice) => voice.id)))
+      .toEqual(googleVoices);
+    for (const voice of format.voices) {
+      expect(voice.id === 'voiceA' || googleVoices.has(voice.id)).toBe(true);
+      expect(voice.preview_url).toBeTruthy();
+    }
     expect(format.pricing).toEqual({
       source_minute_credits: 1,
       output_second_credits: 1,

@@ -61,24 +61,35 @@ export const VIDEO_SUMMARY_NARRATION_TEMPO = 1.0;
 export const VIDEO_SUMMARY_WORDS_PER_SECOND = 3.8;
 
 /**
- * Resolves the incoming voice id to a qwen3-tts voice. A known preset speaker name is used as-is
- * (custom_voice); anything else — including the legacy Gemini "Kore" — falls to the default preset.
- * A cloned voice ("clone:…") is surfaced by the job's own voice config, not here. Cloning support
- * (voice_clone with a hosted reference clip) rides the same NarrationVoice shape when a job carries
- * a reference URL.
+ * R2 key + transcript for the cloned "anime narrator" voice (voice id 'voiceA' — see
+ * src/config/formats.ts's video-explainer voices). Transcript copied verbatim from
+ * spikeLessonCodeSwitch.ts's VOICE_A_TRANSCRIPT — qwen3-tts voice_clone quality depends on an
+ * accurate reference_text for the reference clip.
  */
-const QWEN_PRESET_SPEAKERS = new Set([
-  'Aiden', 'Dylan', 'Eric', 'Ono_anna', 'Ryan', 'Serena', 'Sohee', 'Uncle_fu', 'Vivian',
-]);
-const DEFAULT_SUMMARY_SPEAKER = 'Serena';
-function resolveSummaryVoice(voiceId: string): NarrationVoice {
-  const speaker = QWEN_PRESET_SPEAKERS.has(voiceId) ? voiceId : DEFAULT_SUMMARY_SPEAKER;
-  return {
-    mode: 'custom_voice',
-    speaker,
-    styleInstruction: VIDEO_SUMMARY_VOICE_STYLE_PROMPT,
-    language: 'English',
-  };
+export const VOICE_A_REFERENCE_R2_KEY = 'reference-voices/voiceA-clipA.mp3';
+export const VOICE_A_TRANSCRIPT =
+  "They stood no chance. Then Jack came up with an idea. In theory, as long as it was under attack, the crystal horn rabbit couldn't activate its escape skill. So Jack planned to act as bait to lure the crystal horn rabbit, while Mary looked for an opportunity to strike. After devising the plan, Mary used earth magic.";
+
+/**
+ * Resolves the incoming voice id to a qwen3-tts voice, or `undefined` when the id should render
+ * on Google TTS instead. 'voiceA' is intercepted FIRST and always renders through voice_clone (a
+ * presigned reference clip + transcript) — it is the only summarizer voice on qwen. Every other
+ * (preset) voice id returns `undefined`, which sends generateNarrationForScene down its Google TTS
+ * path with `voiceName` = the raw voiceId (a Chirp3-HD name like "Kore") — the qwen preset speakers
+ * gave the presets a strong Chinese accent, so they were moved back to Google. Async because the
+ * clone path needs to presign the reference clip's R2 key.
+ */
+async function resolveSummaryVoice(voiceId: string): Promise<NarrationVoice | undefined> {
+  if (voiceId === 'voiceA') {
+    return {
+      mode: 'voice_clone',
+      referenceAudioUrl: await getUploadPresignedUrl(VOICE_A_REFERENCE_R2_KEY),
+      referenceText: VOICE_A_TRANSCRIPT,
+      styleInstruction: VIDEO_SUMMARY_VOICE_STYLE_PROMPT,
+      language: 'English',
+    };
+  }
+  return undefined;
 }
 /** Fixed gap between per-beat TTS calls, to stay under the native endpoint's burst rate limit. */
 const NARRATION_INTER_STEM_DELAY_MS = 1_200;
@@ -109,9 +120,11 @@ export const SUMMARY_PORTRAIT_SQUARE_TOP_PX = 280;
 /**
  * Caption block center, this many px BELOW the square's lower edge — sits high in the black band
  * (close under the footage) rather than floating in the middle of it, while staying clearly off the
- * video. At top=280 the square ends at y=1360, so 140 puts the caption center at y=1500.
+ * video. At top=280 the square ends at y=1360, so 100 puts the caption center at y=1460 — a modest
+ * lift toward the footage (was 140/y=1500) that still leaves a clear gap below the square for
+ * multi-line captions so text never overlaps the video.
  */
-export const SUMMARY_CAPTION_BELOW_SQUARE_PX = 140;
+export const SUMMARY_CAPTION_BELOW_SQUARE_PX = 100;
 
 /**
  * Vertical center anchor (0..1) for portrait summary captions, placed in the BLACK band just below
@@ -252,6 +265,9 @@ export async function processVideoSummary(data: VideoSummaryJob): Promise<void> 
 
     const format = FORMATS_BY_ID.explainer;
     if (!format) throw new Error('Explainer voice configuration unavailable');
+    // Resolved once — not per beat — since it's the same voice for every stem and the voiceA
+    // branch presigns a reference URL (no need to re-presign per beat).
+    const voice = await resolveSummaryVoice(data.voiceId);
     const stems: NarrationStem[] = [];
     await stampStage('Recording narration…');
     for (let index = 0; index < plan.beats.length; index += 1) {
@@ -269,7 +285,7 @@ export async function processVideoSummary(data: VideoSummaryJob): Promise<void> 
         index,
         VIDEO_SUMMARY_VOICE_STYLE_PROMPT,
         VIDEO_SUMMARY_NARRATION_TEMPO,
-        resolveSummaryVoice(data.voiceId),
+        voice,
       ));
     }
 

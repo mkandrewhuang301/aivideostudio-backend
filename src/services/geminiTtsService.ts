@@ -140,7 +140,7 @@ async function generateFalTtsWav(
   return downloadTtsWav(audioUrl);
 }
 
-async function generateTtsWav(
+export async function generateTtsWav(
   modelId: string,
   text: string,
   voiceName: string,
