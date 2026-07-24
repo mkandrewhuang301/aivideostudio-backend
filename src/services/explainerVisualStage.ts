@@ -22,7 +22,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { isNanoMotionType, type ExplainerVisualMethod, type FormatAspectRatio, type SceneMotion } from '../config/formats';
+import { motionClassOf, type ExplainerVisualMethod, type FormatAspectRatio, type SceneMotion } from '../config/formats';
 import { getGenerationPresignedUrl, uploadBufferToR2 } from './archivalService';
 import { nanoEditStill } from './geminiImageService';
 import { animateScene } from './omniService';
@@ -312,9 +312,46 @@ export function buildMotionSequenceArgs(input: MotionSequenceArgsInput): string[
   return args;
 }
 
-/** reaction downgrades to wiggle (still a character beat); everything else downgrades to ken_burns. */
-function downgradeMotionType(type: SceneMotion['type']): 'ken_burns' | 'wiggle' {
-  return type === 'reaction' ? 'wiggle' : 'ken_burns';
+// ─── Motion-class-aware plan resolution (2026-07-23 design correction) ─────────────────────────
+//
+// nano is a PIXEL-PRESERVATION primitive, not the only way to show a change. edit_budget therefore
+// never decides WHETHER a scene's transformation renders — only whether it gets the premium
+// pixel-locked nano version or a cheaper fallback. The fallback differs by SceneMotionClass:
+//   'content'    (before_after, progressive_reveal) -> independent gpt stills per step, assembled
+//                the SAME way as nano frames (hold/crossfade). The transformation still shows.
+//   'semi'       (reaction)       -> wiggle (stays lively, just not a literal pose change).
+//   'decorative' (ambient_life)   -> ken_burns (the only class that ever goes static).
+//   'free'       (ken_burns, wiggle) -> unaffected either way.
+
+export type MotionPlan =
+  | { kind: 'ken_burns' }
+  | { kind: 'wiggle' }
+  /** Premium path: nano chains edit_steps off the base still, preserving every untouched pixel. */
+  | { kind: 'nano'; pattern: MotionSequencePattern; editSteps: string[] }
+  /** Content-class fallback: each step is an INDEPENDENT full-composition gpt still, not a nano
+   *  delta — loses pixel-lock, keeps the transformation. Never counted against edit_budget. */
+  | { kind: 'gpt_stills'; pattern: MotionSequencePattern; editSteps: string[] };
+
+/**
+ * PURE decision function: given a scene's motion plan and whether the allocator granted it nano
+ * budget, decides which rendering path this scene actually takes. No motion at all -> ken_burns
+ * (older data / reused animated-tier scene). Exported for unit testing without any I/O.
+ */
+export function resolveMotionPlan(motion: SceneMotion | undefined, resolvedNano: boolean): MotionPlan {
+  if (!motion) return { kind: 'ken_burns' };
+  if (motion.type === 'wiggle') return { kind: 'wiggle' };
+  if (motion.type === 'ken_burns') return { kind: 'ken_burns' };
+
+  // A nano-eligible type (reaction/before_after/progressive_reveal/ambient_life).
+  if (resolvedNano) {
+    return { kind: 'nano', pattern: motion.type, editSteps: motion.edit_steps };
+  }
+  const motionClass = motionClassOf(motion.type);
+  if (motionClass === 'content') {
+    return { kind: 'gpt_stills', pattern: motion.type, editSteps: motion.edit_steps };
+  }
+  if (motionClass === 'semi') return { kind: 'wiggle' };
+  return { kind: 'ken_burns' }; // 'decorative' (ambient_life unbudgeted)
 }
 
 export const illustratedStage: VisualStage = {
@@ -335,23 +372,17 @@ export const illustratedStage: VisualStage = {
       const outPath = path.join(tempDir, 'clip.mp4');
       await downloadToFile(stillUrl, stillPath);
 
-      const motion = input.motion;
-      // No motion plan at all (older data / animated-tier scene reused here) -> ken_burns.
-      const effectiveType: SceneMotion['type'] = !motion
-        ? 'ken_burns'
-        : isNanoMotionType(motion.type) && !input.resolvedNano
-          ? downgradeMotionType(motion.type) // budget downgrade
-          : motion.type;
+      const plan = resolveMotionPlan(input.motion, input.resolvedNano ?? false);
 
       let args: string[];
-      if (effectiveType === 'wiggle') {
+      if (plan.kind === 'wiggle') {
         args = buildWiggleArgs({
           stillPath,
           durationSeconds: input.narrationDurationSeconds,
           aspectRatio: input.aspectRatio,
           outPath,
         });
-      } else if (effectiveType === 'ken_burns') {
+      } else if (plan.kind === 'ken_burns') {
         args = buildKenBurnsArgs({
           stillPath,
           durationSeconds: input.narrationDurationSeconds,
@@ -359,16 +390,15 @@ export const illustratedStage: VisualStage = {
           sceneIndex: input.sceneIndex,
           outPath,
         });
-      } else {
-        // Nano-granted motion: chain edit_steps off the base still into frame files, then
-        // assemble with the xfade sequence builder.
-        const editSteps = motion!.edit_steps;
+      } else if (plan.kind === 'nano') {
+        // Premium path: chain edit_steps off the base still into frame files (each edit preserves
+        // every pixel the prompt didn't call out), then assemble with the xfade sequence builder.
         const framePaths = [stillPath];
         // Buffer.from(...) normalizes the Buffer<ArrayBuffer> type param (readFile vs sharp's
         // toBuffer() inside nanoEditStill can otherwise infer incompatible Buffer generics).
         let currentImage: Buffer = Buffer.from(await readFile(stillPath));
-        for (let stepIndex = 0; stepIndex < editSteps.length; stepIndex += 1) {
-          const edited = await nanoEditStill(currentImage, editSteps[stepIndex]!);
+        for (let stepIndex = 0; stepIndex < plan.editSteps.length; stepIndex += 1) {
+          const edited = await nanoEditStill(currentImage, plan.editSteps[stepIndex]!);
           const framePath = path.join(tempDir, `frame${stepIndex + 1}.png`);
           await writeFile(framePath, edited);
           framePaths.push(framePath);
@@ -376,7 +406,34 @@ export const illustratedStage: VisualStage = {
         }
         args = buildMotionSequenceArgs({
           framePaths,
-          pattern: effectiveType as MotionSequencePattern,
+          pattern: plan.pattern,
+          durationSeconds: input.narrationDurationSeconds,
+          aspectRatio: input.aspectRatio,
+          outPath,
+        });
+      } else {
+        // Content-class fallback (no nano budget): each step becomes its own INDEPENDENT full
+        // still via generateStyledStill — a fresh composition describing the scene's cumulative
+        // state at that step, not a nano delta. Still shows the full transformation, just without
+        // pixel-lock between frames. Does not touch nanoEditStill or count against edit_budget.
+        const framePaths = [stillPath];
+        let cumulativePrompt = input.visualPrompt;
+        for (let stepIndex = 0; stepIndex < plan.editSteps.length; stepIndex += 1) {
+          cumulativePrompt = `${cumulativePrompt} Then: ${plan.editSteps[stepIndex]}`;
+          const stepStillKey = await generateStyledStill(
+            cumulativePrompt,
+            input.styleAnchorUrl,
+            input.imageModel,
+            `${input.generationId}.scene${input.sceneIndex}.step${stepIndex + 1}`,
+          );
+          const stepStillUrl = await getGenerationPresignedUrl(stepStillKey);
+          const framePath = path.join(tempDir, `frame${stepIndex + 1}.png`);
+          await downloadToFile(stepStillUrl, framePath);
+          framePaths.push(framePath);
+        }
+        args = buildMotionSequenceArgs({
+          framePaths,
+          pattern: plan.pattern,
           durationSeconds: input.narrationDurationSeconds,
           aspectRatio: input.aspectRatio,
           outPath,

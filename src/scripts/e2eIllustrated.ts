@@ -10,7 +10,7 @@ import { FORMATS_BY_ID } from '../config/formats';
 import { archiveToR2, getGenerationPresignedUrl, uploadBufferToR2 } from '../services/archivalService';
 import { generateNarrationForScene, type NarrationStem } from '../services/geminiTtsService';
 import { expandExplainerScript } from '../services/openaiScriptService';
-import { resolveVisualStage } from '../services/explainerVisualStage';
+import { resolveVisualStage, resolveMotionPlan } from '../services/explainerVisualStage';
 import { allocateMotionBudget } from '../services/explainerMotionAllocator';
 import { generateMusicBed } from '../services/lyriaService';
 import { concatWavBuffers } from '../services/wavUtil';
@@ -93,9 +93,10 @@ async function main() {
       motion: sc.motion, resolvedNano: allocation?.resolvedNano ?? false,
     });
     clipKeys.push(clipR2Key);
+    const plan = resolveMotionPlan(sc.motion, allocation?.resolvedNano ?? false);
     const motionLabel = sc.motion
-      ? `${sc.motion.type}${sc.motion.edit_steps.length ? ` (${sc.motion.edit_steps.length} steps, nano=${allocation?.resolvedNano ?? false})` : ''} p${sc.motion.priority}`
-      : 'ken_burns (no motion plan)';
+      ? `${sc.motion.type} p${sc.motion.priority} -> plan=${plan.kind}${plan.kind === 'nano' || plan.kind === 'gpt_stills' ? ` (${plan.editSteps.length} steps)` : ''}`
+      : 'no motion plan -> ken_burns';
     console.log(`   scene ${i}: ${stem.durationSeconds.toFixed(1)}s [${motionLabel}] transition_out=${sc.transition_out ?? 'cut'} -> ${clipR2Key.split('/').pop()}`);
   }
 

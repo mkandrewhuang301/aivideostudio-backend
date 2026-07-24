@@ -32,6 +32,37 @@ export function isNanoMotionType(type: SceneMotionType): boolean {
   return NANO_MOTION_TYPES.has(type);
 }
 
+/**
+ * Motion-class taxonomy (2026-07-23 design correction). Nano is a PIXEL-PRESERVATION primitive,
+ * not the only way to show a change — a whole-frame-redraw transformation can be rendered as two
+ * independent gpt stills cross-dissolved instead, at no nano cost. So budget-downgrade behavior
+ * must differ by class, not just by "is this a nano type":
+ *   - 'content'    (before_after, progressive_reveal) — the TRANSFORMATION is the point. When
+ *     unbudgeted for nano, it must still render, via independent per-step gpt stills instead of
+ *     pixel-locked nano edits (loses pixel-lock, keeps the content change). NEVER goes static.
+ *   - 'semi'       (reaction) — nano preferred; unbudgeted degrades to `wiggle` (stays lively,
+ *     just not a literal pose/expression change).
+ *   - 'decorative' (ambient_life) — nano preferred; unbudgeted degrades to `ken_burns` (the only
+ *     class that goes effectively static when unbudgeted — it was garnish to begin with).
+ *   - 'free'       (ken_burns, wiggle) — never touches nano either way.
+ * edit_budget therefore does not decide WHETHER a transformation happens, only whether a scene
+ * gets the premium pixel-locked nano version vs the cheaper independent-gpt-still version.
+ */
+export type SceneMotionClass = 'content' | 'semi' | 'decorative' | 'free';
+
+const SCENE_MOTION_CLASS: Record<SceneMotionType, SceneMotionClass> = {
+  ken_burns: 'free',
+  wiggle: 'free',
+  reaction: 'semi',
+  before_after: 'content',
+  progressive_reveal: 'content',
+  ambient_life: 'decorative',
+};
+
+export function motionClassOf(type: SceneMotionType): SceneMotionClass {
+  return SCENE_MOTION_CLASS[type];
+}
+
 export interface SceneMotion {
   type: SceneMotionType;
   /** 1-5, allocator sorts DESC; higher = keep nano when budget is tight. */

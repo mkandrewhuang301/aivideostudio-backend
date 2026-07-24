@@ -10,7 +10,55 @@ jest.mock('../../config', () => ({
   },
 }));
 
-import { buildWiggleArgs, buildMotionSequenceArgs } from '../../services/explainerVisualStage';
+import { buildWiggleArgs, buildMotionSequenceArgs, resolveMotionPlan } from '../../services/explainerVisualStage';
+import type { SceneMotion } from '../../config/formats';
+
+function motion(overrides: Partial<SceneMotion> = {}): SceneMotion {
+  return { type: 'reaction', priority: 3, edit_steps: ['a change, keep everything else identical'], ...overrides };
+}
+
+describe('resolveMotionPlan (motion-class-aware fallback, 2026-07-23 design correction)', () => {
+  it('no motion at all -> ken_burns', () => {
+    expect(resolveMotionPlan(undefined, false)).toEqual({ kind: 'ken_burns' });
+    expect(resolveMotionPlan(undefined, true)).toEqual({ kind: 'ken_burns' });
+  });
+
+  it('free types (ken_burns, wiggle) are unaffected by resolvedNano either way', () => {
+    expect(resolveMotionPlan(motion({ type: 'ken_burns', edit_steps: [] }), false)).toEqual({ kind: 'ken_burns' });
+    expect(resolveMotionPlan(motion({ type: 'ken_burns', edit_steps: [] }), true)).toEqual({ kind: 'ken_burns' });
+    expect(resolveMotionPlan(motion({ type: 'wiggle', edit_steps: [] }), false)).toEqual({ kind: 'wiggle' });
+    expect(resolveMotionPlan(motion({ type: 'wiggle', edit_steps: [] }), true)).toEqual({ kind: 'wiggle' });
+  });
+
+  it('any nano-eligible type takes the premium nano path when granted budget', () => {
+    for (const type of ['reaction', 'before_after', 'progressive_reveal', 'ambient_life'] as const) {
+      const m = motion({ type, edit_steps: ['step1'] });
+      expect(resolveMotionPlan(m, true)).toEqual({ kind: 'nano', pattern: type, editSteps: ['step1'] });
+    }
+  });
+
+  it("'semi' (reaction) unbudgeted degrades to wiggle — never static, never gpt_stills", () => {
+    const m = motion({ type: 'reaction', edit_steps: ['character raises a hand, keep everything else identical'] });
+    expect(resolveMotionPlan(m, false)).toEqual({ kind: 'wiggle' });
+  });
+
+  it("'decorative' (ambient_life) unbudgeted degrades to ken_burns — the only class that goes static", () => {
+    const m = motion({ type: 'ambient_life', edit_steps: ['smoke drifts, keep everything else identical'] });
+    expect(resolveMotionPlan(m, false)).toEqual({ kind: 'ken_burns' });
+  });
+
+  it("'content' types (before_after, progressive_reveal) unbudgeted NEVER go static — fall back to gpt_stills, not ken_burns/wiggle", () => {
+    const beforeAfter = motion({ type: 'before_after', edit_steps: ['seed sprouts', 'sapling grows'] });
+    expect(resolveMotionPlan(beforeAfter, false)).toEqual({
+      kind: 'gpt_stills', pattern: 'before_after', editSteps: ['seed sprouts', 'sapling grows'],
+    });
+
+    const reveal = motion({ type: 'progressive_reveal', edit_steps: ['label A appears', 'label B appears'] });
+    expect(resolveMotionPlan(reveal, false)).toEqual({
+      kind: 'gpt_stills', pattern: 'progressive_reveal', editSteps: ['label A appears', 'label B appears'],
+    });
+  });
+});
 
 describe('buildWiggleArgs', () => {
   it('loops the single still for exactly durationSeconds with a sine rotate filter', () => {
