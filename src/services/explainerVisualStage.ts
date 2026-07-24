@@ -24,7 +24,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { motionClassOf, sanitizeMotion, type ExplainerVisualMethod, type FormatAspectRatio, type SceneMotion } from '../config/formats';
 import { getGenerationPresignedUrl, uploadBufferToR2 } from './archivalService';
-import { nanoEditStill } from './geminiImageService';
+import { nanoEditStill, isBlankImage } from './geminiImageService';
 import { animateScene } from './omniService';
 import { generateStyledStill } from './providers/ReplicateProvider';
 
@@ -94,6 +94,30 @@ async function downloadToFile(url: string, destPath: string): Promise<void> {
 
 async function runFfmpeg(args: string[]): Promise<void> {
   await execFileAsync('ffmpeg', args);
+}
+
+/**
+ * Generates + downloads one base still with the free sanity guardrail (2026-07-24): a
+ * blank/solid-color return (a known silent generation failure — sharp stats on a file we already
+ * have locally, no extra model call) is regenerated ONCE. If the retry is also blank we proceed
+ * with it anyway and log — a possibly-flat scene beats a dead generation.
+ */
+async function generateAndDownloadStill(
+  visualPrompt: string,
+  styleAnchorUrl: string,
+  imageModel: string,
+  keyBase: string,
+  aspectRatio: FormatAspectRatio,
+  destPath: string,
+): Promise<void> {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const key = attempt === 0 ? keyBase : `${keyBase}.retry${attempt}`;
+    const stillKey = await generateStyledStill(visualPrompt, styleAnchorUrl, imageModel, key, aspectRatio);
+    const stillUrl = await getGenerationPresignedUrl(stillKey);
+    await downloadToFile(stillUrl, destPath);
+    if (!(await isBlankImage(await readFile(destPath)))) return;
+    console.warn(`[explainer-visual] still ${keyBase} came back blank/solid (attempt ${attempt + 1})`);
+  }
 }
 
 // ─── Illustrated tier: gpt-image-2-low still -> ffmpeg Ken-Burns ───────────────────────────────
@@ -364,20 +388,19 @@ export function resolveMotionPlan(motion: SceneMotion | undefined, resolvedNano:
 export const illustratedStage: VisualStage = {
   method: 'illustrated',
   async generateSceneClip(input: VisualStageInput): Promise<VisualStageResult> {
-    const stillKey = await generateStyledStill(
-      input.visualPrompt,
-      input.styleAnchorUrl,
-      input.imageModel,
-      `${input.generationId}.scene${input.sceneIndex}.still`,
-    );
-    const stillUrl = await getGenerationPresignedUrl(stillKey);
-
     let tempDir: string | undefined;
     try {
       tempDir = await mkdtemp(path.join(tmpdir(), 'explainer-motion-'));
       const stillPath = path.join(tempDir, 'still.png');
       const outPath = path.join(tempDir, 'clip.mp4');
-      await downloadToFile(stillUrl, stillPath);
+      await generateAndDownloadStill(
+        input.visualPrompt,
+        input.styleAnchorUrl,
+        input.imageModel,
+        `${input.generationId}.scene${input.sceneIndex}.still`,
+        input.aspectRatio,
+        stillPath,
+      );
 
       const plan = resolveMotionPlan(input.motion, input.resolvedNano ?? false);
 
@@ -400,12 +423,15 @@ export const illustratedStage: VisualStage = {
       } else if (plan.kind === 'nano') {
         // Premium path: chain edit_steps off the base still into frame files (each edit preserves
         // every pixel the prompt didn't call out), then assemble with the xfade sequence builder.
+        // A null return from nanoEditStill = a persistent no-op edit (2026-07-24 guardrail): skip
+        // the step and keep the previous frame — never crossfade between identical frames.
         const framePaths = [stillPath];
         // Buffer.from(...) normalizes the Buffer<ArrayBuffer> type param (readFile vs sharp's
         // toBuffer() inside nanoEditStill can otherwise infer incompatible Buffer generics).
         let currentImage: Buffer = Buffer.from(await readFile(stillPath));
         for (let stepIndex = 0; stepIndex < plan.editSteps.length; stepIndex += 1) {
           const edited = await nanoEditStill(currentImage, plan.editSteps[stepIndex]!);
+          if (edited === null) continue;
           const framePath = path.join(tempDir, `frame${stepIndex + 1}.png`);
           await writeFile(framePath, edited);
           framePaths.push(framePath);
@@ -432,6 +458,7 @@ export const illustratedStage: VisualStage = {
             input.styleAnchorUrl,
             input.imageModel,
             `${input.generationId}.scene${input.sceneIndex}.step${stepIndex + 1}`,
+            input.aspectRatio,
           );
           const stepStillUrl = await getGenerationPresignedUrl(stepStillKey);
           const framePath = path.join(tempDir, `frame${stepIndex + 1}.png`);
@@ -475,6 +502,7 @@ export const animatedOmniStage: VisualStage = {
       input.styleAnchorUrl,
       input.imageModel,
       `${input.generationId}.scene${input.sceneIndex}.still`,
+      input.aspectRatio,
     );
     const stillUrl = await getGenerationPresignedUrl(stillKey);
     const clip = await animateScene(

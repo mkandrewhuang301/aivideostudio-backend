@@ -263,6 +263,12 @@ export async function generateStyledStill(
   styleAnchorUrl: string,
   imageModel: string,
   outputKey: string,
+  /**
+   * Requested frame aspect (2026-07-24 guardrail pass — was hardcoded '9:16', which silently
+   * produced portrait stills for 16:9 generations that ffmpeg then center-cropped). Optional so
+   * pre-existing callers/tests keep compiling; defaults to the historical '9:16'.
+   */
+  aspectRatio: '9:16' | '16:9' = '9:16',
 ): Promise<string> {
   const qualityByModel: Record<string, string> = {
     'openai/gpt-image-2-high': 'high',
@@ -293,7 +299,7 @@ export async function generateStyledStill(
     input: {
       prompt: styleLockedPrompt,
       input_images: [styleAnchorUrl],
-      aspect_ratio: '9:16',
+      aspect_ratio: aspectRatio,
       quality,
     },
   }), 'generateStyledStill')) as unknown;
