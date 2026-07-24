@@ -10,6 +10,32 @@ interface ParsedWav {
   dataSize: number;
 }
 
+/** Wraps Gemini TTS's raw signed 16-bit little-endian PCM in a standard RIFF/WAV container. */
+export function pcm16ToWav(pcm: Buffer, sampleRate = 24_000, channels = 1): Buffer {
+  if (!Number.isInteger(sampleRate) || sampleRate <= 0) throw new Error('Invalid PCM sample rate');
+  if (!Number.isInteger(channels) || channels <= 0 || channels > 32) throw new Error('Invalid PCM channel count');
+  if (pcm.length === 0 || pcm.length % (channels * 2) !== 0) throw new Error('Invalid PCM byte length');
+  if (pcm.length > 0xffffffff - 36) throw new Error('PCM is too large for a RIFF container');
+
+  const output = Buffer.alloc(44 + pcm.length);
+  const blockAlign = channels * 2;
+  output.write('RIFF', 0, 'ascii');
+  output.writeUInt32LE(output.length - 8, 4);
+  output.write('WAVE', 8, 'ascii');
+  output.write('fmt ', 12, 'ascii');
+  output.writeUInt32LE(16, 16);
+  output.writeUInt16LE(1, 20);
+  output.writeUInt16LE(channels, 22);
+  output.writeUInt32LE(sampleRate, 24);
+  output.writeUInt32LE(sampleRate * blockAlign, 28);
+  output.writeUInt16LE(blockAlign, 32);
+  output.writeUInt16LE(16, 34);
+  output.write('data', 36, 'ascii');
+  output.writeUInt32LE(pcm.length, 40);
+  pcm.copy(output, 44);
+  return output;
+}
+
 function parseWav(wav: Buffer): ParsedWav {
   if (wav.length < 12 || wav.toString('ascii', 0, 4) !== 'RIFF' || wav.toString('ascii', 8, 12) !== 'WAVE') {
     throw new Error('Invalid WAV: expected a RIFF/WAVE container');

@@ -4,12 +4,25 @@ jest.mock('../../config', () => ({
     r2AccessKeyId: 'mock',
     r2SecretAccessKey: 'mock',
     r2BucketName: 'test-bucket',
+    googleNativeAudioEnabled: true,
+    googleAudioFalFallbackEnabled: true,
+    falTtsFallbackModel: 'fal-ai/gemini-3.1-flash-tts',
   },
 }));
 
 const mockFalRunTts = jest.fn();
 jest.mock('../../services/providers/FalProvider', () => ({
   falRunTts: mockFalRunTts,
+}));
+
+const mockGoogleRunTts = jest.fn();
+jest.mock('../../services/providers/GoogleAudioProvider', () => ({
+  googleRunTts: mockGoogleRunTts,
+  // Real class so `instanceof` and `.status` work in the retry classifier under test.
+  SafeGoogleAudioError: class SafeGoogleAudioError extends Error {
+    status?: number;
+    constructor(message: string, status?: number) { super(message); this.status = status; }
+  },
 }));
 
 const mockUploadBufferToR2 = jest.fn();
@@ -78,6 +91,12 @@ describe('generateNarrationForScene', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockFalRunTts.mockResolvedValue('https://fal.media/narration.wav');
+    mockGoogleRunTts.mockResolvedValue({
+      audio: Buffer.from([0, 0, 1, 0]),
+      mimeType: 'audio/l16',
+      sampleRate: 24_000,
+      channels: 1,
+    });
     mockProbeDurationSeconds.mockResolvedValue(4.2);
     mockUploadBufferToR2.mockResolvedValue(undefined);
     (global as unknown as { fetch: jest.Mock }).fetch = jest.fn().mockResolvedValue({
@@ -116,6 +135,112 @@ describe('generateNarrationForScene', () => {
       voice: 'Zephyr',
       output_format: 'wav',
     });
+  });
+
+  it('uses native Google billing and wraps raw PCM as WAV', async () => {
+    await generateNarrationForScene(
+      'Hello',
+      'Kore',
+      'gemini-3.1-flash-tts-preview',
+      'gen-native',
+      0,
+    );
+
+    expect(mockGoogleRunTts).toHaveBeenCalledWith(
+      'gemini-3.1-flash-tts-preview',
+      'Hello',
+      'Kore',
+    );
+    expect(mockFalRunTts).not.toHaveBeenCalled();
+    const uploaded = mockUploadBufferToR2.mock.calls[0]![0] as Buffer;
+    expect(uploaded.toString('ascii', 0, 4)).toBe('RIFF');
+    expect(uploaded.toString('ascii', 8, 12)).toBe('WAVE');
+  });
+
+  it('falls back to Fal only after native retries are exhausted', async () => {
+    // Native is retried before the fallback, so a single blip must NOT reach Fal. Reject every
+    // native attempt to trigger the fallback path. Fake timers so the exponential backoff between
+    // attempts resolves instantly instead of waiting the real 2+4+8s.
+    jest.useFakeTimers();
+    try {
+      mockGoogleRunTts.mockRejectedValue(new Error('native unavailable'));
+      const warning = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+      const promise = generateNarrationForScene(
+        'Hello',
+        'Kore',
+        'gemini-3.1-flash-tts-preview',
+        'gen-fallback',
+        0,
+      );
+      await jest.runAllTimersAsync();
+      await promise;
+
+      // 4 native attempts before giving up on the native path.
+      expect(mockGoogleRunTts).toHaveBeenCalledTimes(4);
+      expect(mockFalRunTts).toHaveBeenCalledWith('fal-ai/gemini-3.1-flash-tts', {
+        prompt: 'Hello',
+        voice: 'Kore',
+        output_format: 'wav',
+      });
+      warning.mockRestore();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('recovers on a native retry without ever touching the fallback', async () => {
+    jest.useFakeTimers();
+    try {
+      mockGoogleRunTts
+        .mockRejectedValueOnce(new Error('transient blip'))
+        .mockResolvedValueOnce({ audio: Buffer.from('wav-bytes'), mimeType: 'audio/wav' });
+      const warning = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+      const promise = generateNarrationForScene('Hello', 'Kore', 'gemini-3.1-flash-tts-preview', 'gen-retry', 0);
+      await jest.runAllTimersAsync();
+      await promise;
+
+      expect(mockGoogleRunTts).toHaveBeenCalledTimes(2);
+      expect(mockFalRunTts).not.toHaveBeenCalled();
+      warning.mockRestore();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('does not retry a non-retryable native error (e.g. auth), failing over immediately', async () => {
+    // A 401/403 is not transient — burning the retry budget on it just delays the inevitable.
+    const { SafeGoogleAudioError } = jest.requireMock('../../services/providers/GoogleAudioProvider');
+    mockGoogleRunTts.mockRejectedValue(new SafeGoogleAudioError('Google TTS failed (401)', 401));
+    const warning = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    await generateNarrationForScene('Hello', 'Kore', 'gemini-3.1-flash-tts-preview', 'gen-auth', 0);
+
+    expect(mockGoogleRunTts).toHaveBeenCalledTimes(1);
+    expect(mockFalRunTts).toHaveBeenCalled();
+    warning.mockRestore();
+  });
+
+  it('retries a 429 rate-limit before failing over', async () => {
+    jest.useFakeTimers();
+    try {
+      const { SafeGoogleAudioError } = jest.requireMock('../../services/providers/GoogleAudioProvider');
+      mockGoogleRunTts
+        .mockRejectedValueOnce(new SafeGoogleAudioError('Google TTS failed (429)', 429))
+        .mockResolvedValueOnce({ audio: Buffer.from([0, 0, 1, 0]), mimeType: 'audio/l16', sampleRate: 24_000, channels: 1 });
+      const warning = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+      const promise = generateNarrationForScene('Hello', 'Kore', 'gemini-3.1-flash-tts-preview', 'gen-429', 0);
+      await jest.runAllTimersAsync();
+      await promise;
+
+      expect(mockGoogleRunTts).toHaveBeenCalledTimes(2);
+      expect(mockFalRunTts).not.toHaveBeenCalled();
+      warning.mockRestore();
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   it('throws when the provider rejects or returns no audio URL', async () => {

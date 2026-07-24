@@ -4,12 +4,20 @@ jest.mock('../../config', () => ({
     r2AccessKeyId: 'mock',
     r2SecretAccessKey: 'mock',
     r2BucketName: 'test-bucket',
+    googleNativeAudioEnabled: true,
+    googleAudioFalFallbackEnabled: true,
+    falLyriaFallbackModel: 'fal-ai/lyria2',
   },
 }));
 
 const mockFalRunLyria = jest.fn();
 jest.mock('../../services/providers/FalProvider', () => ({
   falRunLyria: mockFalRunLyria,
+}));
+
+const mockGoogleRunLyria = jest.fn();
+jest.mock('../../services/providers/GoogleAudioProvider', () => ({
+  googleRunLyria: mockGoogleRunLyria,
 }));
 
 const mockUploadBufferToR2 = jest.fn();
@@ -23,6 +31,10 @@ describe('generateMusicBed', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockFalRunLyria.mockResolvedValue('https://fal.media/music.wav');
+    mockGoogleRunLyria.mockResolvedValue({
+      audio: Buffer.from('native-mp3'),
+      mimeType: 'audio/mpeg',
+    });
     mockUploadBufferToR2.mockResolvedValue(undefined);
     (global as unknown as { fetch: jest.Mock }).fetch = jest.fn().mockResolvedValue({
       ok: true,
@@ -52,6 +64,40 @@ describe('generateMusicBed', () => {
       'generations/gen-123.music.wav',
       'audio/wav',
     );
+  });
+
+  it('uses native Lyria billing and archives the returned MP3', async () => {
+    await expect(generateMusicBed(
+      'ambient',
+      'lyria-3-clip-preview',
+      'gen-native',
+      'Use restrained percussion beneath the narration.',
+    ))
+      .resolves.toEqual({ r2Key: 'generations/gen-native.music.mp3' });
+
+    expect(mockGoogleRunLyria).toHaveBeenCalledWith(
+      'lyria-3-clip-preview',
+      expect.stringMatching(/ambient.*instrumental.*restrained percussion/i),
+    );
+    expect(mockFalRunLyria).not.toHaveBeenCalled();
+    expect(mockUploadBufferToR2).toHaveBeenCalledWith(
+      Buffer.from('native-mp3'),
+      'generations/gen-native.music.mp3',
+      'audio/mpeg',
+    );
+  });
+
+  it('falls back to Fal when native Lyria generation fails', async () => {
+    mockGoogleRunLyria.mockRejectedValueOnce(new Error('native unavailable'));
+    const warning = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    await expect(generateMusicBed('dramatic', 'lyria-3-clip-preview', 'gen-fallback'))
+      .resolves.toEqual({ r2Key: 'generations/gen-fallback.music.wav' });
+
+    expect(mockFalRunLyria).toHaveBeenCalledWith('fal-ai/lyria2', expect.objectContaining({
+      prompt: expect.stringMatching(/dramatic.*instrumental/i),
+    }));
+    warning.mockRestore();
   });
 
   it('throws a status-bearing error when the provider fails', async () => {
