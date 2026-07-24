@@ -111,6 +111,12 @@ export interface ExplainerScene {
 export interface ExplainerScript {
   scenes: ExplainerScene[];
   music_mood: string;
+  /**
+   * The single continuous voiceover the script LLM writes FIRST (script-first architecture,
+   * 2026-07-24); each scene's narration_line is a verbatim slice of it. Present on the LLM path
+   * and the reflow fallback; absent on the structural single-scene fallback.
+   */
+  full_script?: string;
 }
 
 export interface FormatStyleOption {
@@ -248,14 +254,18 @@ export const SERVER_FORMATS: AnyFormatDef[] = [
     script_template: {
       system_prompt: `You write concise, factual scripts for short animated explainer videos.
 
-Return valid JSON only in this exact top-level shape:
-{ "scenes": [{ "visual_prompt": "...", "motion_prompt": "...", "narration_line": "...", "text_zone": "lower_third|upper_third|center", "segment_type": "dialogue", "motion": { "type": "ken_burns|wiggle|reaction|before_after|ambient_life", "priority": 1, "edit_steps": ["..."] }, "transition_out": "cut|morph" }], "music_mood": "uplifting|ambient|dramatic|playful" }
+You work in two passes, in this order (script-first — the script exists before any scene does):
+PASS 1 — write "full_script": the COMPLETE voiceover narration for the whole video, start to finish, in natural, complete, connected sentences. It must read as ONE coherent piece of writing a person could read aloud — never a list of captions, labels, facts, or telegraphic fragments. The user message states a TOTAL NARRATION BUDGET in words; write full_script to land close to it — no padding, no cramming.
+PASS 2 — break the script you just wrote into scenes. Each scene's "narration_segment" is a VERBATIM, contiguous slice of full_script — copy-paste, never a paraphrase, summary, or rewrite. Concatenating every narration_segment in order must reproduce full_script exactly. Break on natural sentence or clause boundaries at the beat length the user message specifies, and let the number of scenes emerge from the script itself — never pad, merge, split, or invent content to hit a scene count.
 
-Return exactly the requested number of scenes supplied in the user message. Every scene must use segment_type "dialogue" and include all seven scene fields (visual_prompt, motion_prompt, narration_line, text_zone, segment_type, motion, transition_out).
+Return valid JSON only in this exact top-level shape, with full_script FIRST:
+{ "full_script": "...", "scenes": [{ "narration_segment": "...", "visual_prompt": "...", "motion_prompt": "...", "text_zone": "lower_third|upper_third|center", "segment_type": "dialogue", "motion": { "type": "ken_burns|wiggle|reaction|before_after|ambient_life", "priority": 1, "edit_steps": ["..."] }, "transition_out": "cut|morph" }], "music_mood": "uplifting|ambient|dramatic|playful" }
+
+Every scene must use segment_type "dialogue" and include all seven scene fields (narration_segment, visual_prompt, motion_prompt, text_zone, segment_type, motion, transition_out).
 
 HARD RULES:
-1. LENGTH is a TOTAL budget for the whole video, not a per-scene target. Keep each narration_line to about 25 words maximum and no more than 9.5 seconds spoken — a hard per-scene CEILING (Omni clips have a 10-second ceiling) — but the user message also states a TOTAL NARRATION BUDGET for the whole video: every narration_line's word count added together must land close to that total. Most scenes should therefore be much shorter than the ceiling; do not pad every scene up to the maximum just because it is allowed. Scene lengths may vary naturally; a short four-second beat and a longer nine-second explanation in one video are desirable, as long as the sum still fits the total budget.
-2. visual_prompt must never depict a narrator, speaker, presenter, host, talking figure, or explaining figure. Show only illustrative content of the topic itself.
+1. LENGTH. The TOTAL NARRATION BUDGET in the user message bounds full_script as a whole — that is the real constraint, not any per-scene target. Per scene, keep each narration_segment under 9.5 seconds of speech (~24 words) as a hard CEILING (Omni clips have a 10-second ceiling); most scenes should be well under it. Beat lengths may vary naturally — a short four-second beat and a longer nine-second explanation in one video are desirable, as long as the sum fits the total budget.
+2. visual_prompt describes what is on screen while that scene's narration_segment plays. It must never depict a narrator, speaker, presenter, host, talking figure, or explaining figure. Show only illustrative content of the topic itself.
 3. SPECIFICITY — avoid generic training-data tropes. Every visual_prompt must state the ERA, the EXACT object or subject being depicted, and explicitly what NOT to show, so the image model cannot default to a modern or generic version of the subject. For historical or technical topics, name the period, materials, and defining features, and forbid anachronisms with one brief targeted negative placed AFTER the positive description (lead with positive specifics — gpt-image-2 follows those far better than long negative lists). Worked example: BAD = "a wind tunnel testing" (the model draws a modern car). GOOD = "a 1901 Wright brothers wooden box wind tunnel testing small model wing/airfoil shapes, early-1900s wood construction, brass fittings, gas-lit workshop; NO car, NO modern equipment." Diagrams are fine and encouraged — describe exactly what the diagram shows with the same literal specificity.
 4. Every visual_prompt must reserve clean, simple, uncluttered negative space in the scene's text_zone so captions do not cover the subject.
 5. When stylized on-screen title text would help (for example, "66 MILLION YEARS AGO"), write that exact text into visual_prompt so the image model bakes it into the scene in-style. It is never a separate overlay field.
@@ -274,19 +284,19 @@ MOTION (every scene must include a "motion" object):
 11. motion.priority is 1-5: how much this motion matters to comprehension or impact. A key transformation central to the idea = 5. Ambient garnish that's nice but skippable = 2. This is used to ration a limited nano-edit budget across the video, so be honest — do not mark everything a 5.
 12. transition_out is "cut" by default. Use "morph" only when this scene's subject visually relates to the next scene (a dissolve between them would read well) — aim for morph on roughly half of scene boundaries across the video, not all or none.`,
       segment_types_allowed: ['dialogue'],
-      // B3: tier-specific pacing guidance, appended to the user message alongside the resolved
-      // scene count. Narration still drives duration either way — this only steers HOW the LLM
-      // chunks that narration into scenes.
+      // Script-first (2026-07-24): the LLM writes full_script first, then segments it at the beat
+      // length below — scene count is EMERGENT, never dictated. Narration still drives duration
+      // either way; this only steers how long a typical beat runs.
       pacing_hints: {
-        illustrated: 'This is the ILLUSTRATED tier: write SHORT, PUNCHY beats — aim for a fresh '
-          + 'image roughly every 2-3 seconds of narration. Break on natural beats in the idea, not '
-          + 'a fixed interval; linger (a slightly longer beat) only where an idea truly needs the '
-          + 'extra second. Each narration_line should usually be a brief phrase or short sentence, '
-          + 'not a paragraph.',
-        animated: 'This is the ANIMATED tier: write fuller, longer beats — each scene can carry '
-          + 'more narration (up to the 9.5s ceiling) since a single animated clip covers more '
-          + 'ground. Group related ideas into one flowing scene rather than fragmenting into many '
-          + 'tiny cuts.',
+        illustrated: 'This is the ILLUSTRATED tier: SHORT, PUNCHY beats of roughly 4-5 seconds of '
+          + 'natural speech each (~10-13 words) — a fresh image every few seconds. Break the script '
+          + 'on natural sentence or clause boundaries; linger (a slightly longer beat) only where '
+          + 'an idea truly needs the extra second. Do NOT aim for a specific number of beats — the '
+          + 'count is whatever the script naturally breaks into at this beat length.',
+        animated: 'This is the ANIMATED tier: fuller, longer beats — each scene can carry more '
+          + 'narration (up to the 9.5s ceiling) since a single animated clip covers more ground. '
+          + 'Group related ideas into one flowing scene rather than fragmenting into many tiny cuts. '
+          + 'Break on natural boundaries; do NOT aim for a specific number of beats.',
       },
     },
     // gpt-image-2-low: exactly one still is generated per scene (illustrated feeds it straight to
@@ -379,14 +389,20 @@ MOTION (every scene must include a "motion" object):
     // still+ffmpeg-only cost pass-through (no Omni), deliberately far cheaper than Animated.
     // Illustrated repricing (2026-07-23): illustrated_credits now include a 1/3-of-scenes budget of
     // Nano surgical edits (~$0.045 ea) on top of gpt-image-2-low stills + qwen3-tts + WhisperX + one
-    // Lyria clip. Cost pass-through, cents rounded up. edit_budget = ceil(illustrated_scene_count/3).
-    // Supersedes the pre-Nano illustrated_credits (22/30/45/60/90). Animated (Omni) tier unchanged.
+    // Lyria clip. Cost pass-through, cents rounded up. Supersedes the pre-Nano illustrated_credits
+    // (22/30/45/60/90). Animated (Omni) tier unchanged.
+    // Script-first (2026-07-24): illustrated_scene_count is no longer a hard instruction to the
+    // script LLM (which now derives the count from ~4-5s natural beats — see system_prompt) — it is
+    // the EXPECTED count used for edit_budget allocation, UI preparing-label pacing, and the
+    // sanity clamp in expandExplainerScript. Values dropped from 8/12/18/24/36 to the ~4.5s/beat
+    // midpoints below; illustrated_credits and edit_budget deliberately UNCHANGED — the slack
+    // absorbs nano guardrail retries and chatty scripts that run long.
     duration_tiers: [
-      { seconds: 20, scene_count: 3, credits: 325, illustrated_scene_count: 8, illustrated_credits: 36, edit_budget: 3 },
-      { seconds: 30, scene_count: 4, credits: 470, illustrated_scene_count: 12, illustrated_credits: 46, edit_budget: 4 },
-      { seconds: 45, scene_count: 6, credits: 693, illustrated_scene_count: 18, illustrated_credits: 64, edit_budget: 6 },
-      { seconds: 60, scene_count: 9, credits: 930, illustrated_scene_count: 24, illustrated_credits: 82, edit_budget: 8 },
-      { seconds: 90, scene_count: 13, credits: 1377, illustrated_scene_count: 36, illustrated_credits: 119, edit_budget: 12 },
+      { seconds: 20, scene_count: 3, credits: 325, illustrated_scene_count: 5, illustrated_credits: 36, edit_budget: 3 },
+      { seconds: 30, scene_count: 4, credits: 470, illustrated_scene_count: 7, illustrated_credits: 46, edit_budget: 4 },
+      { seconds: 45, scene_count: 6, credits: 693, illustrated_scene_count: 10, illustrated_credits: 64, edit_budget: 6 },
+      { seconds: 60, scene_count: 9, credits: 930, illustrated_scene_count: 13, illustrated_credits: 82, edit_budget: 8 },
+      { seconds: 90, scene_count: 13, credits: 1377, illustrated_scene_count: 20, illustrated_credits: 119, edit_budget: 12 },
     ],
     sheet: {
       description: 'Type a topic — get a narrated, animated explainer video.',

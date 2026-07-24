@@ -72,7 +72,7 @@ async function main() {
   const def = FORMATS_BY_ID['explainer']!;
   const style = def.style_grid.find((s) => s.id === STYLE_ID)!;
   const tier = def.duration_tiers.find((t) => t.seconds === 30)!;
-  const sceneCount = tier.illustrated_scene_count; // 12
+  const sceneCount = tier.illustrated_scene_count; // 7 (script-first estimate; actual count is emergent)
   console.log(`\n=== E2E illustrated (WIRED path) — ${genId} ===`);
   console.log(`topic: ${TOPIC}\nstyle: ${style.label}  scenes: ${sceneCount}  price: ${tier.illustrated_credits}cr  edit_budget: ${tier.edit_budget}\n`);
 

@@ -27,9 +27,9 @@ function responseWith(content: string) {
 
 function validScene(overrides: Record<string, unknown> = {}) {
   return {
+    narration_segment: 'Magma rises beneath the volcano.',
     visual_prompt: 'a cutaway diagram of a volcano with a clean lower third',
     motion_prompt: 'gentle camera push-in',
-    narration_line: 'Magma rises beneath the volcano.',
     text_zone: 'lower_third',
     segment_type: 'dialogue',
     ...overrides,
@@ -41,17 +41,100 @@ beforeEach(() => {
 });
 
 describe('expandExplainerScript', () => {
-  it('returns validated scenes and truncates extras to the requested scene count', async () => {
+  it('returns validated scenes and clamps only a runaway scene count (count is emergent, not dictated)', async () => {
     mockFetch.mockResolvedValue(responseWith(JSON.stringify({
+      full_script: 'Magma rises beneath the volcano.',
       scenes: [validScene(), validScene(), validScene()],
       music_mood: 'dramatic',
     })));
 
     const result = await expandExplainerScript(baseArgs);
 
-    expect(result.scenes).toHaveLength(2);
+    // sceneCount=2 is an ESTIMATE — 3 scenes is inside the 1.75x sanity band, so all are kept.
+    expect(result.scenes).toHaveLength(3);
     expect(result.scenes.every((scene) => scene.segment_type === 'dialogue')).toBe(true);
     expect(result.music_mood).toBe('dramatic');
+  });
+
+  it('clamps a runaway scene count to the sanity band', async () => {
+    mockFetch.mockResolvedValue(responseWith(JSON.stringify({
+      full_script: 'Magma rises beneath the volcano.',
+      scenes: Array.from({ length: 20 }, () => validScene()),
+      music_mood: 'dramatic',
+    })));
+
+    const result = await expandExplainerScript(baseArgs);
+
+    // sceneCount=2 -> maxScenes = max(4, ceil(2*1.75)) = 4
+    expect(result.scenes).toHaveLength(4);
+  });
+
+  it('keeps verbatim segments that re-join to full_script', async () => {
+    mockFetch.mockResolvedValue(responseWith(JSON.stringify({
+      full_script: 'Magma rises beneath the volcano. Pressure builds until it erupts.',
+      scenes: [
+        validScene({ narration_segment: 'Magma rises beneath the volcano.' }),
+        validScene({ narration_segment: 'Pressure builds until it erupts.' }),
+      ],
+      music_mood: 'ambient',
+    })));
+
+    const result = await expandExplainerScript(baseArgs);
+
+    expect(result.scenes[0]!.narration_line).toBe('Magma rises beneath the volcano.');
+    expect(result.scenes[1]!.narration_line).toBe('Pressure builds until it erupts.');
+    expect(result.full_script).toBe('Magma rises beneath the volcano. Pressure builds until it erupts.');
+  });
+
+  it('re-flows an authoritative full_script across scenes when the segments drift', async () => {
+    mockFetch.mockResolvedValue(responseWith(JSON.stringify({
+      full_script: 'Magma rises beneath the volcano. Pressure builds underground. The volcano erupts violently. Ash covers everything nearby.',
+      scenes: [
+        validScene({ narration_segment: 'The volcano gets angry.' }), // paraphrase, not a verbatim slice
+        validScene({ narration_segment: 'It explodes.' }),
+      ],
+      music_mood: 'ambient',
+    })));
+
+    const result = await expandExplainerScript(baseArgs);
+
+    // Segments dropped; full_script re-flowed over the two scenes, visuals/motion preserved.
+    expect(result.scenes).toHaveLength(2);
+    expect(result.scenes[0]!.narration_line).toContain('Magma rises');
+    expect(result.scenes[1]!.narration_line).toContain('Ash covers everything nearby.');
+    expect(result.scenes.map((s) => s.narration_line).join(' ')).toBe(
+      'Magma rises beneath the volcano. Pressure builds underground. The volcano erupts violently. Ash covers everything nearby.',
+    );
+    expect(result.scenes[0]!.visual_prompt).toContain('cutaway diagram');
+  });
+
+  it('degrades to joined segments when full_script is missing', async () => {
+    mockFetch.mockResolvedValue(responseWith(JSON.stringify({
+      scenes: [validScene()],
+      music_mood: 'ambient',
+    })));
+
+    const result = await expandExplainerScript(baseArgs);
+
+    expect(result.scenes[0]!.narration_line).toBe('Magma rises beneath the volcano.');
+    expect(result.full_script).toBe('Magma rises beneath the volcano.');
+  });
+
+  it('still parses legacy narration_line fields', async () => {
+    mockFetch.mockResolvedValue(responseWith(JSON.stringify({
+      scenes: [{
+        visual_prompt: 'a cutaway diagram of a volcano with a clean lower third',
+        motion_prompt: 'gentle camera push-in',
+        narration_line: 'Magma rises beneath the volcano.',
+        text_zone: 'lower_third',
+        segment_type: 'dialogue',
+      }],
+      music_mood: 'ambient',
+    })));
+
+    const result = await expandExplainerScript(baseArgs);
+
+    expect(result.scenes[0]!.narration_line).toBe('Magma rises beneath the volcano.');
   });
 
   it('returns a structural single-scene fallback for malformed JSON', async () => {

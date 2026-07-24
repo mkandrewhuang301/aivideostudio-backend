@@ -114,6 +114,11 @@ interface OpenAIChatCompletionResponse {
 
 export interface ExpandExplainerScriptArgs {
   topic: string;
+  /**
+   * EXPECTED scene count for this tier — script-first (2026-07-24): no longer a hard instruction
+   * to the LLM, which derives the real count from natural beat boundaries. Used only for the
+   * sanity clamp (~1.75x) and the fallback budget estimate when targetTotalSeconds is omitted.
+   */
   sceneCount: number;
   styleLabel: string;
   scriptTemplate: FormatDef['script_template'];
@@ -254,10 +259,16 @@ function parseExplainerScene(
   if (!value || typeof value !== 'object') return null;
 
   const scene = value as Record<string, unknown>;
+  // Script-first (2026-07-24): the LLM emits narration_segment (a verbatim slice of full_script).
+  // narration_line is accepted as a legacy fallback so a completion that ignored the new schema
+  // still parses instead of falling to the single-scene fallback.
+  const narration = nonEmptyString(scene.narration_segment)
+    ? scene.narration_segment
+    : scene.narration_line;
   if (
     !nonEmptyString(scene.visual_prompt)
     || !nonEmptyString(scene.motion_prompt)
-    || !nonEmptyString(scene.narration_line)
+    || !nonEmptyString(narration)
   ) {
     return null;
   }
@@ -276,12 +287,71 @@ function parseExplainerScene(
   return {
     visual_prompt: scene.visual_prompt.trim().replace(BANNED_NARRATOR_FIGURE, 'the subject'),
     motion_prompt: scene.motion_prompt.trim(),
-    narration_line: scene.narration_line.trim(),
+    narration_line: narration.trim(),
     text_zone: textZone,
     segment_type: segmentType,
     motion: parseSceneMotion(scene.motion),
     transition_out: transitionOut,
   };
+}
+
+/** Whitespace-normalized comparison form for the full_script ↔ segments consistency check. */
+function normalizeScriptText(value: string): string {
+  return value.replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Re-flows an authoritative full_script into `groupCount` contiguous narration lines when the
+ * model's own segmentation drifted (segments don't re-join to full_script). Splits on sentence
+ * boundaries and packs sentences into groups of roughly equal word count; falls back to an even
+ * word split when there are fewer sentences than groups. Returns null when full_script is empty.
+ */
+export function reflowFullScript(fullScript: string, groupCount: number): string[] | null {
+  const normalized = normalizeScriptText(fullScript);
+  if (!normalized || groupCount < 1) return null;
+  if (groupCount === 1) return [normalized];
+
+  const sentences = normalized.match(/[^.!?]+[.!?]+(?:["')\]]+)?/g)?.map((s) => s.trim())
+    .filter((s) => s.length > 0) ?? [];
+
+  if (sentences.length < groupCount) {
+    // Not enough sentence boundaries — split the word stream into even contiguous groups.
+    const words = normalized.split(' ');
+    const perGroup = Math.ceil(words.length / groupCount);
+    const groups: string[] = [];
+    for (let i = 0; i < words.length; i += perGroup) {
+      groups.push(words.slice(i, i + perGroup).join(' '));
+    }
+    return groups;
+  }
+
+  // Greedy balanced packing: target ~equal words per group, never breaking a sentence.
+  const totalWords = sentences.reduce((sum, s) => sum + s.split(' ').length, 0);
+  const target = totalWords / groupCount;
+  const groups: string[] = [];
+  let current: string[] = [];
+  let currentWords = 0;
+  let groupsLeft = groupCount - 1;
+  for (let i = 0; i < sentences.length; i += 1) {
+    const sentence = sentences[i]!;
+    const words = sentence.split(' ').length;
+    const sentencesLeftAfter = sentences.length - i - 1;
+    if (
+      current.length > 0
+      && currentWords + words > target
+      && groupsLeft > 0
+      && sentencesLeftAfter >= groupsLeft
+    ) {
+      groups.push(current.join(' '));
+      current = [];
+      currentWords = 0;
+      groupsLeft -= 1;
+    }
+    current.push(sentence);
+    currentWords += words;
+  }
+  groups.push(current.join(' '));
+  return groups;
 }
 
 /**
@@ -297,9 +367,10 @@ export async function expandExplainerScript(
       : '';
     const visualMethod = args.visualMethod ?? 'illustrated';
     const pacingHint = args.scriptTemplate.pacing_hints[visualMethod];
-    // The actual length-fix lever (2026-07-23): a TOTAL word/duration budget for the whole video,
-    // not just the per-scene ceiling in the system prompt. Falls back to a generous per-scene
-    // estimate (reproducing the old unconstrained behavior) only for callers that omit it.
+    // Script-first (2026-07-24): the budget bounds full_script as a WHOLE. sceneCount is now only
+    // an EXPECTED count (for the sanity clamp + budget estimate) — the prompt asks for beats of a
+    // target length and lets the count emerge, never a hard "return exactly N scenes" (which is
+    // what produced the telegraphic 12-fragment scripts).
     const targetTotalSeconds = args.targetTotalSeconds && args.targetTotalSeconds > 0
       ? args.targetTotalSeconds
       : args.sceneCount * DEFAULT_CLIP_SECONDS;
@@ -307,12 +378,12 @@ export async function expandExplainerScript(
       args.sceneCount * 3,
       Math.round(targetTotalSeconds * WORDS_PER_SECOND),
     );
-    const budgetBlock = `\n\nPACING GUIDANCE: ${pacingHint}\n\nTOTAL NARRATION BUDGET: all `
-      + `narration_line fields COMBINED should add up to about ${totalWordBudget} words total `
-      + `(~${Math.round(targetTotalSeconds)}s of natural speech across the whole video, at roughly `
-      + `${WORDS_PER_SECOND} words/sec). This is a TOTAL for the whole video, not a per-scene amount — `
-      + 'most individual scenes should land well short of the per-scene maximum so the sum lands near '
-      + `this budget. Divide it across the ${args.sceneCount} scenes per the pacing guidance above.`;
+    const budgetBlock = `\n\nPACING GUIDANCE: ${pacingHint}\n\nTOTAL NARRATION BUDGET: full_script `
+      + `should be about ${totalWordBudget} words total (~${Math.round(targetTotalSeconds)}s of `
+      + `natural speech at roughly ${WORDS_PER_SECOND} words/sec). This is a TOTAL for the whole `
+      + 'video. At the beat length in the pacing guidance above, that usually lands somewhere '
+      + `around ${args.sceneCount} scenes — an estimate, NOT a target. Write the script to the word `
+      + 'budget, break it at natural boundaries, and let the scene count fall where it falls.';
     const response = await fetch(OPENAI_CHAT_COMPLETIONS_URL, {
       method: 'POST',
       headers: {
@@ -326,7 +397,7 @@ export async function expandExplainerScript(
           { role: 'system', content: args.scriptTemplate.system_prompt },
           {
             role: 'user',
-            content: `Topic: ${args.topic}\nVisual style: ${args.styleLabel}\nNumber of scenes: ${args.sceneCount}${budgetBlock}${groundingBlock}`,
+            content: `Topic: ${args.topic}\nVisual style: ${args.styleLabel}${budgetBlock}${groundingBlock}`,
           },
         ],
         max_tokens: 2_000,
@@ -346,17 +417,44 @@ export async function expandExplainerScript(
     const parsed = JSON.parse(content) as Record<string, unknown>;
     if (!Array.isArray(parsed.scenes)) return explainerFallback(args);
 
+    // Sanity band: the count is emergent, but a runaway completion (40 scenes for a 30s tier)
+    // would blow the per-video still/TTS cost — clamp the top at ~1.75x the tier's expected count.
+    const maxScenes = Math.max(4, Math.ceil(args.sceneCount * 1.75));
     const scenes = parsed.scenes
       .map((scene) => parseExplainerScene(scene, args.scriptTemplate.segment_types_allowed))
       .filter((scene): scene is ExplainerScene => scene !== null)
-      .slice(0, Math.max(1, args.sceneCount));
+      .slice(0, maxScenes);
     if (scenes.length === 0) return explainerFallback(args);
+
+    // full_script ↔ segments consistency check (script-first contract): concatenating the
+    // narration segments in order must reproduce full_script. On drift, full_script is
+    // AUTHORITATIVE — re-flow it across the parsed scenes (keeping their visuals/motion) rather
+    // than trusting paraphrased segments. Missing full_script degrades to the joined segments.
+    let fullScript = nonEmptyString(parsed.full_script)
+      ? normalizeScriptText(parsed.full_script)
+      : normalizeScriptText(scenes.map((scene) => scene.narration_line).join(' '));
+    const joinedSegments = normalizeScriptText(scenes.map((scene) => scene.narration_line).join(' '));
+    if (fullScript !== joinedSegments) {
+      const reflowed = nonEmptyString(parsed.full_script)
+        ? reflowFullScript(parsed.full_script, scenes.length)
+        : null;
+      if (reflowed && reflowed.length === scenes.length) {
+        console.warn('[openaiScriptService] narration segments drifted from full_script; re-flowing full_script across scenes');
+        scenes.forEach((scene, index) => {
+          scene.narration_line = reflowed[index]!;
+        });
+        fullScript = normalizeScriptText(reflowed.join(' '));
+      } else {
+        console.warn('[openaiScriptService] full_script missing/unusable for re-flow; keeping model segmentation as-is');
+      }
+    }
 
     return {
       scenes,
       music_mood: nonEmptyString(parsed.music_mood) && EXPLAINER_MUSIC_MOODS.has(parsed.music_mood)
         ? parsed.music_mood
         : 'ambient',
+      full_script: fullScript,
     };
   } catch (err) {
     console.error('[openaiScriptService] Explainer completion unavailable, using structural fallback:', err);
