@@ -12,7 +12,17 @@ import { Readable } from 'node:stream';
 import { FORMATS_BY_ID } from '../config/formats';
 import { getUploadPresignedUrl, getGenerationPresignedUrl, uploadBufferToR2 } from '../services/archivalService';
 import { refundCredits } from '../services/creditService';
-import { generateNarrationForScene, type NarrationStem, type NarrationVoice } from '../services/geminiTtsService';
+import {
+  generateNarrationForScene,
+  VOICE_A_REFERENCE_R2_KEY,
+  VOICE_A_TRANSCRIPT,
+  type NarrationStem,
+  type NarrationVoice,
+} from '../services/geminiTtsService';
+
+// Re-exported so existing consumers (genVoicePreviews.ts) keep working — the single definition
+// lives in geminiTtsService, shared with the Explainer voice resolver.
+export { VOICE_A_REFERENCE_R2_KEY, VOICE_A_TRANSCRIPT };
 import { generateMusicBed } from '../services/lyriaService';
 import {
   classifyFailureReason,
@@ -61,23 +71,14 @@ export const VIDEO_SUMMARY_NARRATION_TEMPO = 1.0;
 export const VIDEO_SUMMARY_WORDS_PER_SECOND = 3.8;
 
 /**
- * R2 key + transcript for the cloned "anime narrator" voice (voice id 'voiceA' — see
- * src/config/formats.ts's video-explainer voices). Transcript copied verbatim from
- * spikeLessonCodeSwitch.ts's VOICE_A_TRANSCRIPT — qwen3-tts voice_clone quality depends on an
- * accurate reference_text for the reference clip.
- */
-export const VOICE_A_REFERENCE_R2_KEY = 'reference-voices/voiceA-clipA.mp3';
-export const VOICE_A_TRANSCRIPT =
-  "They stood no chance. Then Jack came up with an idea. In theory, as long as it was under attack, the crystal horn rabbit couldn't activate its escape skill. So Jack planned to act as bait to lure the crystal horn rabbit, while Mary looked for an opportunity to strike. After devising the plan, Mary used earth magic.";
-
-/**
  * Resolves the incoming voice id to a qwen3-tts voice, or `undefined` when the id should render
  * on Google TTS instead. 'voiceA' is intercepted FIRST and always renders through voice_clone (a
- * presigned reference clip + transcript) — it is the only summarizer voice on qwen. Every other
- * (preset) voice id returns `undefined`, which sends generateNarrationForScene down its Google TTS
- * path with `voiceName` = the raw voiceId (a Chirp3-HD name like "Kore") — the qwen preset speakers
- * gave the presets a strong Chinese accent, so they were moved back to Google. Async because the
- * clone path needs to presign the reference clip's R2 key.
+ * presigned reference clip + transcript — the constants live in geminiTtsService, shared with the
+ * Explainer resolver) — it is the only summarizer voice on qwen. Every other (preset) voice id
+ * returns `undefined`, which sends generateNarrationForScene down its Google TTS path with
+ * `voiceName` = the raw voiceId (a Chirp3-HD name like "Kore") — the qwen preset speakers gave the
+ * presets a strong Chinese accent, so they were moved back to Google. Async because the clone path
+ * needs to presign the reference clip's R2 key.
  */
 async function resolveSummaryVoice(voiceId: string): Promise<NarrationVoice | undefined> {
   if (voiceId === 'voiceA') {

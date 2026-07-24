@@ -10,6 +10,7 @@ import {
   EXPLAINER_VOICE_STYLE_PROMPT,
   generateNarrationForScene,
   resolveExplainerVoice,
+  resolveExplainerVoiceName,
   type NarrationStem,
 } from '../services/geminiTtsService';
 import {
@@ -137,6 +138,12 @@ export async function processExplainerGeneration(data: ExplainerGenerationJob): 
     const motionAllocation = allocateMotionBudget(script.scenes, tier?.edit_budget ?? 0);
 
     const anchorUrl = await getGenerationPresignedUrl(style.anchor_r2_key);
+    // Resolved ONCE, not per scene (2026-07-24 TTS routing flip): the same voice renders every
+    // stem, and the clone branch presigns a reference URL. `voice` is undefined for preset Gemini
+    // voices → narration takes the native Gemini path with the validated `voiceName` (Kore
+    // default); only a custom clone id (voiceA) builds a qwen voice_clone.
+    const narrationVoiceName = resolveExplainerVoiceName(data.voiceId);
+    const narrationVoice = await resolveExplainerVoice(data.voiceId);
     const stems: NarrationStem[] = [];
     const clipKeys: string[] = [];
 
@@ -145,13 +152,13 @@ export async function processExplainerGeneration(data: ExplainerGenerationJob): 
       if (sceneIndex === 0) await stampStage({ stage_label: 'Recording narration…' });
       const stem = await generateNarrationForScene(
         scene.narration_line,
-        data.voiceId,
+        narrationVoiceName,
         def.tts_model,
         data.generationId,
         sceneIndex,
         EXPLAINER_VOICE_STYLE_PROMPT,
         EXPLAINER_NARRATION_TEMPO,
-        resolveExplainerVoice(data.voiceId),
+        narrationVoice,
       );
       stems.push(stem);
 

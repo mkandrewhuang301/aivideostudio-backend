@@ -28,7 +28,13 @@ jest.mock('../../services/archivalService', () => ({
   getGenerationPresignedUrl: jest.fn(),
   uploadBufferToR2: jest.fn(),
 }));
-jest.mock('../../services/geminiTtsService', () => ({ generateNarrationForScene: jest.fn() }));
+jest.mock('../../services/geminiTtsService', () => ({
+  generateNarrationForScene: jest.fn(),
+  // The worker imports these shared voiceA constants from the service — the mock must provide
+  // them or the clone branch presigns `undefined`.
+  VOICE_A_REFERENCE_R2_KEY: 'reference-voices/voiceA-clipA.mp3',
+  VOICE_A_TRANSCRIPT: 'Mary looked for an opportunity to strike the crystal horn rabbit.',
+}));
 jest.mock('../../services/lyriaService', () => ({ generateMusicBed: jest.fn() }));
 jest.mock('../../services/mediaProbe', () => ({ probeVideoMeta: jest.fn() }));
 jest.mock('../../services/providers/ReplicateProvider', () => ({ transcribeWordTimings: jest.fn() }));

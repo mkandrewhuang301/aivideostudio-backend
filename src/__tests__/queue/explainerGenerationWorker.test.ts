@@ -26,12 +26,18 @@ jest.mock('../../services/geminiTtsService', () => ({
   generateNarrationForScene: jest.fn(),
   EXPLAINER_VOICE_STYLE_PROMPT: 'Speak in a voice like an explainer, explaining a concept.',
   EXPLAINER_NARRATION_TEMPO: 1.15,
-  resolveExplainerVoice: jest.fn((voiceId: string) => ({
-    mode: 'custom_voice',
-    speaker: voiceId === 'Kore' ? 'Serena' : voiceId,
-    styleInstruction: 'Speak in a voice like an explainer, explaining a concept.',
-    language: 'English',
-  })),
+  // 2026-07-24 routing flip: preset voices (Kore & friends) resolve to NO qwen voice → native
+  // Gemini TTS path; only clone ids build a voice_clone NarrationVoice.
+  resolveExplainerVoice: jest.fn(async (voiceId: string) => (voiceId === 'voiceA'
+    ? {
+      mode: 'voice_clone',
+      referenceAudioUrl: 'https://example.com/voiceA.mp3',
+      referenceText: 'transcript',
+      styleInstruction: 'Speak in a voice like an explainer, explaining a concept.',
+      language: 'English',
+    }
+    : undefined)),
+  resolveExplainerVoiceName: jest.fn((voiceId: string) => voiceId),
 }));
 
 jest.mock('../../services/omniService', () => ({

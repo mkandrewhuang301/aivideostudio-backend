@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { config } from '../config';
-import { uploadBufferToR2 } from './archivalService';
+import { uploadBufferToR2, getUploadPresignedUrl } from './archivalService';
 import { probeDurationSeconds } from './mediaProbe';
 import { falRunTts } from './providers/FalProvider';
 import { googleRunTts, SafeGoogleAudioError } from './providers/GoogleAudioProvider';
@@ -71,28 +71,56 @@ export const EXPLAINER_VOICE_STYLE_PROMPT = 'Speak in a voice like an explainer,
  */
 export const EXPLAINER_NARRATION_TEMPO = 1.15;
 
-const QWEN_PRESET_SPEAKERS = new Set([
-  'Aiden', 'Dylan', 'Eric', 'Ono_anna', 'Ryan', 'Serena', 'Sohee', 'Uncle_fu', 'Vivian',
-]);
-const DEFAULT_EXPLAINER_SPEAKER = 'Serena';
+/**
+ * Native Gemini TTS voices the Explainer format offers (mirrors the voices list in
+ * src/config/formats.ts). These render through the NATIVE Gemini interactions-API TTS path
+ * (generateTtsWav → googleRunTts) — confirmed 2026-07-24 to authenticate with only the
+ * x-goog-api-key header, no gcloud ADC required. (The `invalid_grant` failure an earlier comment
+ * attributed to this path actually belongs to the SEPARATE CloudTtsProvider/Chirp3-HD API, which
+ * falls back to ADC only when CLOUD_TTS_API_KEY is unset.)
+ */
+const GEMINI_NATIVE_VOICES = new Set(['Kore', 'Zephyr', 'Aoede', 'Puck', 'Charon', 'Orus']);
+export const DEFAULT_EXPLAINER_GEMINI_VOICE = 'Kore';
 
 /**
- * Resolves the Explainer's voiceId to a qwen3-tts voice so narration renders through the ONE
- * TTS engine the 2026-07-23 audio/video provider strategy standardizes on (Replicate qwen3-tts)
- * instead of the Cloud-TTS/native-Gemini chain, whose ADC/API-key auth isn't reliably available in
- * every environment (e.g. local dev has no gcloud ADC — that path throws `invalid_grant` before
- * falling through to a slower fallback voice). A known qwen preset speaker id passes through as-is;
- * anything else (including a legacy Gemini voice id like "Kore") falls to the default preset.
- * Mirrors videoSummaryWorker's resolveSummaryVoice.
+ * R2 key + transcript for the cloned "anime narrator" voice (voice id 'voiceA'). Shared by the
+ * Explainer and Video Summarizer resolvers. Transcript copied verbatim from
+ * spikeLessonCodeSwitch.ts's VOICE_A_TRANSCRIPT — qwen3-tts voice_clone quality depends on an
+ * accurate reference_text for the reference clip.
  */
-export function resolveExplainerVoice(voiceId: string): NarrationVoice {
-  const speaker = QWEN_PRESET_SPEAKERS.has(voiceId) ? voiceId : DEFAULT_EXPLAINER_SPEAKER;
-  return {
-    mode: 'custom_voice',
-    speaker,
-    styleInstruction: EXPLAINER_VOICE_STYLE_PROMPT,
-    language: 'English',
-  };
+export const VOICE_A_REFERENCE_R2_KEY = 'reference-voices/voiceA-clipA.mp3';
+export const VOICE_A_TRANSCRIPT =
+  "They stood no chance. Then Jack came up with an idea. In theory, as long as it was under attack, the crystal horn rabbit couldn't activate its escape skill. So Jack planned to act as bait to lure the crystal horn rabbit, while Mary looked for an opportunity to strike. After devising the plan, Mary used earth magic.";
+
+/**
+ * Validates the voice NAME sent to the native Gemini TTS: a known Gemini voice passes through,
+ * anything else falls to the default (Kore) so a stale/garbage voiceId can never 400 the TTS call.
+ */
+export function resolveExplainerVoiceName(voiceId: string): string {
+  return GEMINI_NATIVE_VOICES.has(voiceId) ? voiceId : DEFAULT_EXPLAINER_GEMINI_VOICE;
+}
+
+/**
+ * TTS routing (2026-07-24 research: nano-scriptfirst-tts): DEFAULT narration renders through the
+ * native Gemini TTS path — returning `undefined` here sends generateNarrationForScene down
+ * generateTtsWav with `voiceName` = the Gemini voice id (Kore & friends are English-native, which
+ * qwen's preset speakers were not). qwen3-tts is kept ONLY for the custom/cloned-voice path:
+ * 'voiceA' is intercepted and rendered through voice_clone (presigned reference clip + transcript).
+ * Async because the clone branch presigns the reference clip's R2 key. The qwen wiring itself
+ * (NarrationVoice, renderNarration, replicateQwenTts) is untouched — this function is just the
+ * decision of when to build one.
+ */
+export async function resolveExplainerVoice(voiceId: string): Promise<NarrationVoice | undefined> {
+  if (voiceId === 'voiceA') {
+    return {
+      mode: 'voice_clone',
+      referenceAudioUrl: await getUploadPresignedUrl(VOICE_A_REFERENCE_R2_KEY),
+      referenceText: VOICE_A_TRANSCRIPT,
+      styleInstruction: EXPLAINER_VOICE_STYLE_PROMPT,
+      language: 'English',
+    };
+  }
+  return undefined;
 }
 
 export interface NarrationStem {

@@ -127,11 +127,14 @@ async function main() {
   const stems: NarrationStem[] = new Array(script.scenes.length);
   const clipKeys: string[] = new Array(script.scenes.length);
   const stage = resolveVisualStage('illustrated'); // <-- the wired worker call
+  // Same voice for every stem; resolved once (async — the clone branch presigns). Undefined for a
+  // preset Gemini voice like Kore → native Gemini TTS path (2026-07-24 routing flip).
+  const narrationVoice = await resolveExplainerVoice(VOICE);
   await runPool(script.scenes.length, SCENE_CONCURRENCY, async (i) => {
     const sc = script.scenes[i]!;
     const stem = await generateNarrationForScene(
       sc.narration_line, VOICE, def.tts_model, genId, i,
-      EXPLAINER_VOICE_STYLE_PROMPT, EXPLAINER_NARRATION_TEMPO, resolveExplainerVoice(VOICE),
+      EXPLAINER_VOICE_STYLE_PROMPT, EXPLAINER_NARRATION_TEMPO, narrationVoice,
     );
     stems[i] = stem;
     const allocation = motionAllocation[i];

@@ -40,7 +40,7 @@ const BASES: Array<{ file: string; prompt: string }> = [
     prompt:
       `Photographic shot of ${TEACHER}, standing centered, waist-up, both hands relaxed and `
       + 'empty at her sides, holding nothing. Cozy bright classroom wall behind her, no '
-      + 'whiteboard. Vertical 9:16 framing.`,
+      + 'whiteboard. Vertical 9:16 framing.',
   },
 ];
 

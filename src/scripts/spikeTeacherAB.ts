@@ -48,13 +48,15 @@ function videoUrl(res: unknown, label: string): string {
 
 async function armA_v3(startImageUrl: string): Promise<string> {
   const res = await fal.subscribe(KLING_V3, {
+    // aspect_ratio is live on the API but missing from the fal client's
+    // KlingVideoV3ProImageToVideoInput type (types lag the API) — cast for this throwaway spike.
     input: {
       start_image_url: startImageUrl,
       prompt: PROMPT,
       duration: DURATION,
       aspect_ratio: '9:16',
       generate_audio: true,
-    },
+    } as Record<string, unknown> as never,
   });
   return videoUrl(res, 'v3');
 }
@@ -65,7 +67,7 @@ async function armB_o3(teacherUrl: string): Promise<string> {
       elements: [{ frontal_image_url: teacherUrl, reference_image_urls: [teacherUrl] }],
       prompt: `@Element1 ${PROMPT}`,
       duration: DURATION,
-      aspect_ratio: '9:16',
+      aspect_ratio: '9:16' as const,
       generate_audio: true,
     },
   });
