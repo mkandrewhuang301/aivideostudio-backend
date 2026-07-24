@@ -15,6 +15,8 @@
 // produce a video) and "Photo Effects" (presets that produce a still image), video section first.
 // This is a different axis than the original tools-vs-effects split — see D-02 in CONTEXT.md.
 
+import type { Tier } from './tiers';
+
 export const PRESETS_VERSION = 1;
 
 export type PresetSection = 'hero' | 'video_effects' | 'photo_effects' | 'shows_vlogs';
@@ -128,6 +130,14 @@ export interface PresetDef {
   media_type?: PresetMediaType;
   model?: string;
   /**
+   * SERVER-ONLY. Minimum plan required to run THIS preset, overriding the tier its underlying
+   * model would otherwise demand (`MODEL_MIN_TIER`). A curated preset is a product decision about
+   * who gets the experience; which model powers it is an implementation detail that can change
+   * (Gorilla Vlogs moved Seedance → Kling O3 without changing who may run it). Omit to inherit the
+   * model's tier — the default for every preset that has not deliberately opted out.
+   */
+  min_tier?: Tier;
+  /**
    * SERVER-ONLY. The expanded/interpolated prompt template dispatched to the provider.
    * MUST NEVER be serialized to the client (D-11, threat T-09.1-01) — `CLIENT_PRESETS`
    * strips this field before res.json(). Do not add this field to any client-facing type.
@@ -157,6 +167,14 @@ export interface PresetDef {
    * SERVER-ONLY (09.3, D-05). When true, presetResolver runs the user's free-text `text` field
    * through `openaiScriptService.expandScript()` (fail-open to `dialogue_prompt_template`/
    * `prompt_template` with `{script}` substituted) before dispatch.
+   *
+   * DEFAULT ON for character/dialogue formats (gorilla vlogs, Fruit Island, and any future
+   * show/vlog preset): a user's raw one-liner should NEVER be dispatched straight to the video
+   * model. Every one of these formats gets an LLM backend in the prompt path — it is what turns
+   * "i love these bananas" into real staging + delivery, and it is also where the two
+   * non-negotiable constraints are enforced (word budget sized to the clip's `max_seconds`, and
+   * the stamped speech-only/no-music audio direction). Adding a new dialogue preset without
+   * `script_expansion: true` means shipping raw user text at the model — don't.
    */
   script_expansion?: boolean;
   /**
@@ -718,13 +736,25 @@ export const SERVER_PRESETS: PresetDef[] = [
     // D-22: presets always call GPT-Image-2 at its 'medium' tier (5 credits) — no
     // quality picker in PresetInputSheet. IMAGE_MODEL_COSTS['openai/gpt-image-2-medium'] = 5.
     model: 'openai/gpt-image-2-medium',
-    prompt_template: "Change this person's hairstyle to {style}, keep the face and background unchanged.",
+    prompt_template:
+      'Perform a localized hair-only edit on the person in image 1. Change only their hair to ' +
+      '{style}. Image 1 is authoritative for the entire result: preserve the exact identity, ' +
+      'facial features, expression, gaze, head angle, body pose, hands, body proportions, subject ' +
+      'position and scale, camera viewpoint, framing and crop, clothing, accessories, background, ' +
+      'lighting, shadows, and photographic style. Do not zoom, rotate, reframe, retouch, or change ' +
+      'anything below the hairline except where the new hair naturally overlaps it.',
     // Used instead of prompt_template when the chosen style has a thumb_url (sent as a second
     // reference image) — see presetResolver.ts. gender_tag values below are a first-pass
     // proposal pending sign-off (2026-07-07 notes/hairstyle-preset-style-images-gender-filter.md).
     prompt_template_with_reference:
-      'Give the person in the first image this exact hairstyle: {style} — matching the reference ' +
-      'photo in the second image. Keep their face and background unchanged.',
+      'Perform a localized hair-only edit on the person in image 1. Change only their hair to ' +
+      '{style}, using image 2 solely as a hairstyle reference. Image 1 is authoritative for the ' +
+      'person and composition. Preserve the exact identity, facial features, expression, gaze, ' +
+      'head angle, body pose, hands, body proportions, subject position and scale, camera viewpoint, ' +
+      'framing and crop, clothing, accessories, background, lighting, shadows, and photographic ' +
+      'style from image 1. Do not copy the person, face, pose, clothing, camera angle, framing, ' +
+      'background, or lighting from image 2. Do not zoom, rotate, reframe, retouch, or change ' +
+      'anything below the hairline except where the new hair naturally overlaps it.',
     input_schema: {
       slots: [{ kind: 'image', label: 'Your photo', source: 'any' }],
       style_grid: [
@@ -1099,11 +1129,18 @@ export const SERVER_PRESETS: PresetDef[] = [
   // ─── Shows & Vlogs ───────────────────────────────────────────────────────
   {
     // Gorilla Vlogs (09.3 SC3/D-05, flipped soon → live): the character-system proof. A bundled
-    // fictional AI character (no real face, no IP) — Seedance 2.0 reference-to-video with
-    // audio-on accepts fictional/AI characters directly (D-02: fictional presets go straight to
-    // Seedance, no Grok fallback needed). The user's raw script is expanded via
-    // openaiScriptService.expandScript() into dialogue + selfie-cam vlog framing (D-05) before
-    // dispatch — fail-open to a templated `{script}` substitution if the LLM call errors.
+    // fictional AI character (no real face, no IP). The user's raw script is expanded via
+    // openaiScriptService.expandScript() into dialogue + selfie-cam framing (D-05) before dispatch
+    // — fail-open to a templated `{script}` substitution if the LLM call errors.
+    //
+    // MOVED OFF SEEDANCE 2026-07-23 (Andrew, after listening to A/B output). Seedance-2.0-mini
+    // generated acceptable video but its fused audio is the problem: speech stutters (audibly
+    // doubled a word), sounds synthetic rather than human, and no prompt instruction reaches it —
+    // it's a synthesis artifact, not a promptable behavior. Kling O3 speaks the same line cleanly
+    // with the same prompt. Seedance also false-positived a copyright block on a benign line
+    // ("trying the new ramen place") that passed on retry, so its filter is non-deterministic.
+    // For a format whose entire value is a character talking to camera, clean audio wins over the
+    // cheaper per-second rate.
     preset_id: 'gorilla-vlogs',
     title: 'Gorilla Vlogs',
     section: 'shows_vlogs',
@@ -1111,8 +1148,13 @@ export const SERVER_PRESETS: PresetDef[] = [
     status: 'live',
     badge: 'NEW',
     media_type: 'video',
-    model: 'bytedance/seedance-2.0-mini',
-    i2v_routing: 'seedance', // known-fictional character — best quality, no Grok fallback needed
+    model: 'fal-ai/kling-video/o3/standard/reference-to-video',
+    // Kling O3 is pro-gated as a directly-selectable model, but Gorilla Vlogs is the flagship
+    // character format and stays open to everyone (Andrew, 2026-07-23) — guests and Basic just
+    // spend more credits per clip. Access is a preset-level product call, not the model's.
+    min_tier: 'basic',
+    // No i2v_routing: the Seedance→Grok content-policy fallback is Seedance-specific and does not
+    // apply to Kling (which accepts fictional AND real faces).
     // TODO(art): placeholder character still — replace with the real bundled gorilla character
     // asset via `npm run upload:preset-art` once delivered (D-09); presetResolver injects this
     // URL into reference_images ahead of any user slots (there are none for this preset).
@@ -1132,9 +1174,9 @@ export const SERVER_PRESETS: PresetDef[] = [
       slots: [],
       text: { label: 'Your script', required: true },
     },
-    // Matches animate-old-photo's Seedance-mini 720p per-second rate (MODEL_RATES nonVideoIn
-    // 720p = $0.09/s = 9 credits/s).
-    cost: { type: 'per_second', credits_per_sec: 9, max_seconds: 5 },
+    // Kling O3 Standard reference-to-video, audio ON (dialogue) = $0.14/s → 14 credits/s by the
+    // cents-rounded-up rule. A 5s clip is 70 credits (was 45 on Seedance-mini).
+    cost: { type: 'per_second', credits_per_sec: 14, max_seconds: 5 },
     sheet: {
       description: 'Type a short script — the gorilla vlogs it, selfie-cam style, with speech.',
       aspect_label: 'Vertical',

@@ -43,6 +43,14 @@ export const generationStatusEnum = pgEnum('generation_status', [
   'deleted',     // enables soft-delete (D-37, GAL-06)
 ]);
 
+export const soundtrackGenerationStatusEnum = pgEnum('soundtrack_generation_status', [
+  'pending',
+  'processing',
+  'completed',
+  'failed',
+  'refunded',
+]);
+
 // ─── users ────────────────────────────────────────────────────────────────────
 // Per D-12: id (UUID), firebase_uid (unique), email, credits_balance (integer default 0),
 //           created_at, updated_at
@@ -352,6 +360,80 @@ export const projectTextOverlays = pgTable(
   }),
 );
 
+// AI Music generations are durable library assets, not gallery generations and not timeline
+// clips. A completed row can be previewed/reused many times without another provider charge.
+export const projectSoundtrackGenerations = pgTable(
+  'project_soundtrack_generations',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    user_id: uuid('user_id').notNull().references(() => users.id),
+    project_id: uuid('project_id').notNull().references(() => projects.id),
+    idempotency_key: text('idempotency_key').notNull(),
+    status: soundtrackGenerationStatusEnum('status').notNull().default('pending'),
+    provider: text('provider').notNull(),
+    model: text('model').notNull(),
+    sound_mode: text('sound_mode').notNull().default('instrumental'),
+    direction: text('direction'),
+    project_duration_seconds: doublePrecision('project_duration_seconds').notNull(),
+    project_snapshot: jsonb('project_snapshot').notNull(),
+    project_fingerprint: text('project_fingerprint').notNull(),
+    cost_credits: integer('cost_credits').notNull(),
+    provider_request_id: text('provider_request_id'),
+    raw_r2_key: text('raw_r2_key'),
+    final_r2_key: text('final_r2_key'),
+    mime_type: text('mime_type'),
+    display_name: text('display_name'),
+    failure_code: text('failure_code'),
+    failure_reason: text('failure_reason'),
+    retry_count: integer('retry_count').notNull().default(0),
+    attached_audio_clip_id: uuid('attached_audio_clip_id'),
+    library_deleted_at: timestamp('library_deleted_at', { withTimezone: true }),
+    created_at: timestamp('created_at', { withTimezone: true }).notNull().default(sql`now()`),
+    started_at: timestamp('started_at', { withTimezone: true }),
+    completed_at: timestamp('completed_at', { withTimezone: true }),
+    failed_at: timestamp('failed_at', { withTimezone: true }),
+  },
+  (table) => ({
+    userIdempotencyIdx: uniqueIndex('soundtracks_user_idempotency_unique_idx').on(
+      table.user_id,
+      table.idempotency_key,
+    ),
+    projectCreatedIdx: index('soundtracks_project_created_idx').on(
+      table.project_id,
+      desc(table.created_at),
+    ),
+    statusCreatedIdx: index('soundtracks_status_created_idx').on(table.status, table.created_at),
+    userCreatedIdx: index('soundtracks_user_created_idx').on(
+      table.user_id,
+      desc(table.created_at),
+    ),
+  }),
+);
+
+// One inexpensive video-analysis call returns three editable directions. The result is durable
+// for the exact project fingerprint, so cycling suggestions never triggers another provider call.
+export const projectMusicSuggestionCache = pgTable(
+  'project_music_suggestion_cache',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    user_id: uuid('user_id').notNull().references(() => users.id),
+    project_id: uuid('project_id').notNull().references(() => projects.id),
+    project_fingerprint: text('project_fingerprint').notNull(),
+    suggestions: jsonb('suggestions').notNull(),
+    provider: text('provider').notNull(),
+    model: text('model').notNull(),
+    created_at: timestamp('created_at', { withTimezone: true }).notNull().default(sql`now()`),
+    updated_at: timestamp('updated_at', { withTimezone: true }).notNull().default(sql`now()`),
+  },
+  (table) => ({
+    fingerprintIdx: uniqueIndex('music_suggestions_user_project_fingerprint_unique_idx').on(
+      table.user_id,
+      table.project_id,
+      table.project_fingerprint,
+    ),
+  }),
+);
+
 // ─── project_audio_clips (Phase 13: Edit Studio) ──────────────────────────────
 // Multi-clip Audio track (LOCKED per 13-RESEARCH.md Open Question 1 resolution — supports
 // narration + music both landing as separate pills, e.g. AI Autoexplainer smart-unpack D-15).
@@ -364,7 +446,9 @@ export const projectAudioClips = pgTable(
       .notNull()
       .references(() => projects.id),
     r2_key: text('r2_key').notNull(),
-    source_type: text('source_type').notNull().default('upload'), // 'upload' | 'preset' | 'narration'
+    source_type: text('source_type').notNull().default('upload'), // 'upload' | 'preset' | 'narration' | 'ai'
+    display_name: text('display_name'),
+    source_soundtrack_id: uuid('source_soundtrack_id').references(() => projectSoundtrackGenerations.id),
     start_offset_seconds: doublePrecision('start_offset_seconds').notNull().default(0), // position on the assembled project timeline
     trim_start_seconds: doublePrecision('trim_start_seconds').notNull().default(0),
     trim_end_seconds: doublePrecision('trim_end_seconds'), // nullable
@@ -448,6 +532,9 @@ export type ProjectClip = typeof projectClips.$inferSelect;
 export type NewProjectClip = typeof projectClips.$inferInsert;
 export type ProjectTextOverlay = typeof projectTextOverlays.$inferSelect;
 export type NewProjectTextOverlay = typeof projectTextOverlays.$inferInsert;
+export type ProjectSoundtrackGeneration = typeof projectSoundtrackGenerations.$inferSelect;
+export type NewProjectSoundtrackGeneration = typeof projectSoundtrackGenerations.$inferInsert;
+export type SoundtrackGenerationStatus = (typeof soundtrackGenerationStatusEnum.enumValues)[number];
 export type ProjectAudioClip = typeof projectAudioClips.$inferSelect;
 export type NewProjectAudioClip = typeof projectAudioClips.$inferInsert;
 export type ProjectCaptionCue = typeof projectCaptionCues.$inferSelect;
