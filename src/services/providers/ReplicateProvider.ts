@@ -233,14 +233,18 @@ export async function generateStyledStill(
     + 'below and depict a completely new, distinct scene.\n\nSCENE:\n'
     + visualPrompt;
 
-  const output = (await replicate.run('openai/gpt-image-2', {
+  // Retried on 429 like whisperx/qwen3-tts above (2026-07-23 speed pass): bumping the illustrated
+  // e2e's scene pool concurrency surfaced this call's throttling — it fires once per scene (plus
+  // once per content-class fallback step) with no protection, so a burst of concurrent scenes could
+  // hard-fail the whole generation on a single transient 429 instead of just slowing down.
+  const output = (await withReplicateRetry(() => replicate.run('openai/gpt-image-2', {
     input: {
       prompt: styleLockedPrompt,
       input_images: [styleAnchorUrl],
       aspect_ratio: '9:16',
       quality,
     },
-  })) as unknown;
+  }), 'generateStyledStill')) as unknown;
   // The replicate client (v1.x) returns FileOutput object(s) with a .url() method, not plain
   // URL strings — normalize both shapes (and arrays of either).
   const first = Array.isArray(output) ? output[0] : output;
