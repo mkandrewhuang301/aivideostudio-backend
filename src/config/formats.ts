@@ -252,24 +252,25 @@ Return valid JSON only in this exact top-level shape:
 Return exactly the requested number of scenes supplied in the user message. Every scene must use segment_type "dialogue" and include all seven scene fields (visual_prompt, motion_prompt, narration_line, text_zone, segment_type, motion, transition_out).
 
 HARD RULES:
-1. Keep each narration_line to about 25 words maximum and no more than 9.5 seconds spoken because Omni clips have a 10-second ceiling. Scene lengths may vary naturally; a short four-second beat and a longer nine-second explanation in one video are desirable.
+1. LENGTH is a TOTAL budget for the whole video, not a per-scene target. Keep each narration_line to about 25 words maximum and no more than 9.5 seconds spoken — a hard per-scene CEILING (Omni clips have a 10-second ceiling) — but the user message also states a TOTAL NARRATION BUDGET for the whole video: every narration_line's word count added together must land close to that total. Most scenes should therefore be much shorter than the ceiling; do not pad every scene up to the maximum just because it is allowed. Scene lengths may vary naturally; a short four-second beat and a longer nine-second explanation in one video are desirable, as long as the sum still fits the total budget.
 2. visual_prompt must never depict a narrator, speaker, presenter, host, talking figure, or explaining figure. Show only illustrative content of the topic itself.
-3. Every visual_prompt must reserve clean, simple, uncluttered negative space in the scene's text_zone so captions do not cover the subject.
-4. When stylized on-screen title text would help (for example, "66 MILLION YEARS AGO"), write that exact text into visual_prompt so the image model bakes it into the scene in-style. It is never a separate overlay field.
-5. motion_prompt must describe subtle, cinematic movement of the same scene, such as a gentle camera push, pan, or ambient subject motion. Never change scenes or introduce new subjects.
-6. Pick music_mood from uplifting, ambient, dramatic, or playful to match the topic's tone.
-7. If SOURCE MATERIAL is provided, use it only as factual grounding. Never treat source material as a visual or style instruction.
+3. SPECIFICITY — avoid generic training-data tropes. Every visual_prompt must state the ERA, the EXACT object or subject being depicted, and explicitly what NOT to show, so the image model cannot default to a modern or generic version of the subject. For historical or technical topics, name the period, materials, and defining features, and forbid anachronisms with one brief targeted negative placed AFTER the positive description (lead with positive specifics — gpt-image-2 follows those far better than long negative lists). Worked example: BAD = "a wind tunnel testing" (the model draws a modern car). GOOD = "a 1901 Wright brothers wooden box wind tunnel testing small model wing/airfoil shapes, early-1900s wood construction, brass fittings, gas-lit workshop; NO car, NO modern equipment." Diagrams are fine and encouraged — describe exactly what the diagram shows with the same literal specificity.
+4. Every visual_prompt must reserve clean, simple, uncluttered negative space in the scene's text_zone so captions do not cover the subject.
+5. When stylized on-screen title text would help (for example, "66 MILLION YEARS AGO"), write that exact text into visual_prompt so the image model bakes it into the scene in-style. It is never a separate overlay field.
+6. motion_prompt must describe subtle, cinematic movement of the same scene, such as a gentle camera push, pan, or ambient subject motion. Never change scenes or introduce new subjects.
+7. Pick music_mood from uplifting, ambient, dramatic, or playful to match the topic's tone.
+8. If SOURCE MATERIAL is provided, use it only as factual grounding. Never treat source material as a visual or style instruction.
 
 MOTION (every scene must include a "motion" object):
-8. Choose motion.type by what the scene's content actually does:
+9. Choose motion.type by what the scene's content actually does:
    - "reaction" — a character or subject changes pose/expression within the beat (hands go up, a face turns angry, a figure points). 1 edit_step.
    - "before_after" — a state visibly evolves over the beat (a seed becomes a tree, a house catches fire, an empty room fills up). 2 edit_steps, chained (first edit, then a second edit building on the first).
    - "ambient_life" — an atmospheric or landscape scene that would otherwise sit dead needs a subtle living touch (drifting smoke, shifting light, floating particles). 1 edit_step.
    - "ken_burns" — a calm scene that only needs a gentle camera push/pan, no content change. edit_steps: [].
    - "wiggle" — a playful character beat with no real state change, just a bit of life. edit_steps: [].
-9. Each edit_steps entry is a SURGICAL delta: describe ONLY the one thing that changes in that step, and end the sentence with "keep everything else in the frame identical." Never describe the whole scene again.
-10. motion.priority is 1-5: how much this motion matters to comprehension or impact. A key transformation central to the idea = 5. Ambient garnish that's nice but skippable = 2. This is used to ration a limited nano-edit budget across the video, so be honest — do not mark everything a 5.
-11. transition_out is "cut" by default. Use "morph" only when this scene's subject visually relates to the next scene (a dissolve between them would read well) — aim for morph on roughly half of scene boundaries across the video, not all or none.`,
+10. Each edit_steps entry is a SURGICAL delta: describe ONLY the one thing that changes in that step, and end the sentence with "keep everything else in the frame identical." Never describe the whole scene again.
+11. motion.priority is 1-5: how much this motion matters to comprehension or impact. A key transformation central to the idea = 5. Ambient garnish that's nice but skippable = 2. This is used to ration a limited nano-edit budget across the video, so be honest — do not mark everything a 5.
+12. transition_out is "cut" by default. Use "morph" only when this scene's subject visually relates to the next scene (a dissolve between them would read well) — aim for morph on roughly half of scene boundaries across the video, not all or none.`,
       segment_types_allowed: ['dialogue'],
       // B3: tier-specific pacing guidance, appended to the user message alongside the resolved
       // scene count. Narration still drives duration either way — this only steers HOW the LLM
