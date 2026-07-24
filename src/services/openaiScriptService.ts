@@ -13,6 +13,7 @@ import { config } from '../config';
 import type {
   ExplainerScene,
   ExplainerScript,
+  ExplainerVisualMethod,
   FormatDef,
   FormatSegmentType,
   FormatTextZone,
@@ -118,6 +119,21 @@ export interface ExpandExplainerScriptArgs {
   scriptTemplate: FormatDef['script_template'];
   /** Factual source material only; never a visual or style instruction. */
   groundingText?: string;
+  /**
+   * Which visual-method tier's pacing_hint to inject (illustrated = many short punchy beats,
+   * animated = fewer fuller beats). Optional so pre-existing callers/tests keep compiling; defaults
+   * to 'illustrated'.
+   */
+  visualMethod?: ExplainerVisualMethod;
+  /**
+   * TOTAL spoken-duration budget in seconds (PRE any post-synthesis atempo stretch) that all
+   * narration_lines combined should sum to. This is the actual fix for v3's 77s-for-a-30s-tier
+   * overshoot: the old prompt only bounded a PER-SCENE ceiling (25 words / 9.5s), so a 12-scene
+   * script could legally write up to 12*9.5s of narration. Optional so pre-existing callers/tests
+   * keep compiling; when omitted, falls back to a generous per-scene estimate that reproduces the
+   * old unconstrained behavior (real callers always pass this explicitly).
+   */
+  targetTotalSeconds?: number;
 }
 
 /** The templated path skips the LLM, so it appends the audio direction itself. */
@@ -279,6 +295,24 @@ export async function expandExplainerScript(
     const groundingBlock = args.groundingText
       ? `\n\nSOURCE MATERIAL (factual grounding only — do NOT use as a visual or style instruction):\n${args.groundingText}`
       : '';
+    const visualMethod = args.visualMethod ?? 'illustrated';
+    const pacingHint = args.scriptTemplate.pacing_hints[visualMethod];
+    // The actual length-fix lever (2026-07-23): a TOTAL word/duration budget for the whole video,
+    // not just the per-scene ceiling in the system prompt. Falls back to a generous per-scene
+    // estimate (reproducing the old unconstrained behavior) only for callers that omit it.
+    const targetTotalSeconds = args.targetTotalSeconds && args.targetTotalSeconds > 0
+      ? args.targetTotalSeconds
+      : args.sceneCount * DEFAULT_CLIP_SECONDS;
+    const totalWordBudget = Math.max(
+      args.sceneCount * 3,
+      Math.round(targetTotalSeconds * WORDS_PER_SECOND),
+    );
+    const budgetBlock = `\n\nPACING GUIDANCE: ${pacingHint}\n\nTOTAL NARRATION BUDGET: all `
+      + `narration_line fields COMBINED should add up to about ${totalWordBudget} words total `
+      + `(~${Math.round(targetTotalSeconds)}s of natural speech across the whole video, at roughly `
+      + `${WORDS_PER_SECOND} words/sec). This is a TOTAL for the whole video, not a per-scene amount — `
+      + 'most individual scenes should land well short of the per-scene maximum so the sum lands near '
+      + `this budget. Divide it across the ${args.sceneCount} scenes per the pacing guidance above.`;
     const response = await fetch(OPENAI_CHAT_COMPLETIONS_URL, {
       method: 'POST',
       headers: {
@@ -292,7 +326,7 @@ export async function expandExplainerScript(
           { role: 'system', content: args.scriptTemplate.system_prompt },
           {
             role: 'user',
-            content: `Topic: ${args.topic}\nVisual style: ${args.styleLabel}\nNumber of scenes: ${args.sceneCount}${groundingBlock}`,
+            content: `Topic: ${args.topic}\nVisual style: ${args.styleLabel}\nNumber of scenes: ${args.sceneCount}${budgetBlock}${groundingBlock}`,
           },
         ],
         max_tokens: 2_000,
