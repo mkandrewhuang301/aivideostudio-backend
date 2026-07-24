@@ -18,7 +18,7 @@ import { buildSceneCues, getWordTimings } from '../services/whisperxService';
 import type { CaptionWordDraft } from '../services/captionTranscriptionService';
 import { runFfmpegOp } from '../queue/ffmpegProcessor';
 
-const OUT = '/private/tmp/claude-501/-Users-andrewhuang/8c987e81-5615-4184-8b9d-16896aae4c16/scratchpad/e2e-illustrated-v2.mp4';
+const OUT = '/private/tmp/claude-501/-Users-andrewhuang/8c987e81-5615-4184-8b9d-16896aae4c16/scratchpad/e2e-illustrated-v3.mp4';
 const TOPIC = 'How the Wright brothers achieved the first powered airplane flight in 1903';
 const STYLE_ID = 'flat-vector';   // illustrated-capable
 const VOICE = 'Kore';
@@ -39,7 +39,29 @@ async function dlBuf(key: string): Promise<Buffer> {
   return Buffer.from(await r.arrayBuffer());
 }
 
+/**
+ * Bounded-concurrency pool: runs `worker(i)` for i in [0, count) with at most `limit` in flight at
+ * once (a simple bank of self-refilling workers, not a batched chunk-of-N — a fast scene starts
+ * its neighbor immediately rather than waiting for a whole batch to finish). This is the real fix
+ * for the sequential e2e's ~30min runtime (each scene was a fully serial TTS + still + nano/gpt-
+ * stills + ffmpeg chain). Stays under Replicate/Gemini rate limits at ~5 in flight. Per-scene
+ * results must be written BY INDEX inside `worker`, not push-order, since completion order is
+ * nondeterministic under concurrency.
+ */
+async function runPool(count: number, limit: number, worker: (i: number) => Promise<void>): Promise<void> {
+  let cursor = 0;
+  async function lane(): Promise<void> {
+    while (cursor < count) {
+      const i = cursor;
+      cursor += 1;
+      await worker(i);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, count) }, () => lane()));
+}
+
 async function main() {
+  const wallClockStart = Date.now();
   const genId = `e2e-illustrated-${Date.now()}`;
   const def = FORMATS_BY_ID['explainer']!;
   const style = def.style_grid.find((s) => s.id === STYLE_ID)!;
@@ -77,13 +99,17 @@ async function main() {
     .reduce((sum, a) => sum + (script.scenes[a.sceneIndex]!.motion?.edit_steps.length ?? 0), 0);
   console.log(`   motion allocation: ${grantedCount}/${script.scenes.length} scenes granted nano, ${nanoEditsGranted}/${tier.edit_budget} edits used`);
 
-  const stems: NarrationStem[] = [];
-  const clipKeys: string[] = [];
+  const SCENE_CONCURRENCY = 5;
+  // Preallocated + written BY INDEX inside the pool (never push) so ordering survives concurrent
+  // completion — narration concat, WhisperX offsets, and compose clips all depend on stems[i]/
+  // clipKeys[i] lining up with script.scenes[i].
+  const stems: NarrationStem[] = new Array(script.scenes.length);
+  const clipKeys: string[] = new Array(script.scenes.length);
   const stage = resolveVisualStage('illustrated'); // <-- the wired worker call
-  for (let i = 0; i < script.scenes.length; i++) {
+  await runPool(script.scenes.length, SCENE_CONCURRENCY, async (i) => {
     const sc = script.scenes[i]!;
     const stem = await generateNarrationForScene(sc.narration_line, VOICE, def.tts_model, genId, i);
-    stems.push(stem);
+    stems[i] = stem;
     const allocation = motionAllocation[i];
     const { clipR2Key } = await stage.generateSceneClip({
       generationId: genId, sceneIndex: i,
@@ -92,13 +118,15 @@ async function main() {
       narrationDurationSeconds: stem.durationSeconds, aspectRatio: ASPECT,
       motion: sc.motion, resolvedNano: allocation?.resolvedNano ?? false,
     });
-    clipKeys.push(clipR2Key);
+    clipKeys[i] = clipR2Key;
     const plan = resolveMotionPlan(sc.motion, allocation?.resolvedNano ?? false);
     const motionLabel = sc.motion
       ? `${sc.motion.type} p${sc.motion.priority} -> plan=${plan.kind}${plan.kind === 'nano' || plan.kind === 'gpt_stills' ? ` (${plan.editSteps.length} steps)` : ''}`
       : 'no motion plan -> ken_burns';
+    // Logged as each scene completes — under concurrency these interleave, but every line is
+    // self-contained (scene index + all its own data), so interleaving doesn't lose information.
     console.log(`   scene ${i}: ${stem.durationSeconds.toFixed(1)}s [${motionLabel}] transition_out=${sc.transition_out ?? 'cut'} -> ${clipR2Key.split('/').pop()}`);
-  }
+  });
 
   console.log('[2] narration concat…');
   const narrationBuffer = concatWavBuffers(await Promise.all(stems.map((s) => dlBuf(s.r2Key))));
@@ -131,6 +159,8 @@ async function main() {
   } as any);
 
   await writeFile(OUT, await dlBuf(r2Key));
+  const wallClockSeconds = (Date.now() - wallClockStart) / 1000;
   console.log(`\n✅ DONE -> ${OUT}`);
+  console.log(`   total wall-clock: ${wallClockSeconds.toFixed(1)}s (${(wallClockSeconds / 60).toFixed(1)} min), scene concurrency=${SCENE_CONCURRENCY}`);
 }
 main().catch((e) => { console.error('\n❌ FAILED:', e); process.exit(1); });
