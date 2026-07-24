@@ -8,7 +8,13 @@ import Replicate from 'replicate';
 import { writeFile } from 'node:fs/promises';
 import { FORMATS_BY_ID } from '../config/formats';
 import { archiveToR2, getGenerationPresignedUrl, uploadBufferToR2 } from '../services/archivalService';
-import { generateNarrationForScene, type NarrationStem } from '../services/geminiTtsService';
+import {
+  EXPLAINER_NARRATION_TEMPO,
+  EXPLAINER_VOICE_STYLE_PROMPT,
+  generateNarrationForScene,
+  resolveExplainerVoice,
+  type NarrationStem,
+} from '../services/geminiTtsService';
 import { expandExplainerScript } from '../services/openaiScriptService';
 import { resolveVisualStage, resolveMotionPlan } from '../services/explainerVisualStage';
 import { allocateMotionBudget } from '../services/explainerMotionAllocator';
@@ -18,7 +24,7 @@ import { buildSceneCues, getWordTimings } from '../services/whisperxService';
 import type { CaptionWordDraft } from '../services/captionTranscriptionService';
 import { runFfmpegOp } from '../queue/ffmpegProcessor';
 
-const OUT = '/private/tmp/claude-501/-Users-andrewhuang/8c987e81-5615-4184-8b9d-16896aae4c16/scratchpad/e2e-illustrated-v3.mp4';
+const OUT = '/private/tmp/claude-501/-Users-andrewhuang/8c987e81-5615-4184-8b9d-16896aae4c16/scratchpad/e2e-illustrated-v4.mp4';
 const TOPIC = 'How the Wright brothers achieved the first powered airplane flight in 1903';
 const STYLE_ID = 'flat-vector';   // illustrated-capable
 const VOICE = 'Kore';
@@ -89,8 +95,23 @@ async function main() {
   const anchorUrl = await getGenerationPresignedUrl(anchorKey);
 
   console.log('[1] script…');
-  const script = await expandExplainerScript({ topic: TOPIC, sceneCount, styleLabel: style.label, scriptTemplate: def.script_template });
+  const script = await expandExplainerScript({
+    topic: TOPIC, sceneCount, styleLabel: style.label, scriptTemplate: def.script_template,
+    visualMethod: 'illustrated',
+    // Pre-atempo spoken-duration budget: writes enough narration that, AFTER EXPLAINER_NARRATION_TEMPO
+    // compresses it, the final video lands near tier.seconds instead of v3's 77s-for-30s overshoot.
+    targetTotalSeconds: tier.seconds * EXPLAINER_NARRATION_TEMPO,
+  });
   console.log(`   ${script.scenes.length} scenes`);
+
+  // Kicked off immediately (only needs script.music_mood) and awaited at compose time, so Lyria
+  // overlaps the scene pool below instead of sitting on the critical path after it (2026-07-23
+  // speed pass). .catch attaches synchronously so a rejection before the later await never surfaces
+  // as an unhandled promise rejection.
+  console.log('[1b] Lyria music (started concurrently)…');
+  const musicPromise = generateMusicBed(script.music_mood || 'ambient', def.music_model, genId)
+    .then((result) => result?.r2Key ?? null)
+    .catch((e: unknown) => { console.warn('   music skipped:', (e as Error).message); return null; });
 
   const motionAllocation = allocateMotionBudget(script.scenes, tier.edit_budget);
   const grantedCount = motionAllocation.filter((a) => a.resolvedNano).length;
@@ -99,7 +120,7 @@ async function main() {
     .reduce((sum, a) => sum + (script.scenes[a.sceneIndex]!.motion?.edit_steps.length ?? 0), 0);
   console.log(`   motion allocation: ${grantedCount}/${script.scenes.length} scenes granted nano, ${nanoEditsGranted}/${tier.edit_budget} edits used`);
 
-  const SCENE_CONCURRENCY = 5;
+  const SCENE_CONCURRENCY = 8; // v3 saw zero 429s at 5 (2026-07-23 speed pass)
   // Preallocated + written BY INDEX inside the pool (never push) so ordering survives concurrent
   // completion — narration concat, WhisperX offsets, and compose clips all depend on stems[i]/
   // clipKeys[i] lining up with script.scenes[i].
@@ -108,7 +129,10 @@ async function main() {
   const stage = resolveVisualStage('illustrated'); // <-- the wired worker call
   await runPool(script.scenes.length, SCENE_CONCURRENCY, async (i) => {
     const sc = script.scenes[i]!;
-    const stem = await generateNarrationForScene(sc.narration_line, VOICE, def.tts_model, genId, i);
+    const stem = await generateNarrationForScene(
+      sc.narration_line, VOICE, def.tts_model, genId, i,
+      EXPLAINER_VOICE_STYLE_PROMPT, EXPLAINER_NARRATION_TEMPO, resolveExplainerVoice(VOICE),
+    );
     stems[i] = stem;
     const allocation = motionAllocation[i];
     const { clipR2Key } = await stage.generateSceneClip({
@@ -141,9 +165,8 @@ async function main() {
   const sn = script.scenes.map((s) => s.narration_line);
   const cues = buildSceneCues(sn, localize(sn, words, off), off);
 
-  console.log('[4] Lyria music…');
-  let musicKey: string | null = null;
-  try { musicKey = (await generateMusicBed(script.music_mood || 'ambient', def.music_model, genId))?.r2Key ?? null; } catch (e) { console.warn('   music skipped:', (e as Error).message); }
+  console.log('[4] Lyria music (awaiting)…');
+  const musicKey = await musicPromise;
 
   console.log('[5] ffmpeg explainer_compose…');
   const { r2Key } = await runFfmpegOp({
@@ -162,5 +185,6 @@ async function main() {
   const wallClockSeconds = (Date.now() - wallClockStart) / 1000;
   console.log(`\n✅ DONE -> ${OUT}`);
   console.log(`   total wall-clock: ${wallClockSeconds.toFixed(1)}s (${(wallClockSeconds / 60).toFixed(1)} min), scene concurrency=${SCENE_CONCURRENCY}`);
+  console.log(`   FINAL VIDEO DURATION: ${cum.toFixed(1)}s across ${script.scenes.length} scenes (tier target: ${tier.seconds}s)`);
 }
 main().catch((e) => { console.error('\n❌ FAILED:', e); process.exit(1); });

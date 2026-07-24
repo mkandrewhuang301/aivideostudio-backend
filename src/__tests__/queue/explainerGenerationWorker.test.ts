@@ -24,6 +24,14 @@ jest.mock('../../services/sourceGroundingService', () => ({
 
 jest.mock('../../services/geminiTtsService', () => ({
   generateNarrationForScene: jest.fn(),
+  EXPLAINER_VOICE_STYLE_PROMPT: 'Speak in a voice like an explainer, explaining a concept.',
+  EXPLAINER_NARRATION_TEMPO: 1.15,
+  resolveExplainerVoice: jest.fn((voiceId: string) => ({
+    mode: 'custom_voice',
+    speaker: voiceId === 'Kore' ? 'Serena' : voiceId,
+    styleInstruction: 'Speak in a voice like an explainer, explaining a concept.',
+    language: 'English',
+  })),
 }));
 
 jest.mock('../../services/omniService', () => ({

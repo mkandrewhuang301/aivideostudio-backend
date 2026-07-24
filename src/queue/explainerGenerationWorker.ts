@@ -5,7 +5,13 @@ import { Job, Worker } from 'bullmq';
 import { FORMATS_BY_ID, type FormatAspectRatio } from '../config/formats';
 import { getGenerationPresignedUrl, uploadBufferToR2 } from '../services/archivalService';
 import { refundCredits } from '../services/creditService';
-import { generateNarrationForScene, type NarrationStem } from '../services/geminiTtsService';
+import {
+  EXPLAINER_NARRATION_TEMPO,
+  EXPLAINER_VOICE_STYLE_PROMPT,
+  generateNarrationForScene,
+  resolveExplainerVoice,
+  type NarrationStem,
+} from '../services/geminiTtsService';
 import {
   classifyFailureReason,
   markFailed,
@@ -106,7 +112,23 @@ export async function processExplainerGeneration(data: ExplainerGenerationJob): 
       styleLabel: style.label,
       scriptTemplate: def.script_template,
       groundingText,
+      visualMethod: data.visualMethod,
+      // Pre-atempo spoken-duration budget: the script should write enough narration that, AFTER
+      // the EXPLAINER_NARRATION_TEMPO speed-up below, the final video lands near data.durationSeconds
+      // instead of v3's 77s-for-a-30s-tier overshoot.
+      targetTotalSeconds: data.durationSeconds * EXPLAINER_NARRATION_TEMPO,
     });
+
+    // Kicked off immediately (only needs script.music_mood) and awaited at compose time, so Lyria
+    // generation overlaps the per-scene narration/visual loop below instead of sitting on the
+    // critical path after it (2026-07-23 speed pass). The .catch here is deliberate: it attaches a
+    // handler synchronously so a rejection before the later await can never surface as an unhandled
+    // promise rejection; the resolved { error } is turned back into a throw at the await site so
+    // failure handling (refund, classifyFailureReason) is unchanged.
+    const resolvedMood = data.music === 'auto' ? script.music_mood : data.music;
+    const musicPromise = generateMusicBed(resolvedMood, def.music_model, data.generationId)
+      .then((result) => ({ ok: true as const, result }))
+      .catch((error: unknown) => ({ ok: false as const, error }));
 
     // Nano-motion budget allocation (illustrated tier only; harmless no-op for animated since
     // that stage never reads motion/resolvedNano). Looked up by durationSeconds rather than
@@ -127,6 +149,9 @@ export async function processExplainerGeneration(data: ExplainerGenerationJob): 
         def.tts_model,
         data.generationId,
         sceneIndex,
+        EXPLAINER_VOICE_STYLE_PROMPT,
+        EXPLAINER_NARRATION_TEMPO,
+        resolveExplainerVoice(data.voiceId),
       );
       stems.push(stem);
 
@@ -179,9 +204,14 @@ export async function processExplainerGeneration(data: ExplainerGenerationJob): 
       sceneStartOffsets,
     );
 
-    const resolvedMood = data.music === 'auto' ? script.music_mood : data.music;
     await stampStage({ stage_label: 'Scoring…' });
-    const music = await generateMusicBed(resolvedMood, def.music_model, data.generationId);
+    // Lyria was kicked off right after the script resolved (2026-07-23 speed pass) and has been
+    // running concurrently with the scene loop/WhisperX above; this is just picking up the result.
+    // A caught rejection surfaces here as a real throw so failure handling (refund,
+    // classifyFailureReason) behaves exactly as it did when this call was inline.
+    const musicOutcome = await musicPromise;
+    if (!musicOutcome.ok) throw musicOutcome.error;
+    const music = musicOutcome.result;
 
     await mergeGenerationParams(data.generationId, {
       format_id: data.formatId,
