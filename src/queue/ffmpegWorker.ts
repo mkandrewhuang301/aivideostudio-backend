@@ -116,10 +116,16 @@ export interface ComposeSpec {
 }
 
 export interface ExplainerClipSpec {
-  /** Omni-animated scene clip produced by the Explainer orchestrator. */
+  /** Omni-animated (or illustrated-motion) scene clip produced by the Explainer orchestrator. */
   r2Key: string;
   /** Real narration-stem duration for this scene; compose trims the clip to this exact value. */
   durationSeconds: number;
+  /**
+   * Transition INTO the next clip (nano-motion execution plan, 2026-07-23). 'cut' (default when
+   * omitted) is the original hard concat — byte-identical to pre-existing behavior. 'morph'
+   * crossfades this clip into the next via ffmpeg xfade instead. Meaningless on the last clip.
+   */
+  transition?: 'cut' | 'morph';
 }
 
 export interface ExplainerComposeSpec {

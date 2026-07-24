@@ -13,6 +13,7 @@ import {
   mergeGenerationParams,
 } from '../services/generationService';
 import { generateMusicBed } from '../services/lyriaService';
+import { allocateMotionBudget } from '../services/explainerMotionAllocator';
 import { expandExplainerScript } from '../services/openaiScriptService';
 import { resolveVisualStage } from '../services/explainerVisualStage';
 import { buildGroundingText } from '../services/sourceGroundingService';
@@ -107,6 +108,12 @@ export async function processExplainerGeneration(data: ExplainerGenerationJob): 
       groundingText,
     });
 
+    // Nano-motion budget allocation (illustrated tier only; harmless no-op for animated since
+    // that stage never reads motion/resolvedNano). Looked up by durationSeconds rather than
+    // threaded as its own job field — the tier row is the single source of truth for edit_budget.
+    const tier = def.duration_tiers.find((candidate) => candidate.seconds === data.durationSeconds);
+    const motionAllocation = allocateMotionBudget(script.scenes, tier?.edit_budget ?? 0);
+
     const anchorUrl = await getGenerationPresignedUrl(style.anchor_r2_key);
     const stems: NarrationStem[] = [];
     const clipKeys: string[] = [];
@@ -140,6 +147,8 @@ export async function processExplainerGeneration(data: ExplainerGenerationJob): 
         omniModel: def.omni_model,
         narrationDurationSeconds: stem.durationSeconds,
         aspectRatio,
+        motion: scene.motion,
+        resolvedNano: motionAllocation[sceneIndex]?.resolvedNano ?? false,
       });
       clipKeys.push(clipR2Key);
     }
@@ -204,9 +213,10 @@ export async function processExplainerGeneration(data: ExplainerGenerationJob): 
       explainerCompose: {
         ...canvas,
         fps: 25,
-        clips: script.scenes.map((_scene, index) => ({
+        clips: script.scenes.map((scene, index) => ({
           r2Key: clipKeys[index]!,
           durationSeconds: stems[index]!.durationSeconds,
+          transition: scene.transition_out ?? 'cut',
         })),
         narrationR2Key: narrationKey,
         musicR2Key: music?.r2Key ?? null,

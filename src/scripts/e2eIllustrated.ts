@@ -11,13 +11,14 @@ import { archiveToR2, getGenerationPresignedUrl, uploadBufferToR2 } from '../ser
 import { generateNarrationForScene, type NarrationStem } from '../services/geminiTtsService';
 import { expandExplainerScript } from '../services/openaiScriptService';
 import { resolveVisualStage } from '../services/explainerVisualStage';
+import { allocateMotionBudget } from '../services/explainerMotionAllocator';
 import { generateMusicBed } from '../services/lyriaService';
 import { concatWavBuffers } from '../services/wavUtil';
 import { buildSceneCues, getWordTimings } from '../services/whisperxService';
 import type { CaptionWordDraft } from '../services/captionTranscriptionService';
 import { runFfmpegOp } from '../queue/ffmpegProcessor';
 
-const OUT = '/private/tmp/claude-501/-Users-andrewhuang/dcdd9acc-0469-415c-a803-2fbeca2ca958/scratchpad/e2e-illustrated.mp4';
+const OUT = '/private/tmp/claude-501/-Users-andrewhuang/8c987e81-5615-4184-8b9d-16896aae4c16/scratchpad/e2e-illustrated-v2.mp4';
 const TOPIC = 'How the Wright brothers achieved the first powered airplane flight in 1903';
 const STYLE_ID = 'flat-vector';   // illustrated-capable
 const VOICE = 'Kore';
@@ -69,6 +70,13 @@ async function main() {
   const script = await expandExplainerScript({ topic: TOPIC, sceneCount, styleLabel: style.label, scriptTemplate: def.script_template });
   console.log(`   ${script.scenes.length} scenes`);
 
+  const motionAllocation = allocateMotionBudget(script.scenes, tier.edit_budget);
+  const grantedCount = motionAllocation.filter((a) => a.resolvedNano).length;
+  const nanoEditsGranted = motionAllocation
+    .filter((a) => a.resolvedNano)
+    .reduce((sum, a) => sum + (script.scenes[a.sceneIndex]!.motion?.edit_steps.length ?? 0), 0);
+  console.log(`   motion allocation: ${grantedCount}/${script.scenes.length} scenes granted nano, ${nanoEditsGranted}/${tier.edit_budget} edits used`);
+
   const stems: NarrationStem[] = [];
   const clipKeys: string[] = [];
   const stage = resolveVisualStage('illustrated'); // <-- the wired worker call
@@ -76,14 +84,19 @@ async function main() {
     const sc = script.scenes[i]!;
     const stem = await generateNarrationForScene(sc.narration_line, VOICE, def.tts_model, genId, i);
     stems.push(stem);
+    const allocation = motionAllocation[i];
     const { clipR2Key } = await stage.generateSceneClip({
       generationId: genId, sceneIndex: i,
       visualPrompt: sc.visual_prompt, motionPrompt: sc.motion_prompt,
       styleAnchorUrl: anchorUrl, imageModel: def.image_model, omniModel: def.omni_model,
       narrationDurationSeconds: stem.durationSeconds, aspectRatio: ASPECT,
+      motion: sc.motion, resolvedNano: allocation?.resolvedNano ?? false,
     });
     clipKeys.push(clipR2Key);
-    console.log(`   scene ${i}: ${stem.durationSeconds.toFixed(1)}s -> ${clipR2Key.split('/').pop()}`);
+    const motionLabel = sc.motion
+      ? `${sc.motion.type}${sc.motion.edit_steps.length ? ` (${sc.motion.edit_steps.length} steps, nano=${allocation?.resolvedNano ?? false})` : ''} p${sc.motion.priority}`
+      : 'ken_burns (no motion plan)';
+    console.log(`   scene ${i}: ${stem.durationSeconds.toFixed(1)}s [${motionLabel}] transition_out=${sc.transition_out ?? 'cut'} -> ${clipR2Key.split('/').pop()}`);
   }
 
   console.log('[2] narration concat…');
@@ -109,7 +122,7 @@ async function main() {
     inputR2Keys: clipKeys, mediaType: 'video',
     explainerCompose: {
       width: 1080, height: 1920, fps: 25,
-      clips: script.scenes.map((_s, i) => ({ r2Key: clipKeys[i]!, durationSeconds: stems[i]!.durationSeconds })),
+      clips: script.scenes.map((s, i) => ({ r2Key: clipKeys[i]!, durationSeconds: stems[i]!.durationSeconds, transition: s.transition_out ?? 'cut' })),
       narrationR2Key: narrationKey, musicR2Key: musicKey, musicVolume: 0.1,
       captionCues: cues,
       captionStyle: { fontSize: def.caption_style.fontSize, color: def.caption_style.textColor, highlightColor: def.caption_style.highlightColor, position: def.caption_style.position },

@@ -260,8 +260,8 @@ describe('processExplainerGeneration', () => {
       ],
       explainerCompose: expect.objectContaining({
         clips: [
-          { r2Key: 'generations/gen-explainer-1.scene0.mp4', durationSeconds: 1 },
-          { r2Key: 'generations/gen-explainer-1.scene1.mp4', durationSeconds: 2 },
+          { r2Key: 'generations/gen-explainer-1.scene0.mp4', durationSeconds: 1, transition: 'cut' },
+          { r2Key: 'generations/gen-explainer-1.scene1.mp4', durationSeconds: 2, transition: 'cut' },
         ],
         narrationR2Key: 'generations/gen-explainer-1.narration.wav',
         musicR2Key: 'generations/gen-explainer-1.music.wav',

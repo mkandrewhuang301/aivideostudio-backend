@@ -207,9 +207,24 @@ export interface BuildExplainerComposeArgsInput {
   outPath: string;
 }
 
+// Morph transitions (nano-motion execution plan, 2026-07-23): a true xfade would overlap adjacent
+// clips and shorten the total video below the narration+music timeline (drift). Per the plan's
+// explicit "sync > fancy" guidance, morph is instead a fade-out/fade-in DIP that costs zero
+// timeline time — narration and music stay untouched, only the two clips' own video streams gain
+// a brief fade to black at the cut, which reads far softer than a hard cut without any offset math.
+const MORPH_FADE_SECONDS = 0.3;
+
+/** Clamp the fade so it never exceeds a clip too short to hold it — never goes negative/overlaps. */
+function morphFadeDurationFor(clipDurationSeconds: number): number {
+  return Math.min(MORPH_FADE_SECONDS, Math.max(0.05, clipDurationSeconds / 4));
+}
+
 /**
- * Pure argv builder for Explainer assembly. Scene clips are already animated by Omni; each input
- * is trimmed to its measured narration duration, and only its video stream enters the graph.
+ * Pure argv builder for Explainer assembly. Scene clips are already animated/motion-rendered;
+ * each input is trimmed to its measured narration duration, and only its video stream enters the
+ * graph. Guard: when no clip declares `transition: 'morph'`, this produces the EXACT same argv as
+ * before the nano-motion system existed — 'cut' (including when `transition` is omitted) never
+ * changes the filter graph.
  */
 export function buildExplainerComposeArgs(input: BuildExplainerComposeArgsInput): string[] {
   const { spec, clipPaths, narrationPath, musicPath, captionAssPath, fontsDir, outPath } = input;
@@ -218,8 +233,22 @@ export function buildExplainerComposeArgs(input: BuildExplainerComposeArgsInput)
 
   spec.clips.forEach((clip, i) => {
     args.push('-t', String(clip.durationSeconds), '-i', clipPaths[i]);
+
+    // fadeOut: THIS clip transitions into the next as 'morph' -> fade its own tail to black.
+    const fadeOutDur = morphFadeDurationFor(clip.durationSeconds);
+    const fadeOut = clip.transition === 'morph' && i < spec.clips.length - 1
+      ? `,fade=t=out:st=${Math.max(0, clip.durationSeconds - fadeOutDur).toFixed(6)}:d=${fadeOutDur.toFixed(6)}`
+      : '';
+    // fadeIn: the PRECEDING clip transitioned into this one as 'morph' -> fade this clip's own
+    // head in from black.
+    const previousClip = i > 0 ? spec.clips[i - 1] : undefined;
+    const fadeInDur = morphFadeDurationFor(clip.durationSeconds);
+    const fadeIn = previousClip?.transition === 'morph'
+      ? `,fade=t=in:st=0:d=${fadeInDur.toFixed(6)}`
+      : '';
+
     filterParts.push(
-      `[${i}:v]scale=${spec.width}:${spec.height}:force_original_aspect_ratio=increase,crop=${spec.width}:${spec.height},setsar=1[v${i}]`,
+      `[${i}:v]scale=${spec.width}:${spec.height}:force_original_aspect_ratio=increase,crop=${spec.width}:${spec.height},setsar=1${fadeIn}${fadeOut}[v${i}]`,
     );
   });
 

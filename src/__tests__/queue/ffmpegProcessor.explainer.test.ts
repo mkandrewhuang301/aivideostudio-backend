@@ -104,7 +104,7 @@ describe('buildExplainerComposeArgs', () => {
     const musicInput = withMusicArgs.indexOf('/tmp/music.wav');
     expect(withMusicArgs.slice(musicInput - 3, musicInput + 1)).toEqual(['-stream_loop', '-1', '-i', '/tmp/music.wav']);
     expect(withMusicGraph).toContain('[3:a]volume=0.18[bed]');
-    expect(withMusicGraph).toContain('[2:a][bed]amix=inputs=2:duration=first:dropout_transition=0[aout]');
+    expect(withMusicGraph).toContain('[2:a][bed]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]');
     expect(mapTargetsOf(withMusicArgs)).toEqual(['[vout]', '[aout]']);
   });
 
@@ -129,6 +129,65 @@ describe('buildExplainerComposeArgs', () => {
     const graph = filterComplexOf(buildArgs(baseSpec(), { captionAssPath: '/tmp/caller-wrote-this.ass' }));
     expect(graph.match(/caller-wrote-this\.ass/g)).toHaveLength(1);
     expect(graph).not.toContain('Dialogue:');
+  });
+
+  it('adds no fade filters when every clip is cut (default) — byte-identical to pre-morph behavior', () => {
+    const cutSpec = baseSpec({
+      clips: [
+        { r2Key: 'generations/g1.scene0.mp4', durationSeconds: 4.125, transition: 'cut' },
+        { r2Key: 'generations/g1.scene1.mp4', durationSeconds: 6.75 },
+      ],
+    });
+    const graph = filterComplexOf(buildArgs(cutSpec));
+    expect(graph).not.toContain('fade=');
+    expect(graph).toContain('[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1[v0]');
+    expect(graph).toContain('[1:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1[v1]');
+  });
+
+  it('morph fades the tail of the morph clip out and the head of the next clip in, with no duration change', () => {
+    const morphSpec = baseSpec({
+      clips: [
+        { r2Key: 'generations/g1.scene0.mp4', durationSeconds: 4, transition: 'morph' },
+        { r2Key: 'generations/g1.scene1.mp4', durationSeconds: 6 },
+      ],
+    });
+    const args = buildArgs(morphSpec);
+    const graph = filterComplexOf(args);
+
+    // clip0 (4s) fades OUT over its last 0.3s -> starts at 3.7
+    expect(graph).toContain('[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fade=t=out:st=3.700000:d=0.300000[v0]');
+    // clip1 fades IN from black over its first 0.3s
+    expect(graph).toContain('[1:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fade=t=in:st=0:d=0.300000[v1]');
+
+    // Input trims (and therefore total timeline / narration sync) are untouched by morph.
+    const firstInput = args.indexOf('/tmp/clip0.mp4');
+    expect(args.slice(firstInput - 3, firstInput + 1)).toEqual(['-t', '4', '-i', '/tmp/clip0.mp4']);
+    // Still exactly one concat over the (now fade-touched) video labels — no xfade/offset math.
+    expect(graph).toContain('[v0][v1]concat=n=2:v=1:a=0[vconcat]');
+    expect(graph).not.toContain('xfade');
+  });
+
+  it('a morph transition on the LAST clip is a no-op (nothing to transition into)', () => {
+    const spec = baseSpec({
+      clips: [
+        { r2Key: 'generations/g1.scene0.mp4', durationSeconds: 4 },
+        { r2Key: 'generations/g1.scene1.mp4', durationSeconds: 6, transition: 'morph' },
+      ],
+    });
+    const graph = filterComplexOf(buildArgs(spec));
+    expect(graph).not.toContain('fade=');
+  });
+
+  it('clamps the morph fade duration for a clip too short to hold the full 0.3s', () => {
+    const spec = baseSpec({
+      clips: [
+        { r2Key: 'generations/g1.scene0.mp4', durationSeconds: 0.6, transition: 'morph' },
+        { r2Key: 'generations/g1.scene1.mp4', durationSeconds: 6 },
+      ],
+    });
+    const graph = filterComplexOf(buildArgs(spec));
+    // clip0 is 0.6s; a 0.3s fade is clamped to duration/4 = 0.15s, starting at 0.45s.
+    expect(graph).toContain('fade=t=out:st=0.450000:d=0.150000');
   });
 
   it('returns a fixed argv array with the whole filter graph in one element and no shell command string', () => {
