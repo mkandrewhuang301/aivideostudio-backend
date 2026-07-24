@@ -147,7 +147,7 @@ describe('expandExplainerScript', () => {
     mockFetch.mockResolvedValue(responseWith(JSON.stringify({
       scenes: [validScene({
         motion: {
-          type: 'progressive_reveal',
+          type: 'before_after',
           priority: 99,
           edit_steps: [
             'a narrator explaining the first label appears, keep everything else identical',
@@ -167,6 +167,19 @@ describe('expandExplainerScript', () => {
     expect(motion.edit_steps).toHaveLength(3);
     expect(motion.edit_steps[0]).not.toContain('narrator');
     expect(motion.edit_steps[0]).toContain('the subject');
+  });
+
+  it("retires progressive_reveal (2026-07-23): remaps to ken_burns with edit_steps cleared, even though it's still a recognized type", async () => {
+    mockFetch.mockResolvedValue(responseWith(JSON.stringify({
+      scenes: [validScene({
+        motion: { type: 'progressive_reveal', priority: 5, edit_steps: ['label A appears', 'label B appears'] },
+      })],
+      music_mood: 'ambient',
+    })));
+
+    const result = await expandExplainerScript(baseArgs);
+
+    expect(result.scenes[0]!.motion).toEqual({ type: 'ken_burns', priority: 5, edit_steps: [] });
   });
 
   it('rejects an unknown motion.type but keeps other valid fields (field-level fallback)', async () => {

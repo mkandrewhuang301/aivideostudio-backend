@@ -63,6 +63,26 @@ export function motionClassOf(type: SceneMotionType): SceneMotionClass {
   return SCENE_MOTION_CLASS[type];
 }
 
+// `progressive_reveal` is RETIRED from v1 (2026-07-23): a static base still already contains any
+// labels/parts described in visual_prompt, so the "reveal" produced no visible change — it always
+// rendered as if static. The script LLM's system_prompt no longer offers it as an option (see the
+// explainer format's script_template below), but the type stays in the union for old stored
+// data/edge cases. `sanitizeMotion` is the single safety net: it force-remaps any progressive_reveal
+// that still shows up (old rows, a hand-built scene, a future regression) to ken_burns — called by
+// the allocator's cost accounting (via nanoCostOf), the illustrated stage's resolveMotionPlan, and
+// the script parser (openaiScriptService.parseSceneMotion), so it can never be chosen or rendered.
+export function sanitizeMotion(motion: SceneMotion): SceneMotion {
+  if (motion.type !== 'progressive_reveal') return motion;
+  return { type: 'ken_burns', priority: motion.priority, edit_steps: [] };
+}
+
+/** Nano edits this scene would spend if granted in full (0 for free motions or no motion). */
+export function nanoCostOf(scene: ExplainerScene): number {
+  if (!scene.motion) return 0;
+  const motion = sanitizeMotion(scene.motion);
+  return isNanoMotionType(motion.type) ? motion.edit_steps.length : 0;
+}
+
 export interface SceneMotion {
   type: SceneMotionType;
   /** 1-5, allocator sorts DESC; higher = keep nano when budget is tight. */
@@ -86,11 +106,6 @@ export interface ExplainerScene {
   motion?: SceneMotion;
   /** Transition INTO the next scene's clip in explainer_compose. Defaults to 'cut'. */
   transition_out?: 'cut' | 'morph';
-}
-
-/** Nano edits this scene would spend if granted in full (0 for free motions or no motion). */
-export function nanoCostOf(scene: ExplainerScene): number {
-  return scene.motion && isNanoMotionType(scene.motion.type) ? scene.motion.edit_steps.length : 0;
 }
 
 export interface ExplainerScript {
@@ -232,7 +247,7 @@ export const SERVER_FORMATS: AnyFormatDef[] = [
       system_prompt: `You write concise, factual scripts for short animated explainer videos.
 
 Return valid JSON only in this exact top-level shape:
-{ "scenes": [{ "visual_prompt": "...", "motion_prompt": "...", "narration_line": "...", "text_zone": "lower_third|upper_third|center", "segment_type": "dialogue", "motion": { "type": "ken_burns|wiggle|reaction|before_after|progressive_reveal|ambient_life", "priority": 1, "edit_steps": ["..."] }, "transition_out": "cut|morph" }], "music_mood": "uplifting|ambient|dramatic|playful" }
+{ "scenes": [{ "visual_prompt": "...", "motion_prompt": "...", "narration_line": "...", "text_zone": "lower_third|upper_third|center", "segment_type": "dialogue", "motion": { "type": "ken_burns|wiggle|reaction|before_after|ambient_life", "priority": 1, "edit_steps": ["..."] }, "transition_out": "cut|morph" }], "music_mood": "uplifting|ambient|dramatic|playful" }
 
 Return exactly the requested number of scenes supplied in the user message. Every scene must use segment_type "dialogue" and include all seven scene fields (visual_prompt, motion_prompt, narration_line, text_zone, segment_type, motion, transition_out).
 
@@ -249,7 +264,6 @@ MOTION (every scene must include a "motion" object):
 8. Choose motion.type by what the scene's content actually does:
    - "reaction" — a character or subject changes pose/expression within the beat (hands go up, a face turns angry, a figure points). 1 edit_step.
    - "before_after" — a state visibly evolves over the beat (a seed becomes a tree, a house catches fire, an empty room fills up). 2 edit_steps, chained (first edit, then a second edit building on the first).
-   - "progressive_reveal" — a diagram or idea should build up piece by piece (labels, arrows, or parts appear one at a time). 1-3 edit_steps, each additive.
    - "ambient_life" — an atmospheric or landscape scene that would otherwise sit dead needs a subtle living touch (drifting smoke, shifting light, floating particles). 1 edit_step.
    - "ken_burns" — a calm scene that only needs a gentle camera push/pan, no content change. edit_steps: [].
    - "wiggle" — a playful character beat with no real state change, just a bit of life. edit_steps: [].

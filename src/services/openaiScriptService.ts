@@ -19,6 +19,7 @@ import type {
   SceneMotion,
   SceneMotionType,
 } from '../config/formats';
+import { sanitizeMotion } from '../config/formats';
 
 const OPENAI_CHAT_COMPLETIONS_URL = 'https://api.openai.com/v1/chat/completions';
 const SCRIPT_EXPANSION_MODEL = 'gpt-4o-mini';
@@ -224,7 +225,10 @@ function parseSceneMotion(value: unknown): SceneMotion {
     .map((step) => step.trim().replace(BANNED_NARRATOR_FIGURE, 'the subject'))
     .slice(0, MAX_EDIT_STEPS);
 
-  return { type, priority, edit_steps: editSteps };
+  // sanitizeMotion is the retired-progressive_reveal safety net (2026-07-23): the script LLM is no
+  // longer offered it, but this normalizes any that still shows up (old data, a malformed
+  // completion) to ken_burns so it can never be chosen or rendered.
+  return sanitizeMotion({ type, priority, edit_steps: editSteps });
 }
 
 function parseExplainerScene(

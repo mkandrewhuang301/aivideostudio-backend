@@ -22,7 +22,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { motionClassOf, type ExplainerVisualMethod, type FormatAspectRatio, type SceneMotion } from '../config/formats';
+import { motionClassOf, sanitizeMotion, type ExplainerVisualMethod, type FormatAspectRatio, type SceneMotion } from '../config/formats';
 import { getGenerationPresignedUrl, uploadBufferToR2 } from './archivalService';
 import { nanoEditStill } from './geminiImageService';
 import { animateScene } from './omniService';
@@ -317,11 +317,17 @@ export function buildMotionSequenceArgs(input: MotionSequenceArgsInput): string[
 // nano is a PIXEL-PRESERVATION primitive, not the only way to show a change. edit_budget therefore
 // never decides WHETHER a scene's transformation renders — only whether it gets the premium
 // pixel-locked nano version or a cheaper fallback. The fallback differs by SceneMotionClass:
-//   'content'    (before_after, progressive_reveal) -> independent gpt stills per step, assembled
-//                the SAME way as nano frames (hold/crossfade). The transformation still shows.
+//   'content'    (before_after) -> independent gpt stills per step, assembled the SAME way as nano
+//                frames (hold/crossfade). The transformation still shows.
 //   'semi'       (reaction)       -> wiggle (stays lively, just not a literal pose change).
 //   'decorative' (ambient_life)   -> ken_burns (the only class that ever goes static).
 //   'free'       (ken_burns, wiggle) -> unaffected either way.
+//
+// `progressive_reveal` is RETIRED from v1 (2026-07-23): a static base still already contains any
+// labels/parts described in visual_prompt, so the "reveal" never produced a visible change — it
+// always rendered as if static. resolveMotionPlan runs sanitizeMotion first as the stage-side
+// safety net (alongside the parser and the allocator's cost accounting), so any progressive_reveal
+// that still reaches this function (old data, a hand-built scene) is forced to ken_burns.
 
 export type MotionPlan =
   | { kind: 'ken_burns' }
@@ -339,16 +345,17 @@ export type MotionPlan =
  */
 export function resolveMotionPlan(motion: SceneMotion | undefined, resolvedNano: boolean): MotionPlan {
   if (!motion) return { kind: 'ken_burns' };
-  if (motion.type === 'wiggle') return { kind: 'wiggle' };
-  if (motion.type === 'ken_burns') return { kind: 'ken_burns' };
+  const safeMotion = sanitizeMotion(motion); // retired-progressive_reveal safety net
+  if (safeMotion.type === 'wiggle') return { kind: 'wiggle' };
+  if (safeMotion.type === 'ken_burns') return { kind: 'ken_burns' };
 
-  // A nano-eligible type (reaction/before_after/progressive_reveal/ambient_life).
+  // A nano-eligible type (reaction/before_after/ambient_life).
   if (resolvedNano) {
-    return { kind: 'nano', pattern: motion.type, editSteps: motion.edit_steps };
+    return { kind: 'nano', pattern: safeMotion.type, editSteps: safeMotion.edit_steps };
   }
-  const motionClass = motionClassOf(motion.type);
+  const motionClass = motionClassOf(safeMotion.type);
   if (motionClass === 'content') {
-    return { kind: 'gpt_stills', pattern: motion.type, editSteps: motion.edit_steps };
+    return { kind: 'gpt_stills', pattern: safeMotion.type, editSteps: safeMotion.edit_steps };
   }
   if (motionClass === 'semi') return { kind: 'wiggle' };
   return { kind: 'ken_burns' }; // 'decorative' (ambient_life unbudgeted)

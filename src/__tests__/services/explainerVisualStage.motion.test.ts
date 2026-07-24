@@ -31,7 +31,7 @@ describe('resolveMotionPlan (motion-class-aware fallback, 2026-07-23 design corr
   });
 
   it('any nano-eligible type takes the premium nano path when granted budget', () => {
-    for (const type of ['reaction', 'before_after', 'progressive_reveal', 'ambient_life'] as const) {
+    for (const type of ['reaction', 'before_after', 'ambient_life'] as const) {
       const m = motion({ type, edit_steps: ['step1'] });
       expect(resolveMotionPlan(m, true)).toEqual({ kind: 'nano', pattern: type, editSteps: ['step1'] });
     }
@@ -47,16 +47,17 @@ describe('resolveMotionPlan (motion-class-aware fallback, 2026-07-23 design corr
     expect(resolveMotionPlan(m, false)).toEqual({ kind: 'ken_burns' });
   });
 
-  it("'content' types (before_after, progressive_reveal) unbudgeted NEVER go static — fall back to gpt_stills, not ken_burns/wiggle", () => {
+  it("'content' (before_after) unbudgeted NEVER goes static — falls back to gpt_stills, not ken_burns/wiggle", () => {
     const beforeAfter = motion({ type: 'before_after', edit_steps: ['seed sprouts', 'sapling grows'] });
     expect(resolveMotionPlan(beforeAfter, false)).toEqual({
       kind: 'gpt_stills', pattern: 'before_after', editSteps: ['seed sprouts', 'sapling grows'],
     });
+  });
 
-    const reveal = motion({ type: 'progressive_reveal', edit_steps: ['label A appears', 'label B appears'] });
-    expect(resolveMotionPlan(reveal, false)).toEqual({
-      kind: 'gpt_stills', pattern: 'progressive_reveal', editSteps: ['label A appears', 'label B appears'],
-    });
+  it('retired progressive_reveal (2026-07-23) is force-remapped to ken_burns regardless of resolvedNano — never nano, never gpt_stills, never chosen/rendered', () => {
+    const m = motion({ type: 'progressive_reveal', priority: 5, edit_steps: ['label A appears', 'label B appears'] });
+    expect(resolveMotionPlan(m, false)).toEqual({ kind: 'ken_burns' });
+    expect(resolveMotionPlan(m, true)).toEqual({ kind: 'ken_burns' });
   });
 });
 

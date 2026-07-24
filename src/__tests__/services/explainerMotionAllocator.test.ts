@@ -48,9 +48,9 @@ describe('allocateMotionBudget', () => {
 
   it('downgrades the lowest-priority scenes first when over budget', () => {
     const scenes = [
-      nanoScene('reaction', 5, 1),          // sceneIndex 0, priority 5, cost 1
-      nanoScene('before_after', 2, 2),      // sceneIndex 1, priority 2, cost 2 (lowest priority)
-      nanoScene('progressive_reveal', 4, 2), // sceneIndex 2, priority 4, cost 2
+      nanoScene('reaction', 5, 1),      // sceneIndex 0, priority 5, cost 1
+      nanoScene('before_after', 2, 2),  // sceneIndex 1, priority 2, cost 2 (lowest priority)
+      nanoScene('ambient_life', 4, 2),  // sceneIndex 2, priority 4, cost 2
     ];
     // total cost = 5, budget = 3 -> only priority 5 (cost1) and priority 4 (cost2) fit = 3 exactly
     const result = allocateMotionBudget(scenes, 3);
@@ -74,9 +74,9 @@ describe('allocateMotionBudget', () => {
 
   it('is deterministic: ties break by lower cost then lower sceneIndex', () => {
     const scenes = [
-      nanoScene('progressive_reveal', 3, 2), // sceneIndex 0, priority 3, cost 2
-      nanoScene('reaction', 3, 1),           // sceneIndex 1, priority 3, cost 1 (same priority, lower cost)
-      nanoScene('ambient_life', 3, 1),       // sceneIndex 2, priority 3, cost 1 (same priority+cost, higher index)
+      nanoScene('before_after', 3, 2), // sceneIndex 0, priority 3, cost 2
+      nanoScene('reaction', 3, 1),     // sceneIndex 1, priority 3, cost 1 (same priority, lower cost)
+      nanoScene('ambient_life', 3, 1), // sceneIndex 2, priority 3, cost 1 (same priority+cost, higher index)
     ];
     // budget 2: order by cost ASC among same priority = sceneIndex1(cost1), sceneIndex2(cost1), sceneIndex0(cost2)
     // grant sceneIndex1 (remaining 1), grant sceneIndex2 (remaining 0), sceneIndex0 doesn't fit.
@@ -128,21 +128,38 @@ describe('allocateMotionBudget', () => {
     ]);
   });
 
-  it('mixes all four nano-eligible classes and still allocates purely by priority/cost, independent of class', () => {
+  it('mixes all three remaining nano-eligible classes (v1) and still allocates purely by priority/cost, independent of class', () => {
+    // progressive_reveal is retired from v1 — see the dedicated retirement test below.
     const scenes = [
-      nanoScene('before_after', 3, 2),       // content, cost 2
-      nanoScene('reaction', 3, 1),           // semi, cost 1
-      nanoScene('progressive_reveal', 3, 2), // content, cost 2
-      nanoScene('ambient_life', 3, 1),       // decorative, cost 1
+      nanoScene('before_after', 3, 2), // content, cost 2
+      nanoScene('reaction', 3, 1),     // semi, cost 1
+      nanoScene('ambient_life', 3, 1), // decorative, cost 1
     ];
-    // All same priority; cost ASC tiebreak orders: reaction(1), ambient_life(1), before_after(2), progressive_reveal(2).
-    // budget 2: grant reaction (remaining 1), grant ambient_life (remaining 0), the two cost-2 content scenes decline.
+    // All same priority; cost ASC tiebreak orders: reaction(1), ambient_life(1), before_after(2).
+    // budget 2: grant reaction (remaining 1), grant ambient_life (remaining 0), before_after declines.
     const result = allocateMotionBudget(scenes, 2);
     expect(result).toEqual([
       { sceneIndex: 0, resolvedNano: false },
       { sceneIndex: 1, resolvedNano: true },
-      { sceneIndex: 2, resolvedNano: false },
-      { sceneIndex: 3, resolvedNano: true },
+      { sceneIndex: 2, resolvedNano: true },
+    ]);
+  });
+
+  // 2026-07-23: progressive_reveal is retired from v1 (a static base still already contains any
+  // labels, so the "reveal" never showed). nanoCostOf runs it through sanitizeMotion, which forces
+  // it to ken_burns (cost 0) — this is the allocator-side leg of the same safety net that also
+  // lives in the parser (openaiScriptService) and the stage (resolveMotionPlan): a
+  // progressive_reveal scene is NEVER granted nano and NEVER consumes budget, however high its
+  // priority, and never crowds out a real nano-eligible scene.
+  it('retired progressive_reveal always costs 0 (sanitizeMotion) — never granted, never consumes budget regardless of priority', () => {
+    const scenes = [
+      nanoScene('progressive_reveal', 5, 3), // highest priority, would-be cost 3 if it still counted
+      nanoScene('reaction', 1, 1),           // lowest priority, cost 1
+    ];
+    const result = allocateMotionBudget(scenes, 1);
+    expect(result).toEqual([
+      { sceneIndex: 0, resolvedNano: false }, // never granted regardless of priority 5
+      { sceneIndex: 1, resolvedNano: true },  // the only real nano cost gets the whole budget
     ]);
   });
 });
