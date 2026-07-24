@@ -16,6 +16,8 @@ import type {
   FormatDef,
   FormatSegmentType,
   FormatTextZone,
+  SceneMotion,
+  SceneMotionType,
 } from '../config/formats';
 
 const OPENAI_CHAT_COMPLETIONS_URL = 'https://api.openai.com/v1/chat/completions';
@@ -26,6 +28,12 @@ const TEMPERATURE = 0.7;
 const EXPLAINER_MUSIC_MOODS = new Set(['uplifting', 'ambient', 'dramatic', 'playful']);
 const FORMAT_TEXT_ZONES = new Set<FormatTextZone>(['lower_third', 'upper_third', 'center']);
 const BANNED_NARRATOR_FIGURE = /(a |the )?(narrator|presenter|host|talking head|speaker)( figure| standing| talking| explaining)?/gi;
+const SCENE_MOTION_TYPES = new Set<SceneMotionType>([
+  'ken_burns', 'wiggle', 'reaction', 'before_after', 'progressive_reveal', 'ambient_life',
+]);
+const TRANSITION_OUTS = new Set(['cut', 'morph']);
+const DEFAULT_SCENE_MOTION: SceneMotion = { type: 'ken_burns', priority: 2, edit_steps: [] };
+const MAX_EDIT_STEPS = 3;
 
 /** Natural speaking pace. A 5s clip is ~12 words — the whole clip, not a paragraph. */
 const WORDS_PER_SECOND = 2.5;
@@ -180,6 +188,8 @@ function explainerFallback(args: ExpandExplainerScriptArgs): ExplainerScript {
       narration_line: args.topic,
       text_zone: 'lower_third',
       segment_type: 'dialogue',
+      motion: { ...DEFAULT_SCENE_MOTION },
+      transition_out: 'cut',
     }],
     music_mood: 'ambient',
   };
@@ -187,6 +197,34 @@ function explainerFallback(args: ExpandExplainerScriptArgs): ExplainerScript {
 
 function nonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0;
+}
+
+/**
+ * Parses+validates the `motion` object the script LLM is asked to emit per scene. Any malformed
+ * or missing shape falls back to the DEFAULT_SCENE_MOTION (ken_burns, priority 2, no nano edits) —
+ * a bad motion object must never fail the whole scene. edit_steps is clamped to MAX_EDIT_STEPS and
+ * sanitized through the same narrator-figure guard as visual_prompt.
+ */
+function parseSceneMotion(value: unknown): SceneMotion {
+  if (!value || typeof value !== 'object') return { ...DEFAULT_SCENE_MOTION };
+
+  const motion = value as Record<string, unknown>;
+  const type = nonEmptyString(motion.type) && SCENE_MOTION_TYPES.has(motion.type as SceneMotionType)
+    ? motion.type as SceneMotionType
+    : DEFAULT_SCENE_MOTION.type;
+
+  const rawPriority = typeof motion.priority === 'number' ? motion.priority : Number(motion.priority);
+  const priority = Number.isFinite(rawPriority)
+    ? Math.min(5, Math.max(1, Math.round(rawPriority)))
+    : DEFAULT_SCENE_MOTION.priority;
+
+  const rawSteps = Array.isArray(motion.edit_steps) ? motion.edit_steps : [];
+  const editSteps = rawSteps
+    .filter(nonEmptyString)
+    .map((step) => step.trim().replace(BANNED_NARRATOR_FIGURE, 'the subject'))
+    .slice(0, MAX_EDIT_STEPS);
+
+  return { type, priority, edit_steps: editSteps };
 }
 
 function parseExplainerScene(
@@ -211,6 +249,9 @@ function parseExplainerScene(
   const textZone = FORMAT_TEXT_ZONES.has(scene.text_zone as FormatTextZone)
     ? scene.text_zone as FormatTextZone
     : 'lower_third';
+  const transitionOut = nonEmptyString(scene.transition_out) && TRANSITION_OUTS.has(scene.transition_out)
+    ? scene.transition_out as 'cut' | 'morph'
+    : 'cut';
 
   return {
     visual_prompt: scene.visual_prompt.trim().replace(BANNED_NARRATOR_FIGURE, 'the subject'),
@@ -218,6 +259,8 @@ function parseExplainerScene(
     narration_line: scene.narration_line.trim(),
     text_zone: textZone,
     segment_type: segmentType,
+    motion: parseSceneMotion(scene.motion),
+    transition_out: transitionOut,
   };
 }
 

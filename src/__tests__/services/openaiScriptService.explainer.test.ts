@@ -66,6 +66,8 @@ describe('expandExplainerScript', () => {
         narration_line: 'volcanoes',
         text_zone: 'lower_third',
         segment_type: 'dialogue',
+        motion: { type: 'ken_burns', priority: 2, edit_steps: [] },
+        transition_out: 'cut',
       }],
       music_mood: 'ambient',
     });
@@ -105,6 +107,77 @@ describe('expandExplainerScript', () => {
     expect(result.scenes[0]!.segment_type).toBe('dialogue');
     expect(result.scenes[0]!.text_zone).toBe('lower_third');
     expect(result.music_mood).toBe('ambient');
+  });
+
+  it('parses a valid motion object and transition_out as-is', async () => {
+    mockFetch.mockResolvedValue(responseWith(JSON.stringify({
+      scenes: [validScene({
+        motion: { type: 'before_after', priority: 4, edit_steps: ['a seed sprouts a tiny green shoot, keep everything else identical', 'the shoot grows into a sapling, keep everything else identical'] },
+        transition_out: 'morph',
+      })],
+      music_mood: 'ambient',
+    })));
+
+    const result = await expandExplainerScript(baseArgs);
+
+    expect(result.scenes[0]!.motion).toEqual({
+      type: 'before_after',
+      priority: 4,
+      edit_steps: [
+        'a seed sprouts a tiny green shoot, keep everything else identical',
+        'the shoot grows into a sapling, keep everything else identical',
+      ],
+    });
+    expect(result.scenes[0]!.transition_out).toBe('morph');
+  });
+
+  it('defaults motion and transition_out when missing or malformed', async () => {
+    mockFetch.mockResolvedValue(responseWith(JSON.stringify({
+      scenes: [validScene({ motion: undefined, transition_out: 'sideways' })],
+      music_mood: 'ambient',
+    })));
+
+    const result = await expandExplainerScript(baseArgs);
+
+    expect(result.scenes[0]!.motion).toEqual({ type: 'ken_burns', priority: 2, edit_steps: [] });
+    expect(result.scenes[0]!.transition_out).toBe('cut');
+  });
+
+  it('clamps edit_steps to 3, clamps priority to 1-5, and sanitizes narrator figures in edit_steps', async () => {
+    mockFetch.mockResolvedValue(responseWith(JSON.stringify({
+      scenes: [validScene({
+        motion: {
+          type: 'progressive_reveal',
+          priority: 99,
+          edit_steps: [
+            'a narrator explaining the first label appears, keep everything else identical',
+            'step 2, keep everything else identical',
+            'step 3, keep everything else identical',
+            'step 4 should be dropped, keep everything else identical',
+          ],
+        },
+      })],
+      music_mood: 'ambient',
+    })));
+
+    const result = await expandExplainerScript(baseArgs);
+    const motion = result.scenes[0]!.motion!;
+
+    expect(motion.priority).toBe(5);
+    expect(motion.edit_steps).toHaveLength(3);
+    expect(motion.edit_steps[0]).not.toContain('narrator');
+    expect(motion.edit_steps[0]).toContain('the subject');
+  });
+
+  it('rejects an unknown motion.type but keeps other valid fields (field-level fallback)', async () => {
+    mockFetch.mockResolvedValue(responseWith(JSON.stringify({
+      scenes: [validScene({ motion: { type: 'zoom-enhance', priority: 3, edit_steps: [] } })],
+      music_mood: 'ambient',
+    })));
+
+    const result = await expandExplainerScript(baseArgs);
+
+    expect(result.scenes[0]!.motion).toEqual({ type: 'ken_burns', priority: 3, edit_steps: [] });
   });
 
   it('includes factual grounding only when grounding text is present', async () => {
