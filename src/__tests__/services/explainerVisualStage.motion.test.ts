@@ -1,0 +1,190 @@
+// Pure ffmpeg-arg builder tests for the nano-motion system (2026-07-23 execution plan, Stage 8).
+// Mirrors the existing buildKenBurnsArgs/buildExplainerComposeArgs test style: assert on argv
+// shape, filter-graph contents, and computed durations — never execute ffmpeg or hit any network.
+
+jest.mock('../../config', () => ({
+  config: {
+    replicateApiToken: 'mock-token',
+    geminiApiKey: 'mock-gemini-key',
+    nanoImageModel: 'gemini-3.1-flash-image-preview',
+  },
+}));
+
+import { buildWiggleArgs, buildMotionSequenceArgs } from '../../services/explainerVisualStage';
+
+describe('buildWiggleArgs', () => {
+  it('loops the single still for exactly durationSeconds with a sine rotate filter', () => {
+    const args = buildWiggleArgs({
+      stillPath: '/tmp/still.png',
+      durationSeconds: 5.5,
+      aspectRatio: '9:16',
+      outPath: '/tmp/out.mp4',
+    });
+
+    expect(args).toEqual(expect.arrayContaining(['-loop', '1', '-i', '/tmp/still.png']));
+    const tIndex = args.indexOf('-t');
+    expect(args[tIndex + 1]).toBe('5.5');
+
+    const vfIndex = args.indexOf('-vf');
+    const filter = args[vfIndex + 1]!;
+    expect(filter).toContain('rotate=');
+    expect(filter).toMatch(/sin\(2\*PI\*t\*/);
+    expect(filter).toContain('setsar=1');
+  });
+
+  it('overscans before rotating so no canvas edge is exposed, then crops back to the target canvas', () => {
+    const args = buildWiggleArgs({
+      stillPath: '/tmp/still.png',
+      durationSeconds: 4,
+      aspectRatio: '16:9',
+      outPath: '/tmp/out.mp4',
+    });
+    const filter = args[args.indexOf('-vf') + 1]!;
+
+    // 16:9 canvas is 1920x1080 — the rotate stage must operate on an upscaled canvas larger than
+    // that, and the final crop must bring it back to exactly 1920:1080.
+    expect(filter).toMatch(/scale=\d+:\d+:force_original_aspect_ratio=increase/);
+    expect(filter.match(/crop=1920:1080/g)).toHaveLength(1);
+    const scaleMatch = filter.match(/scale=(\d+):(\d+)/);
+    expect(Number(scaleMatch![1])).toBeGreaterThan(1920);
+    expect(Number(scaleMatch![2])).toBeGreaterThan(1080);
+  });
+
+  it('produces a fixed argv array ending in the expected output options, no shell string', () => {
+    const args = buildWiggleArgs({
+      stillPath: '/tmp/still.png',
+      durationSeconds: 3,
+      aspectRatio: '9:16',
+      outPath: '/tmp/out.mp4',
+    });
+    expect(args.some((arg) => arg.startsWith('ffmpeg '))).toBe(false);
+    expect(args.slice(-5)).toEqual(['-c:v', 'libx264', '-pix_fmt', 'yuv420p', '/tmp/out.mp4']);
+  });
+});
+
+function inputDurationsOf(args: string[]): number[] {
+  const durations: number[] = [];
+  args.forEach((arg, i) => {
+    if (arg === '-t' && args[i + 2] === '-i') durations.push(Number(args[i + 1]));
+  });
+  return durations;
+}
+
+function filterComplexOf(args: string[]): string {
+  const index = args.indexOf('-filter_complex');
+  expect(index).toBeGreaterThan(-1);
+  return args[index + 1]!;
+}
+
+describe('buildMotionSequenceArgs', () => {
+  it('holds the single frame for the full duration when only one frame is given (no xfade)', () => {
+    const args = buildMotionSequenceArgs({
+      framePaths: ['/tmp/f0.png'],
+      pattern: 'reaction',
+      durationSeconds: 4,
+      aspectRatio: '9:16',
+      outPath: '/tmp/out.mp4',
+    });
+    expect(args).not.toContain('-filter_complex');
+    expect(args).toEqual(expect.arrayContaining(['-loop', '1', '-i', '/tmp/f0.png']));
+    expect(args[args.indexOf('-t') + 1]).toBe('4');
+  });
+
+  it('reaction (2 frames): one xfade, total duration equals durationSeconds', () => {
+    const args = buildMotionSequenceArgs({
+      framePaths: ['/tmp/f0.png', '/tmp/f1.png'],
+      pattern: 'reaction',
+      durationSeconds: 6,
+      aspectRatio: '9:16',
+      outPath: '/tmp/out.mp4',
+    });
+    const graph = filterComplexOf(args);
+    expect(graph.match(/xfade=/g)).toHaveLength(1);
+    expect(graph).toContain('duration=0.150000');
+
+    const [d0, d1] = inputDurationsOf(args);
+    // total = d0 + d1 - cd must equal the requested duration (xfade's documented output length).
+    expect(d0! + d1! - 0.15).toBeCloseTo(6, 5);
+  });
+
+  it('before_after (3 frames): two chained xfades with equal-ish segments and 0.2s crossfades', () => {
+    const args = buildMotionSequenceArgs({
+      framePaths: ['/tmp/f0.png', '/tmp/f1.png', '/tmp/f2.png'],
+      pattern: 'before_after',
+      durationSeconds: 9,
+      aspectRatio: '9:16',
+      outPath: '/tmp/out.mp4',
+    });
+    const graph = filterComplexOf(args);
+    expect(graph.match(/xfade=/g)).toHaveLength(2);
+    expect(graph.match(/duration=0.200000/g)).toHaveLength(2);
+
+    const durations = inputDurationsOf(args);
+    expect(durations).toHaveLength(3);
+    // total output = sum(segDur) - (k-1)*cd
+    const total = durations.reduce((a, b) => a + b, 0) - 2 * 0.2;
+    expect(total).toBeCloseTo(9, 5);
+    // roughly equal thirds
+    durations.forEach((d) => expect(d).toBeCloseTo(durations[0]!, 5));
+  });
+
+  it('progressive_reveal (up to 4 frames): N-1 xfades with 0.1s fades, exact total duration', () => {
+    const args = buildMotionSequenceArgs({
+      framePaths: ['/tmp/f0.png', '/tmp/f1.png', '/tmp/f2.png', '/tmp/f3.png'],
+      pattern: 'progressive_reveal',
+      durationSeconds: 8,
+      aspectRatio: '16:9',
+      outPath: '/tmp/out.mp4',
+    });
+    const graph = filterComplexOf(args);
+    expect(graph.match(/xfade=/g)).toHaveLength(3);
+    expect(graph.match(/duration=0.100000/g)).toHaveLength(3);
+
+    const durations = inputDurationsOf(args);
+    const total = durations.reduce((a, b) => a + b, 0) - 3 * 0.1;
+    expect(total).toBeCloseTo(8, 5);
+  });
+
+  it('ambient_life (2 frames): a single slow 0.5s crossfade', () => {
+    const args = buildMotionSequenceArgs({
+      framePaths: ['/tmp/f0.png', '/tmp/f1.png'],
+      pattern: 'ambient_life',
+      durationSeconds: 5,
+      aspectRatio: '9:16',
+      outPath: '/tmp/out.mp4',
+    });
+    const graph = filterComplexOf(args);
+    expect(graph.match(/xfade=/g)).toHaveLength(1);
+    expect(graph).toContain('duration=0.500000');
+
+    const [d0, d1] = inputDurationsOf(args);
+    expect(d0! + d1! - 0.5).toBeCloseTo(5, 5);
+  });
+
+  it('clamps the crossfade duration down for a very short scene so segments never go negative', () => {
+    const args = buildMotionSequenceArgs({
+      framePaths: ['/tmp/f0.png', '/tmp/f1.png', '/tmp/f2.png'],
+      pattern: 'ambient_life', // configured cd=0.5, would be too large for a 1s/3-frame scene
+      durationSeconds: 1,
+      aspectRatio: '9:16',
+      outPath: '/tmp/out.mp4',
+    });
+    const durations = inputDurationsOf(args);
+    durations.forEach((d) => expect(d).toBeGreaterThan(0));
+    const graph = filterComplexOf(args);
+    expect(graph).not.toContain('duration=0.500000');
+  });
+
+  it('maps the final xfade output to [vout] and never emits a shell command string', () => {
+    const args = buildMotionSequenceArgs({
+      framePaths: ['/tmp/f0.png', '/tmp/f1.png'],
+      pattern: 'reaction',
+      durationSeconds: 4,
+      aspectRatio: '9:16',
+      outPath: '/tmp/out.mp4',
+    });
+    expect(args).toEqual(expect.arrayContaining(['-map', '[vout]']));
+    expect(args.some((arg) => arg.startsWith('ffmpeg '))).toBe(false);
+    expect(args[args.indexOf('-filter_complex') + 1]).toContain('[vout]');
+  });
+});
