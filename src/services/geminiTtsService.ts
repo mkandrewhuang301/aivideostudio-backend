@@ -62,6 +62,39 @@ function isRetryableTtsError(error: unknown): boolean {
 // an "explainer explaining a concept" delivery.
 export const EXPLAINER_VOICE_STYLE_PROMPT = 'Speak in a voice like an explainer, explaining a concept.';
 
+/**
+ * Post-synthesis atempo for the Explainer illustrated tier (2026-07-23 length-fix pass). v3
+ * measured 77s for a nominal 30s tier — mostly because narration_lines had no TOTAL-duration budget
+ * (see openaiScriptService.expandExplainerScript's targetTotalSeconds), but a modest speed-up on
+ * top closes the remaining gap without reading rushed. Same pitch-preserving ffmpeg `atempo`
+ * mechanism Video Summarizer already wires via VIDEO_SUMMARY_NARRATION_TEMPO (currently 1.0 there).
+ */
+export const EXPLAINER_NARRATION_TEMPO = 1.15;
+
+const QWEN_PRESET_SPEAKERS = new Set([
+  'Aiden', 'Dylan', 'Eric', 'Ono_anna', 'Ryan', 'Serena', 'Sohee', 'Uncle_fu', 'Vivian',
+]);
+const DEFAULT_EXPLAINER_SPEAKER = 'Serena';
+
+/**
+ * Resolves the Explainer's voiceId to a qwen3-tts voice so narration renders through the ONE
+ * TTS engine the 2026-07-23 audio/video provider strategy standardizes on (Replicate qwen3-tts)
+ * instead of the Cloud-TTS/native-Gemini chain, whose ADC/API-key auth isn't reliably available in
+ * every environment (e.g. local dev has no gcloud ADC — that path throws `invalid_grant` before
+ * falling through to a slower fallback voice). A known qwen preset speaker id passes through as-is;
+ * anything else (including a legacy Gemini voice id like "Kore") falls to the default preset.
+ * Mirrors videoSummaryWorker's resolveSummaryVoice.
+ */
+export function resolveExplainerVoice(voiceId: string): NarrationVoice {
+  const speaker = QWEN_PRESET_SPEAKERS.has(voiceId) ? voiceId : DEFAULT_EXPLAINER_SPEAKER;
+  return {
+    mode: 'custom_voice',
+    speaker,
+    styleInstruction: EXPLAINER_VOICE_STYLE_PROMPT,
+    language: 'English',
+  };
+}
+
 export interface NarrationStem {
   r2Key: string;
   durationSeconds: number;
