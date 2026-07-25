@@ -13,11 +13,15 @@
 // worker refunds) — invalid JSON or a blown word budget throws.
 
 import type { CharacterVlogConfig } from '../config/characters';
-import { generateClaudeText } from './providers/ReplicateProvider';
+import { config } from '../config';
+import { generateClaudeText, type ClaudeEffort } from './providers/ReplicateProvider';
 
-// claude-haiku-4.5 is NOT on Replicate (verified 2026-07-25); claude-3.5-haiku is the cheap
-// tier that is. Sonnet-5 stays on the explainer's accuracy-critical script stage only.
-const VLOG_EXPANSION_MODEL = 'anthropic/claude-3.5-haiku';
+// Default lives in config.vlogExpansionModel (sonnet-5/effort-low). claude-haiku-4.5 is NOT on
+// Replicate and claude-3.5-haiku 500'd consistently at build time (both verified 2026-07-25) —
+// 3.5-haiku stays the env-flippable cheap fallback, but its schema has no `effort` param, so
+// it's the one model we must not send it to.
+const EFFORTLESS_MODELS = new Set(['anthropic/claude-3.5-haiku']);
+const VLOG_EXPANSION_EFFORT: ClaudeEffort = 'low';
 const VLOG_EXPANSION_MAX_TOKENS = 1024;
 
 const WORDS_PER_SECOND = 2.5;
@@ -110,12 +114,13 @@ export async function expandVlogBeat(args: {
   durationSeconds: number;
 }): Promise<VlogExpansion> {
   const pinnedLine = extractQuotedLine(args.beat);
-  const raw = await generateClaudeText(VLOG_EXPANSION_MODEL, {
+  const raw = await generateClaudeText(config.vlogExpansionModel, {
     systemPrompt: buildSystemPrompt(args.character, args.durationSeconds),
     prompt: `Beat: ${args.beat}${pinnedLine
       ? '\n\nThe user quoted their exact dialogue in the beat — it will be used VERBATIM as the spoken line. Write only enhanced_prompt; set spoken_line to "".'
       : ''}`,
     maxTokens: VLOG_EXPANSION_MAX_TOKENS,
+    ...(EFFORTLESS_MODELS.has(config.vlogExpansionModel) ? {} : { effort: VLOG_EXPANSION_EFFORT }),
   });
   const parsed = parseExpansion(raw);
   if (!parsed) throw new Error('vlog expansion returned no usable JSON');

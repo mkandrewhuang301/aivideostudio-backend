@@ -19,6 +19,7 @@ import { GetObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { sql } from 'drizzle-orm';
 import { db } from '../db/client';
+import { config } from '../config';
 import { SERVER_CHARACTERS, type CharacterVlogConfig } from '../config/characters';
 import { replicateQwenTts, runVlogTake } from '../services/providers/ReplicateProvider';
 import { buildClipPrompt, expandVlogBeat } from '../services/vlogExpansionService';
@@ -172,7 +173,7 @@ async function processCreateJob(data: Extract<VlogGenerationJob, { mode: 'create
     await mergeGenerationParams(data.generationId, {
       character_id: data.characterId,
       duration_seconds: data.durationSeconds,
-      expansion_model: 'anthropic/claude-3.5-haiku',
+      expansion_model: config.vlogExpansionModel,
       takes,
     });
 

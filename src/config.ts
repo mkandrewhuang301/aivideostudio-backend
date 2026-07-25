@@ -76,6 +76,10 @@ export const config = {
   // a narration call carries a qwen voice config, qwen is used; on qwen failure it falls back to
   // the Cloud-TTS/interactions/Fal chain. Toggle off to force the old chain.
   qwenTtsEnabled: process.env.QWEN_TTS_ENABLED !== 'false',
+  // Character-vlog expansion pass (2026-07-25). Default sonnet-5/effort-low: the cheap pick,
+  // claude-3.5-haiku, 500'd consistently on Replicate at build time (upstream INTERNAL even on
+  // trivial prompts) — flip back via env once it recovers. ~$0.005/beat, covered by 6cr/s.
+  vlogExpansionModel: process.env.VLOG_EXPANSION_MODEL ?? 'anthropic/claude-sonnet-5',
   falTtsFallbackModel: process.env.FAL_TTS_FALLBACK_MODEL ?? 'fal-ai/gemini-3.1-flash-tts',
   falLyriaFallbackModel: process.env.FAL_LYRIA_FALLBACK_MODEL ?? 'fal-ai/lyria2',
   videoSummaryModel: process.env.VIDEO_SUMMARY_MODEL ?? 'gemini-3.5-flash',
