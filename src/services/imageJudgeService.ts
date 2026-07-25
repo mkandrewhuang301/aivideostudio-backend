@@ -34,6 +34,12 @@ export interface JudgeStillContext {
   mode: 'fresh' | 'edit';
   /** mode 'edit' only: the surgical instruction that produced this frame. */
   editStep?: string;
+  /**
+   * mode 'edit' only: the PRE-edit frame. When present the judge compares BEFORE vs AFTER —
+   * without it the "nothing outside the edit changed" rule is unenforceable (2026-07-25: nano
+   * redrew a wire lattice mid-sequence and single-frame judging couldn't see the warp).
+   */
+  baseImage?: Buffer;
 }
 
 export interface JudgeVerdict {
@@ -57,15 +63,21 @@ function textRuleFor(onImageText?: string): string {
 function judgePromptFor(context: JudgeStillContext): string {
   const textRule = textRuleFor(context.onImageText);
   if (context.mode === 'edit') {
+    const compareRule = context.baseImage
+      ? '3. Compare image 2 (AFTER) against image 1 (BEFORE): ANY element outside the requested edit changed — structural lines, geometry, positions, or proportions of unchanged elements. Thin structures (wires, struts, railings, lattices) must keep their exact configuration.'
+      : '3. Parts of the frame OUTSIDE the requested edit changed.';
+    const header = context.baseImage
+      ? 'You are a strict visual-quality judge for one frame of an explainer-video motion sequence. Image 1 is the frame BEFORE a surgical edit; image 2 is the same frame AFTER it.'
+      : 'You are a strict visual-quality judge for one frame of an explainer-video motion sequence. This frame was produced by a surgical edit on the previous frame.';
     return [
-      'You are a strict visual-quality judge for one frame of an explainer-video motion sequence. This frame was produced by a surgical edit on the previous frame.',
+      header,
       `EDIT REQUESTED: "${context.editStep ?? ''}"`,
       `TEXT RULE: ${textRule}`,
       '',
       'FAIL the frame if ANY of these hold:',
       '1. The requested change is missing or barely visible.',
       '2. The edit pasted a large new hero object over an otherwise intact scene (collage look) instead of transforming elements already in the frame.',
-      '3. Parts of the frame OUTSIDE the requested edit changed.',
+      compareRule,
       '4. Garbled, misspelled, or pseudo-text anywhere; or text violating the TEXT RULE.',
       '5. Obvious artifacts: mangled hands/faces, duplicated or fused objects, watermarks, borders.',
       '',
@@ -128,10 +140,17 @@ export async function judgeStill(image: Buffer, context: JudgeStillContext): Pro
   try {
     // Downscale for the judge call (sharp is already a dependency of the image pipeline).
     const { default: sharp } = await import('sharp');
-    const resized = await sharp(image)
+    const toJudgeJpeg = (buf: Buffer) => sharp(buf)
       .resize(JUDGE_IMAGE_MAX_EDGE, JUDGE_IMAGE_MAX_EDGE, { fit: 'inside', withoutEnlargement: true })
       .jpeg({ quality: 85 })
       .toBuffer();
+    const resized = await toJudgeJpeg(image);
+    const baseResized = context.baseImage ? await toJudgeJpeg(context.baseImage) : null;
+
+    const imageParts = [
+      ...(baseResized ? [{ inline_data: { mime_type: 'image/jpeg', data: baseResized.toString('base64') } }] : []),
+      { inline_data: { mime_type: 'image/jpeg', data: resized.toString('base64') } },
+    ];
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), JUDGE_TIMEOUT_MS);
@@ -144,7 +163,7 @@ export async function judgeStill(image: Buffer, context: JudgeStillContext): Pro
           body: JSON.stringify({
             contents: [{
               parts: [
-                { inline_data: { mime_type: 'image/jpeg', data: resized.toString('base64') } },
+                ...imageParts,
                 { text: judgePromptFor(context) },
               ],
             }],

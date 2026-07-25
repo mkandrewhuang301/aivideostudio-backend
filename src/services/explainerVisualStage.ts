@@ -570,6 +570,7 @@ export const illustratedStage: VisualStage = {
               styleLabel: input.styleLabel,
               mode: 'edit',
               editStep,
+              baseImage: currentImage, // BEFORE frame — lets the judge catch structural warp
             });
             if (shouldRegenerate(verdict, input.regenBudget)) {
               input.regenBudget.remaining -= 1;

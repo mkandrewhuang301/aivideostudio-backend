@@ -130,6 +130,19 @@ describe('judge prompt construction', () => {
     expect(prompt).toContain('large new hero object');
     expect(prompt).toContain('OUTSIDE the requested edit');
   });
+
+  it('edit mode + baseImage -> BEFORE/AFTER comparison wording and two image parts', async () => {
+    mockJudgeResponse(verdictBody(true));
+    await judgeStill(image, {
+      visualPrompt: 'a wing diagram', mode: 'edit', editStep: 'wing tips flex', baseImage: image,
+    });
+    const prompt = sentPrompt();
+    expect(prompt).toContain('Image 1 is the frame BEFORE');
+    expect(prompt).toContain('image 2 (AFTER) against image 1 (BEFORE)');
+    expect(prompt).toContain('wires, struts, railings, lattices');
+    const body = JSON.parse((global.fetch as jest.Mock).mock.calls[0]![1].body as string);
+    expect(body.contents[0].parts.filter((p: unknown) => typeof p === 'object' && p !== null && 'inline_data' in p)).toHaveLength(2);
+  });
 });
 
 describe('retry helpers', () => {
