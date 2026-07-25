@@ -154,10 +154,10 @@ describe('buildExplainerComposeArgs', () => {
     const args = buildArgs(morphSpec);
     const graph = filterComplexOf(args);
 
-    // clip0 (4s) fades OUT over its last 0.3s -> starts at 3.7
-    expect(graph).toContain('[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fade=t=out:st=3.700000:d=0.300000[v0]');
-    // clip1 fades IN from black over its first 0.3s
-    expect(graph).toContain('[1:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fade=t=in:st=0:d=0.300000[v1]');
+    // clip0 (4s) fades OUT to cream over its last 0.3s -> starts at 3.7
+    expect(graph).toContain('[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fade=t=out:st=3.700000:d=0.300000:color=0xf7f2e7[v0]');
+    // clip1 fades IN from cream over its first 0.3s
+    expect(graph).toContain('[1:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fade=t=in:st=0:d=0.300000:color=0xf7f2e7[v1]');
 
     // Input trims (and therefore total timeline / narration sync) are untouched by morph.
     const firstInput = args.indexOf('/tmp/clip0.mp4');
@@ -187,7 +187,7 @@ describe('buildExplainerComposeArgs', () => {
     });
     const graph = filterComplexOf(buildArgs(spec));
     // clip0 is 0.6s; a 0.3s fade is clamped to duration/4 = 0.15s, starting at 0.45s.
-    expect(graph).toContain('fade=t=out:st=0.450000:d=0.150000');
+    expect(graph).toContain('fade=t=out:st=0.450000:d=0.150000:color=0xf7f2e7');
   });
 
   it('returns a fixed argv array with the whole filter graph in one element and no shell command string', () => {

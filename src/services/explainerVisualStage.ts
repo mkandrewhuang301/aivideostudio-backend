@@ -265,9 +265,25 @@ export interface MotionSequenceArgsInput {
   outPath: string;
 }
 
+// Playback-order split (2026-07-24 by-ear pass): 'animation-class' patterns (reaction,
+// ambient_life) PING-PONG their frames A->B->A(->B->A) so the motion reads as a full oscillation
+// instead of a one-way settle into a dead hold; 'content-class' patterns (before_after,
+// progressive_reveal) stay LINEAR A->B->C so the transformation never un-does itself on screen.
+// Same frames either way — this only changes the sequence handed to the xfade chain.
+const PING_PONG_PATTERNS = new Set<MotionSequencePattern>(['reaction', 'ambient_life']);
+
+/** A,B[,C] -> A,B[,C,B],A — one full round trip; never duplicates a single frame. */
+function playbackOrderFor(framePaths: string[], pattern: MotionSequencePattern): string[] {
+  if (!PING_PONG_PATTERNS.has(pattern) || framePaths.length < 2) return framePaths;
+  return [...framePaths, ...framePaths.slice(0, -1).reverse()];
+}
+
 /**
  * PURE argv builder assembling a chain of nano-edited still frames into one scene clip of EXACTLY
  * `durationSeconds`, via ffmpeg's xfade filter (hold each frame, crossfade into the next).
+ * reaction/ambient_life frames are first expanded to a ping-pong round trip (A->B->A) by
+ * playbackOrderFor; before_after/progressive_reveal play linearly. The equal-segment/xfade-offset
+ * math below is then identical for both cases, driven off the (possibly expanded) playback list.
  *
  * Segments are equal-length; the pattern only changes the crossfade length. Derivation: xfade's
  * documented output duration is `d0 + d1 - crossfadeDuration` per pair, so chaining k equal
@@ -281,13 +297,14 @@ export function buildMotionSequenceArgs(input: MotionSequenceArgsInput): string[
   const { framePaths, pattern, durationSeconds, aspectRatio, outPath } = input;
   const { width, height } = KEN_BURNS_CANVAS[aspectRatio] ?? KEN_BURNS_CANVAS['9:16'];
   const safeDuration = Math.max(0.1, durationSeconds);
-  const frameCount = Math.max(1, framePaths.length);
+  const playbackPaths = playbackOrderFor(framePaths, pattern);
+  const frameCount = Math.max(1, playbackPaths.length);
 
   if (frameCount === 1) {
     // Degenerate case (no nano edits actually produced a second frame) — just hold the one frame,
     // no xfade needed.
     return [
-      '-y', '-loop', '1', '-i', framePaths[0]!,
+      '-y', '-loop', '1', '-i', playbackPaths[0]!,
       '-t', String(safeDuration),
       '-vf', `scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},setsar=1`,
       '-r', String(MOTION_SEQUENCE_FPS),
@@ -304,12 +321,12 @@ export function buildMotionSequenceArgs(input: MotionSequenceArgsInput): string[
   const segDur = (safeDuration + (frameCount - 1) * cd) / frameCount;
 
   const args: string[] = ['-y'];
-  framePaths.forEach((framePath) => {
+  playbackPaths.forEach((framePath) => {
     args.push('-loop', '1', '-t', segDur.toFixed(6), '-i', framePath);
   });
 
   const filterParts: string[] = [];
-  framePaths.forEach((_framePath, i) => {
+  playbackPaths.forEach((_framePath, i) => {
     filterParts.push(
       `[${i}:v]scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},setsar=1,fps=${MOTION_SEQUENCE_FPS}[v${i}]`,
     );

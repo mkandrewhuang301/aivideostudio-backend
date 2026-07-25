@@ -139,7 +139,7 @@ describe('buildMotionSequenceArgs', () => {
     expect(args[args.indexOf('-t') + 1]).toBe('4');
   });
 
-  it('reaction (2 frames): one xfade, total duration equals durationSeconds', () => {
+  it('reaction (2 frames): ping-pongs A->B->A — two xfades, total duration equals durationSeconds', () => {
     const args = buildMotionSequenceArgs({
       framePaths: ['/tmp/f0.png', '/tmp/f1.png'],
       pattern: 'reaction',
@@ -148,15 +148,20 @@ describe('buildMotionSequenceArgs', () => {
       outPath: '/tmp/out.mp4',
     });
     const graph = filterComplexOf(args);
-    expect(graph.match(/xfade=/g)).toHaveLength(1);
-    expect(graph).toContain('duration=0.150000');
+    expect(graph.match(/xfade=/g)).toHaveLength(2);
+    expect(graph.match(/duration=0.150000/g)).toHaveLength(2);
 
-    const [d0, d1] = inputDurationsOf(args);
-    // total = d0 + d1 - cd must equal the requested duration (xfade's documented output length).
-    expect(d0! + d1! - 0.15).toBeCloseTo(6, 5);
+    const durations = inputDurationsOf(args);
+    // A,B,A round trip = 3 inputs; total = sum(segDur) - (k-1)*cd must equal the requested duration.
+    expect(durations).toHaveLength(3);
+    const total = durations.reduce((a, b) => a + b, 0) - 2 * 0.15;
+    expect(total).toBeCloseTo(6, 5);
+    // frame A plays first AND last (round trip back to the base still)
+    const inputs = args.flatMap((a, i) => (a === '-i' ? [args[i + 1]!] : []));
+    expect(inputs).toEqual(['/tmp/f0.png', '/tmp/f1.png', '/tmp/f0.png']);
   });
 
-  it('before_after (3 frames): two chained xfades with equal-ish segments and 0.2s crossfades', () => {
+  it('before_after (3 frames): plays LINEARLY (no ping-pong) — two chained xfades, 0.2s crossfades', () => {
     const args = buildMotionSequenceArgs({
       framePaths: ['/tmp/f0.png', '/tmp/f1.png', '/tmp/f2.png'],
       pattern: 'before_after',
@@ -175,6 +180,9 @@ describe('buildMotionSequenceArgs', () => {
     expect(total).toBeCloseTo(9, 5);
     // roughly equal thirds
     durations.forEach((d) => expect(d).toBeCloseTo(durations[0]!, 5));
+    // linear playback: inputs are exactly the given frames, no round-trip duplicates
+    const inputs = args.flatMap((a, i) => (a === '-i' ? [args[i + 1]!] : []));
+    expect(inputs).toEqual(['/tmp/f0.png', '/tmp/f1.png', '/tmp/f2.png']);
   });
 
   it('progressive_reveal (up to 4 frames): N-1 xfades with 0.1s fades, exact total duration', () => {
@@ -194,20 +202,22 @@ describe('buildMotionSequenceArgs', () => {
     expect(total).toBeCloseTo(8, 5);
   });
 
-  it('ambient_life (2 frames): a single slow 0.5s crossfade', () => {
+  it('ambient_life (2 frames): ping-pongs A->B->A with two slow 0.5s crossfades', () => {
     const args = buildMotionSequenceArgs({
       framePaths: ['/tmp/f0.png', '/tmp/f1.png'],
       pattern: 'ambient_life',
-      durationSeconds: 5,
+      durationSeconds: 7.5, // long enough that the 0.5s crossfade survives the per-segment clamp
       aspectRatio: '9:16',
       outPath: '/tmp/out.mp4',
     });
     const graph = filterComplexOf(args);
-    expect(graph.match(/xfade=/g)).toHaveLength(1);
-    expect(graph).toContain('duration=0.500000');
+    expect(graph.match(/xfade=/g)).toHaveLength(2);
+    expect(graph.match(/duration=0.500000/g)).toHaveLength(2);
 
-    const [d0, d1] = inputDurationsOf(args);
-    expect(d0! + d1! - 0.5).toBeCloseTo(5, 5);
+    const durations = inputDurationsOf(args);
+    expect(durations).toHaveLength(3);
+    const total = durations.reduce((a, b) => a + b, 0) - 2 * 0.5;
+    expect(total).toBeCloseTo(7.5, 5);
   });
 
   it('clamps the crossfade duration down for a very short scene so segments never go negative', () => {

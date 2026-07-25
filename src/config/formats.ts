@@ -283,7 +283,7 @@ HARD RULES:
 MOTION (every scene must include a "motion" object):
 9. Choose motion.type by what the scene's content actually does:
    - "reaction" — a character or subject changes pose/expression within the beat (hands go up, a face turns angry, a figure points). 1 edit_step.
-   - "before_after" — a state visibly evolves over the beat (a seed becomes a tree, a house catches fire, an empty room fills up). 2 edit_steps, chained (first edit, then a second edit building on the first).
+   - "before_after" — a state visibly evolves over the beat (a seed becomes a tree, a house catches fire, an empty room fills up). 2 edit_steps, chained (first edit, then a second edit building on the first). Each edit must TRANSFORM something already in the frame (the biplane morphs into a jet, the empty lot gains a house) — never ADD a new hero subject on top of an intact scene; an edit that just pastes a large new object over the existing composition reads as a collage, not an evolution.
    - "ambient_life" — an atmospheric or landscape scene that would otherwise sit dead needs a subtle living touch (drifting smoke, shifting light, floating particles). 1 edit_step.
    - "ken_burns" — a calm scene that only needs a gentle camera push/pan, no content change. edit_steps: [].
    - "wiggle" — a playful character beat with no real state change, just a bit of life. edit_steps: [].

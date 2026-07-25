@@ -211,8 +211,12 @@ export interface BuildExplainerComposeArgsInput {
 // clips and shorten the total video below the narration+music timeline (drift). Per the plan's
 // explicit "sync > fancy" guidance, morph is instead a fade-out/fade-in DIP that costs zero
 // timeline time — narration and music stay untouched, only the two clips' own video streams gain
-// a brief fade to black at the cut, which reads far softer than a hard cut without any offset math.
+// a brief fade at the cut, which reads far softer than a hard cut without any offset math.
+// 2026-07-24 by-ear pass: the dip fades to the illustrated tier's signature CREAM, not black —
+// three dips-to-black in a 37s video read as blinks; a cream dip reads as an intentional
+// page-turn. (fade's `color` option; black remains the filter default for every other caller.)
 const MORPH_FADE_SECONDS = 0.3;
+const MORPH_FADE_COLOR = '0xf7f2e7'; // flat-vector cream background
 
 /** Clamp the fade so it never exceeds a clip too short to hold it — never goes negative/overlaps. */
 function morphFadeDurationFor(clipDurationSeconds: number): number {
@@ -234,17 +238,17 @@ export function buildExplainerComposeArgs(input: BuildExplainerComposeArgsInput)
   spec.clips.forEach((clip, i) => {
     args.push('-t', String(clip.durationSeconds), '-i', clipPaths[i]);
 
-    // fadeOut: THIS clip transitions into the next as 'morph' -> fade its own tail to black.
+    // fadeOut: THIS clip transitions into the next as 'morph' -> fade its own tail to cream.
     const fadeOutDur = morphFadeDurationFor(clip.durationSeconds);
     const fadeOut = clip.transition === 'morph' && i < spec.clips.length - 1
-      ? `,fade=t=out:st=${Math.max(0, clip.durationSeconds - fadeOutDur).toFixed(6)}:d=${fadeOutDur.toFixed(6)}`
+      ? `,fade=t=out:st=${Math.max(0, clip.durationSeconds - fadeOutDur).toFixed(6)}:d=${fadeOutDur.toFixed(6)}:color=${MORPH_FADE_COLOR}`
       : '';
     // fadeIn: the PRECEDING clip transitioned into this one as 'morph' -> fade this clip's own
-    // head in from black.
+    // head in from cream.
     const previousClip = i > 0 ? spec.clips[i - 1] : undefined;
     const fadeInDur = morphFadeDurationFor(clip.durationSeconds);
     const fadeIn = previousClip?.transition === 'morph'
-      ? `,fade=t=in:st=0:d=${fadeInDur.toFixed(6)}`
+      ? `,fade=t=in:st=0:d=${fadeInDur.toFixed(6)}:color=${MORPH_FADE_COLOR}`
       : '';
 
     filterParts.push(

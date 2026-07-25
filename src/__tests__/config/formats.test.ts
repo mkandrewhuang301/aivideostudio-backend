@@ -71,6 +71,18 @@ describe('formats registry config', () => {
     expect(explainer?.aspect_ratios).toEqual(['9:16', '16:9']);
   });
 
+  it('locks the Illustrated caption contrast recipe (2026-07-24 light-bg fix)', () => {
+    const explainer = SERVER_FORMATS.find((format) => format.format_id === 'explainer');
+    if (!explainer || explainer.status !== 'live' || 'flow' in explainer) throw new Error('live explainer missing');
+    // White-on-cream was unreadable in the 7/24 e2e; the recipe is black outline 4 + shadow 1.2
+    // + no background box. Locking it so a future caption tweak can't silently regress contrast.
+    expect(explainer?.caption_style).toMatchObject({
+      outlineWidth: 4,
+      shadowDepth: 1.2,
+      backgroundBox: false,
+    });
+  });
+
   it('supports formats-ready segment types while Explainer uses dialogue only', () => {
     const segmentTypes: FormatSegmentType[] = ['dialogue', 'vocab', 'drill'];
     const explainer = SERVER_FORMATS.find((format) => format.format_id === 'explainer');

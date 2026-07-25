@@ -285,6 +285,26 @@ describe('processExplainerGeneration', () => {
     expect(refundCredits).not.toHaveBeenCalled();
   });
 
+  it('passes the format caption_style (incl. outline/shadow/box recipe) through to compose', async () => {
+    await processExplainerGeneration(JOB);
+
+    // The 2026-07-24 light-bg contrast fix wired outlineWidth/shadowDepth/backgroundBox onto
+    // FormatCaptionConfig; this guards the worker mapping so compose never gets bare text again.
+    expect(ffmpegAdd).toHaveBeenCalledWith('generate', expect.objectContaining({
+      explainerCompose: expect.objectContaining({
+        captionStyle: {
+          fontSize: 44,
+          color: '#FFFFFF',
+          highlightColor: '#FFD60A',
+          position: 'bottom',
+          outlineWidth: 4,
+          shadowDepth: 1.2,
+          backgroundBox: false,
+        },
+      }),
+    }));
+  });
+
   it('refunds the full cost when script generation throws', async () => {
     (expandExplainerScript as jest.Mock).mockRejectedValue(new Error('script failed'));
 
