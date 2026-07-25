@@ -16,13 +16,14 @@ import {
   generateNarrationForScene,
   VOICE_A_REFERENCE_R2_KEY,
   VOICE_A_TRANSCRIPT,
+  VIDEO_SUMMARY_VOICE_STYLE_PROMPT,
   type NarrationStem,
   type NarrationVoice,
 } from '../services/geminiTtsService';
 
 // Re-exported so existing consumers (genVoicePreviews.ts) keep working — the single definition
 // lives in geminiTtsService, shared with the Explainer voice resolver.
-export { VOICE_A_REFERENCE_R2_KEY, VOICE_A_TRANSCRIPT };
+export { VOICE_A_REFERENCE_R2_KEY, VOICE_A_TRANSCRIPT, VIDEO_SUMMARY_VOICE_STYLE_PROMPT };
 import { generateMusicBed } from '../services/lyriaService';
 import {
   classifyFailureReason,
@@ -49,13 +50,6 @@ const QUEUE_NAME = 'video-summary';
  * Pace is asked for once, here; the remaining lines still suppress the theatrical/drawn-out
  * failure modes that made an earlier speed attempt sound bad.
  */
-export const VIDEO_SUMMARY_VOICE_STYLE_PROMPT = [
-  'Narrate this as a confident short-form story recap.',
-  'Sound natural and conversational, with a clean, controlled delivery and real momentum.',
-  'Use a brisk, energetic pace that moves quickly from point to point without rushing words together.',
-  'Avoid theatrical pauses, exaggerated drama, upward inflections at the ends of statements, and drawn-out syllables.',
-  'Keep pronunciation crisp and sentence endings decisive.',
-].join(' ');
 /**
  * Post-synthesis pitch-preserving speed factor. 1.0 = the clone's NATURAL read (no speed-up) — the
  * dominant lever for perceived pace. Earlier 1.2–1.25x on top of an already-fast anime-recap clone

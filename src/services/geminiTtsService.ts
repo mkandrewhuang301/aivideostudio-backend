@@ -68,8 +68,11 @@ export const EXPLAINER_VOICE_STYLE_PROMPT = 'Speak in a voice like an explainer,
  * (see openaiScriptService.expandExplainerScript's targetTotalSeconds), but a modest speed-up on
  * top closes the remaining gap without reading rushed. Same pitch-preserving ffmpeg `atempo`
  * mechanism Video Summarizer already wires via VIDEO_SUMMARY_NARRATION_TEMPO (currently 1.0 there).
+ * 2026-07-24 by-ear pass: 1.15 -> 1.22 (~1.06x faster); the first full e2e read a touch slow.
+ * The script's spoken-word budget scales off this same constant, so scenes still fill the tier
+ * target — the pacing rises, the duration doesn't drop.
  */
-export const EXPLAINER_NARRATION_TEMPO = 1.15;
+export const EXPLAINER_NARRATION_TEMPO = 1.22;
 
 /**
  * Native Gemini TTS voices the Explainer format offers (mirrors the voices list in
@@ -91,6 +94,18 @@ export const DEFAULT_EXPLAINER_GEMINI_VOICE = 'Kore';
 export const VOICE_A_REFERENCE_R2_KEY = 'reference-voices/voiceA-clipA.mp3';
 export const VOICE_A_TRANSCRIPT =
   "They stood no chance. Then Jack came up with an idea. In theory, as long as it was under attack, the crystal horn rabbit couldn't activate its escape skill. So Jack planned to act as bait to lure the crystal horn rabbit, while Mary looked for an opportunity to strike. After devising the plan, Mary used earth magic.";
+
+// Delivery direction for the Video Summarizer's narration. Lives here (a side-effect-free module,
+// alongside the VOICE_A constants) rather than in videoSummaryWorker.ts — importing that module
+// instantiates the BullMQ Worker + a Redis connection, so any operational script that only needs
+// this string (e.g. genVoicePreviews.ts) would otherwise hang on the worker's Redis connect.
+export const VIDEO_SUMMARY_VOICE_STYLE_PROMPT = [
+  'Narrate this as a confident short-form story recap.',
+  'Sound natural and conversational, with a clean, controlled delivery and real momentum.',
+  'Use a brisk, energetic pace that moves quickly from point to point without rushing words together.',
+  'Avoid theatrical pauses, exaggerated drama, upward inflections at the ends of statements, and drawn-out syllables.',
+  'Keep pronunciation crisp and sentence endings decisive.',
+].join(' ');
 
 /**
  * Validates the voice NAME sent to the native Gemini TTS: a known Gemini voice passes through,

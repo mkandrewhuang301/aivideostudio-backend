@@ -19,13 +19,16 @@ import { HeadObjectCommand } from '@aws-sdk/client-s3';
 import { r2, R2_BUCKET } from '../storage/r2';
 import { getUploadPresignedUrl, uploadBufferToR2 } from '../services/archivalService';
 import { replicateQwenTts } from '../services/providers/ReplicateProvider';
-import { generateTtsWav } from '../services/geminiTtsService';
-import { FORMATS_BY_ID } from '../config/formats';
+// Import the voice constants + TTS helper straight from geminiTtsService (side-effect-free).
+// NOT from videoSummaryWorker — importing that instantiates the BullMQ Worker + a Redis
+// connection, which hangs this operational script on the worker's Redis connect.
 import {
+  generateTtsWav,
   VIDEO_SUMMARY_VOICE_STYLE_PROMPT,
   VOICE_A_REFERENCE_R2_KEY,
   VOICE_A_TRANSCRIPT,
-} from '../queue/videoSummaryWorker';
+} from '../services/geminiTtsService';
+import { FORMATS_BY_ID } from '../config/formats';
 
 /** Fixed neutral recap-flavored sample line, ~2-3s at the summarizer's brisk delivery pace. */
 const PREVIEW_LINE = "Here's what went down in the last episode.";

@@ -30,10 +30,11 @@ jest.mock('../../services/archivalService', () => ({
 }));
 jest.mock('../../services/geminiTtsService', () => ({
   generateNarrationForScene: jest.fn(),
-  // The worker imports these shared voiceA constants from the service — the mock must provide
-  // them or the clone branch presigns `undefined`.
+  // The worker imports these shared voice constants from the service — the mock must provide
+  // them or the clone branch presigns `undefined` and the style prompt is lost.
   VOICE_A_REFERENCE_R2_KEY: 'reference-voices/voiceA-clipA.mp3',
   VOICE_A_TRANSCRIPT: 'Mary looked for an opportunity to strike the crystal horn rabbit.',
+  VIDEO_SUMMARY_VOICE_STYLE_PROMPT: 'Narrate with a brisk, energetic pace.',
 }));
 jest.mock('../../services/lyriaService', () => ({ generateMusicBed: jest.fn() }));
 jest.mock('../../services/mediaProbe', () => ({ probeVideoMeta: jest.fn() }));
