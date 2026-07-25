@@ -40,8 +40,9 @@ export function isNanoMotionType(type: SceneMotionType): boolean {
  *   - 'content'    (before_after, progressive_reveal) — the TRANSFORMATION is the point. When
  *     unbudgeted for nano, it must still render, via independent per-step gpt stills instead of
  *     pixel-locked nano edits (loses pixel-lock, keeps the content change). NEVER goes static.
- *   - 'semi'       (reaction) — nano preferred; unbudgeted degrades to `wiggle` (stays lively,
- *     just not a literal pose/expression change).
+ *   - 'semi'       (reaction) — nano preferred; unbudgeted degrades to the FLIP (2026-07-25):
+ *     independent gpt stills like 'content' (reaction's 1 step = base + changed still), which the
+ *     reaction pattern ping-pongs A->B->A flipbook-style. Replaced the old wiggle fallback.
  *   - 'decorative' (ambient_life) — nano preferred; unbudgeted degrades to `ken_burns` (the only
  *     class that goes effectively static when unbudgeted — it was garnish to begin with).
  *   - 'free'       (ken_burns, wiggle) — never touches nano either way.
@@ -313,7 +314,7 @@ MOTION (every scene must include a "motion" object):
    - "before_after" — a state visibly evolves over the beat (a seed becomes a tree, a house catches fire, an empty room fills up). 2 edit_steps, chained (first edit, then a second edit building on the first). Each edit must TRANSFORM something already in the frame (the biplane morphs into a jet, the empty lot gains a house) — never ADD a new hero subject on top of an intact scene; an edit that just pastes a large new object over the existing composition reads as a collage, not an evolution.
    - "ambient_life" — an atmospheric or landscape scene that would otherwise sit dead needs a subtle living touch (drifting smoke, shifting light, floating particles). 1 edit_step.
    - "ken_burns" — a calm scene that only needs a gentle camera push/pan, no content change. edit_steps: [].
-   - "wiggle" — a playful character beat with no real state change, just a bit of life. edit_steps: [].
+   - "wiggle" — RESERVED for rare high-energy emphasis beats only: an explosion, a shiver, an impact, a shake. Never use it as a default "just add life" choice — a calm scene that only needs life gets "ken_burns". edit_steps: [].
 10. Each edit_steps entry is a SURGICAL delta: describe ONLY the one thing that changes in that step, and end the sentence with "keep everything else in the frame identical." Never describe the whole scene again.
 11. motion.priority is 1-5: how much this motion matters to comprehension or impact. A key transformation central to the idea = 5. Ambient garnish that's nice but skippable = 2. This is used to ration a limited nano-edit budget across the video, so be honest — do not mark everything a 5.
 12. transition_out is "cut" by default. Use "morph" only when this scene's subject visually relates to the next scene (a dissolve between them would read well) — aim for morph on roughly half of scene boundaries across the video, not all or none.`,

@@ -37,9 +37,15 @@ describe('resolveMotionPlan (motion-class-aware fallback, 2026-07-23 design corr
     }
   });
 
-  it("'semi' (reaction) unbudgeted degrades to wiggle — never static, never gpt_stills", () => {
+  it("'semi' (reaction) unbudgeted degrades to the FLIP (gpt_stills, ping-pong pattern) — never wiggle, never static", () => {
+    // 2026-07-25: the wiggle fallback was replaced by independent gpt stills; reaction's 1 step
+    // = base + one changed still, ping-ponged A->B->A flipbook-style by playbackOrderFor.
     const m = motion({ type: 'reaction', edit_steps: ['character raises a hand, keep everything else identical'] });
-    expect(resolveMotionPlan(m, false)).toEqual({ kind: 'wiggle' });
+    expect(resolveMotionPlan(m, false)).toEqual({
+      kind: 'gpt_stills',
+      pattern: 'reaction',
+      editSteps: ['character raises a hand, keep everything else identical'],
+    });
   });
 
   it("'decorative' (ambient_life) unbudgeted degrades to ken_burns — the only class that goes static", () => {

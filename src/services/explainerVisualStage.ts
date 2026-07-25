@@ -442,7 +442,11 @@ export function buildMotionSequenceArgs(input: MotionSequenceArgsInput): string[
 // pixel-locked nano version or a cheaper fallback. The fallback differs by SceneMotionClass:
 //   'content'    (before_after) -> independent gpt stills per step, assembled the SAME way as nano
 //                frames (hold/crossfade). The transformation still shows.
-//   'semi'       (reaction)       -> wiggle (stays lively, just not a literal pose change).
+//   'semi'       (reaction)       -> FLIP (2026-07-25): independent gpt stills per step, same as
+//                content — reaction has 1 edit_step, so this is base + one changed still, and the
+//                reaction pattern's ping-pong (playbackOrderFor) flips A->B->A like a flipbook.
+//                Costs one cheap gpt-image-2-low still, no nano budget, and replaced the old
+//                wiggle fallback (a single rocking still) which read dead by comparison.
 //   'decorative' (ambient_life)   -> ken_burns (the only class that ever goes static).
 //   'free'       (ken_burns, wiggle) -> unaffected either way.
 //
@@ -477,10 +481,11 @@ export function resolveMotionPlan(motion: SceneMotion | undefined, resolvedNano:
     return { kind: 'nano', pattern: safeMotion.type, editSteps: safeMotion.edit_steps };
   }
   const motionClass = motionClassOf(safeMotion.type);
-  if (motionClass === 'content') {
+  if (motionClass === 'content' || motionClass === 'semi') {
+    // Content AND reaction both fall back to independent gpt stills (the reaction pattern's
+    // ping-pong turns base+step into the flip-o-rama A->B->A) — never to a static or wiggle.
     return { kind: 'gpt_stills', pattern: safeMotion.type, editSteps: safeMotion.edit_steps };
   }
-  if (motionClass === 'semi') return { kind: 'wiggle' };
   return { kind: 'ken_burns' }; // 'decorative' (ambient_life unbudgeted)
 }
 
