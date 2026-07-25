@@ -190,9 +190,15 @@ function resetHappyPath(): void {
     method: 'animated',
     generateSceneClip: mockGenerateSceneClip,
   });
-  mockGenerateSceneClip
-    .mockResolvedValueOnce({ clipR2Key: 'generations/gen-explainer-1.scene0.mp4' })
-    .mockResolvedValueOnce({ clipR2Key: 'generations/gen-explainer-1.scene1.mp4' });
+  // Keyed by sceneIndex, NOT mockResolvedValueOnce call-order: scenes run through a bounded-
+  // concurrency pool (2026-07-25), so generateSceneClip invocation order is nondeterministic
+  // (scene 0's stage-stamp await yields its lane). clipKeys[i] must line up with scene i for the
+  // compose-order assertions below to mean anything.
+  mockGenerateSceneClip.mockImplementation(
+    ({ sceneIndex }: { sceneIndex: number }) => Promise.resolve({
+      clipR2Key: `generations/gen-explainer-1.scene${sceneIndex}.mp4`,
+    }),
+  );
   (concatWavBuffers as jest.Mock).mockReturnValue(Buffer.from('combined wav'));
   (uploadBufferToR2 as jest.Mock).mockResolvedValue(undefined);
   (getWordTimings as jest.Mock).mockResolvedValue(GLOBAL_WORDS);
@@ -215,7 +221,9 @@ describe('processExplainerGeneration', () => {
 
     expect(resolveVisualStage).toHaveBeenCalledWith('animated');
     expect(mockGenerateSceneClip).toHaveBeenCalledTimes(2);
-    expect(mockGenerateSceneClip).toHaveBeenNthCalledWith(1, expect.objectContaining({
+    // Order-agnostic on purpose: the scene pool makes invocation order nondeterministic; what
+    // matters is that BOTH scenes got their own correct call (matched below by sceneIndex data).
+    expect(mockGenerateSceneClip).toHaveBeenCalledWith(expect.objectContaining({
       generationId: JOB.generationId,
       sceneIndex: 0,
       visualPrompt: SCRIPT.scenes[0].visual_prompt,
@@ -231,7 +239,7 @@ describe('processExplainerGeneration', () => {
       regenBudget: { remaining: 2 },
       styleLabel: 'Pixel Art',
     }));
-    expect(mockGenerateSceneClip).toHaveBeenNthCalledWith(2, expect.objectContaining({
+    expect(mockGenerateSceneClip).toHaveBeenCalledWith(expect.objectContaining({
       sceneIndex: 1,
       visualPrompt: SCRIPT.scenes[1].visual_prompt,
       motionPrompt: SCRIPT.scenes[1].motion_prompt,

@@ -1,5 +1,8 @@
-// Multi-stage Explainer orchestrator. Provider work is sequential per scene so the scene's real
-// narration duration drives its single winning Omni clip, then one ffmpeg job owns final assembly.
+// Multi-stage Explainer orchestrator. Provider work is sequential WITHIN a scene (the scene's real
+// narration duration drives its single winning Omni clip), but scenes run through a bounded-
+// concurrency pool (2026-07-25, see runPool) since stills are stateless across scenes — each is
+// built from the shared style anchor + its own visual_prompt, and ken-burns continuity is pure
+// ffmpeg math keyed on sceneIndex. One ffmpeg job owns final assembly.
 
 import { Job, Worker } from 'bullmq';
 import { FORMATS_BY_ID, type FormatAspectRatio } from '../config/formats';
@@ -21,6 +24,7 @@ import {
 } from '../services/generationService';
 import { generateMusicBed } from '../services/lyriaService';
 import { allocateMotionBudget } from '../services/explainerMotionAllocator';
+import { runPool } from '../services/asyncPool';
 import { expandExplainerScript } from '../services/openaiScriptService';
 import { resolveVisualStage } from '../services/explainerVisualStage';
 import { buildGroundingText } from '../services/sourceGroundingService';
@@ -149,12 +153,19 @@ export async function processExplainerGeneration(data: ExplainerGenerationJob): 
     // default); only a custom clone id (voiceA) builds a qwen voice_clone.
     const narrationVoiceName = resolveExplainerVoiceName(data.voiceId);
     const narrationVoice = await resolveExplainerVoice(data.voiceId);
-    const stems: NarrationStem[] = [];
-    const clipKeys: string[] = [];
+    // e2eIllustrated saw zero 429s at 5 in flight (2026-07-23 speed pass; account re-funded 7/24).
+    // Note BullMQ worker concurrency is 2, so two explainer jobs can reach ~10 concurrent provider
+    // calls worst-case — the gpt-image-2 429 retry in ReplicateProvider absorbs that.
+    const SCENE_CONCURRENCY = 5;
+    // Preallocated + written BY INDEX inside the pool (never push) so ordering survives concurrent
+    // completion — narration concat, WhisperX offsets, and compose clips all depend on stems[i]/
+    // clipKeys[i] lining up with script.scenes[i].
+    const stems: NarrationStem[] = new Array(script.scenes.length);
+    const clipKeys: string[] = new Array(script.scenes.length);
 
-    for (let sceneIndex = 0; sceneIndex < script.scenes.length; sceneIndex += 1) {
+    await stampStage({ stage_label: 'Recording narration…' });
+    await runPool(script.scenes.length, SCENE_CONCURRENCY, async (sceneIndex) => {
       const scene = script.scenes[sceneIndex]!;
-      if (sceneIndex === 0) await stampStage({ stage_label: 'Recording narration…' });
       const stem = await generateNarrationForScene(
         scene.narration_line,
         narrationVoiceName,
@@ -165,7 +176,7 @@ export async function processExplainerGeneration(data: ExplainerGenerationJob): 
         EXPLAINER_NARRATION_TEMPO,
         narrationVoice,
       );
-      stems.push(stem);
+      stems[sceneIndex] = stem;
 
       if (sceneIndex === 0) {
         await stampStage({
@@ -191,8 +202,8 @@ export async function processExplainerGeneration(data: ExplainerGenerationJob): 
         regenBudget,
         styleLabel: style.label,
       });
-      clipKeys.push(clipR2Key);
-    }
+      clipKeys[sceneIndex] = clipR2Key;
+    });
 
     const stemBuffers = await Promise.all(stems.map((stem) => downloadArchivedBuffer(stem.r2Key)));
     const narrationBuffer = concatWavBuffers(stemBuffers);
