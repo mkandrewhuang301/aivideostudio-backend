@@ -40,9 +40,11 @@ export function isNanoMotionType(type: SceneMotionType): boolean {
  *   - 'content'    (before_after, progressive_reveal) — the TRANSFORMATION is the point. When
  *     unbudgeted for nano, it must still render, via independent per-step gpt stills instead of
  *     pixel-locked nano edits (loses pixel-lock, keeps the content change). NEVER goes static.
- *   - 'semi'       (reaction) — nano preferred; unbudgeted degrades to the FLIP (2026-07-25):
- *     independent gpt stills like 'content' (reaction's 1 step = base + changed still), which the
- *     reaction pattern ping-pongs A->B->A flipbook-style. Replaced the old wiggle fallback.
+ *   - 'semi'       (reaction) — OSCILLATING physical movement (propeller spin, flag flutter).
+ *     Ping-pong A->B->A means the change swings BACK, so reaction steps are always reversible
+ *     movements, never expression/emotion arcs (2026-07-25 user ruling). Nano preferred;
+ *     unbudgeted degrades to the FLIP: independent gpt stills like 'content' (reaction's
+ *     1 step = base + changed still), which the reaction pattern ping-pongs A->B->A.
  *   - 'decorative' (ambient_life) — nano preferred; unbudgeted degrades to `ken_burns` (the only
  *     class that goes effectively static when unbudgeted — it was garnish to begin with).
  *   - 'free'       (ken_burns, wiggle) — never touches nano either way.
@@ -310,8 +312,8 @@ HARD RULES:
 
 MOTION (every scene must include a "motion" object):
 9. Choose motion.type by what the scene's content actually does:
-   - "reaction" — a character or subject changes pose/expression within the beat (hands go up, a face turns angry, a figure points). 1 edit_step.
-   - "before_after" — a state visibly evolves over the beat (a seed becomes a tree, a house catches fire, an empty room fills up). 2 edit_steps, chained (first edit, then a second edit building on the first). Each edit must TRANSFORM something already in the frame (the biplane morphs into a jet, the empty lot gains a house) — never ADD a new hero subject on top of an intact scene; an edit that just pastes a large new object over the existing composition reads as a collage, not an evolution.
+   - "reaction" — an OSCILLATING physical movement that loops within the beat: a propeller spinning, a flag fluttering, a wheel turning, a cradle rocking, a bird flapping. The frames play A->B->A (ping-pong), so the change MUST be something that reads as continuous motion when it swings back and forth. NEVER a facial expression, emotional state, or gaze change (a face going calm->surprised->calm is nonsense) — faces and expressions stay identical across the frames. A persistent one-way pose/expression change belongs in "before_after" (which plays linearly, so the change stays on screen). 1 edit_step.
+   - "before_after" — a state visibly evolves over the beat (a seed becomes a tree, a house catches fire, an empty room fills up, a figure raises their hands and they STAY up). 1-2 edit_steps, chained (use 2 when the evolution has a distinct middle stage). Each edit must TRANSFORM something already in the frame (the biplane morphs into a jet, the empty lot gains a house) — never ADD a new hero subject on top of an intact scene; an edit that just pastes a large new object over the existing composition reads as a collage, not an evolution.
    - "ambient_life" — an atmospheric or landscape scene that would otherwise sit dead needs a subtle living touch (drifting smoke, shifting light, floating particles). 1 edit_step.
    - "ken_burns" — a calm scene that only needs a gentle camera push/pan, no content change. edit_steps: [].
    - "wiggle" — RESERVED for rare high-energy emphasis beats only: an explosion, a shiver, an impact, a shake. Never use it as a default "just add life" choice — a calm scene that only needs life gets "ken_burns". edit_steps: [].

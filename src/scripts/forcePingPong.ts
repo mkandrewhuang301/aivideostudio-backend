@@ -19,8 +19,11 @@ async function main() {
   const motion: SceneMotion = {
     type: 'reaction',
     priority: 5,
+    // 2026-07-25 ruling: reaction = oscillating MOVEMENT only. The propeller swings A->B->A and
+    // reads as spin; the pilot's face must stay identical across frames.
     edit_steps: [
-      "the pilot's eyes widen and mouth opens in exhilarated surprise, keep everything else identical",
+      "the biplane's propeller blades rotate to a different spun position, keep everything else "
+      + 'identical — the pilot\'s face and expression stay exactly the same',
     ],
   };
   const plan = resolveMotionPlan(motion, true); // forced nano grant — the whole point

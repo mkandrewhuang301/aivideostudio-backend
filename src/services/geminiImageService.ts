@@ -294,7 +294,10 @@ export async function nanoEditStill(baseImage: Buffer, editInstruction: string):
   const basePrompt =
     `${editInstruction}. Every person, object, and element in this scene appears the SAME number `
     + 'of times as in the original — do not add, duplicate, clone, or copy any element anywhere in '
-    + 'the frame; only the one change described above happens. This is an illustration — keep the '
+    + 'the frame; only the one change described above happens. Every unchanged element keeps its '
+    + 'exact size, scale, position, and orientation — do not resize, rescale, reposition, or '
+    + 're-frame anything; the composition and camera framing stay exactly fixed. This is an '
+    + 'illustration — keep the '
     + 'exact same art style, line weight, colors, and every other element and the background '
     + 'pixel-identical. Return the complete edited image at the same resolution and aspect ratio '
     + 'as the input.';
