@@ -69,7 +69,8 @@ import {
   diegeticHighlightSeconds,
   processVideoSummary,
   resolveSummaryCaptionAnchor,
-  VIDEO_SUMMARY_NARRATION_TEMPO,
+  VIDEO_SUMMARY_NARRATION_TEMPO_PRESET,
+  VIDEO_SUMMARY_NARRATION_TEMPO_CLONE,
 } from '../../queue/videoSummaryWorker';
 import { probeHasAudioStream, probeVideoMeta } from '../../services/mediaProbe';
 import {
@@ -265,8 +266,9 @@ describe('videoSummaryWorker', () => {
       // Pace is asked for in the delivery prompt AND enforced by the stretch below — the prompt
       // now requests a brisk read, where it previously asked for a measured one.
       expect.stringMatching(/brisk, energetic pace/i),
-      // Pitch-preserving stretch applied AFTER synthesis — the delivery prompt stays untouched.
-      VIDEO_SUMMARY_NARRATION_TEMPO,
+      // Pitch-preserving stretch applied AFTER synthesis — a preset (Google) voice gets the 1.2x
+      // speed-up because Google TTS reads slow.
+      VIDEO_SUMMARY_NARRATION_TEMPO_PRESET,
       // Preset voice ids resolve to `undefined` — generateNarrationForScene falls through to its
       // Google TTS path (voiceName = the raw voiceId, e.g. "Kore") instead of qwen.
       undefined,
@@ -342,7 +344,8 @@ describe('videoSummaryWorker', () => {
       JOB.generationId,
       0,
       expect.stringMatching(/brisk, energetic pace/i),
-      VIDEO_SUMMARY_NARRATION_TEMPO,
+      // voiceA is the qwen clone — already fast, so it stays at 1.0x (no preset speed-up).
+      VIDEO_SUMMARY_NARRATION_TEMPO_CLONE,
       expect.objectContaining({
         mode: 'voice_clone',
         referenceAudioUrl: 'https://r2.example.com/episode.mp4',
@@ -418,7 +421,7 @@ describe('videoSummaryWorker', () => {
         JOB.generationId,
         1,
         expect.any(String),
-        VIDEO_SUMMARY_NARRATION_TEMPO,
+        VIDEO_SUMMARY_NARRATION_TEMPO_PRESET,
         undefined,
       );
 

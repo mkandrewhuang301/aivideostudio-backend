@@ -53,11 +53,17 @@ const QUEUE_NAME = 'video-summary';
  * failure modes that made an earlier speed attempt sound bad.
  */
 /**
- * Post-synthesis pitch-preserving speed factor. 1.0 = the clone's NATURAL read (no speed-up) — the
- * dominant lever for perceived pace. Earlier 1.2–1.25x on top of an already-fast anime-recap clone
- * read as too rushed (~276 WPM); 1.0 lands ~230 WPM. Raise it only if a slower speaker needs help.
+ * Post-synthesis pitch-preserving speed factor — VOICE-AWARE. The two summarizer voice paths read
+ * at very different natural paces, so a single tempo can't serve both:
+ *  - Google preset voices (Kore etc.) read SLOW → speed them up to a brisk recap pace (~1.2x). This
+ *    is the same band-aid the presets always needed on Google TTS.
+ *  - The qwen CLONE (Voice A) inherits its reference clip's already-fast pace (~237 WPM at 1.0x);
+ *    stacking 1.2x on top overshoots (~276 WPM = too rushed), so the clone stays at 1.0x.
  */
-export const VIDEO_SUMMARY_NARRATION_TEMPO = 1.0;
+export const VIDEO_SUMMARY_NARRATION_TEMPO_PRESET = 1.2;
+export const VIDEO_SUMMARY_NARRATION_TEMPO_CLONE = 1.0;
+/** @deprecated Clone-calibrated value kept for existing consumers; prefer the voice-aware pair. */
+export const VIDEO_SUMMARY_NARRATION_TEMPO = VIDEO_SUMMARY_NARRATION_TEMPO_CLONE;
 /**
  * Written-word budget per FINISHED second — also a pace lever (density). At ~3.3 the script is less
  * crammed (fewer, longer beats), which reads calmer than the ~4.6 that packed 21 quick cuts to fill
@@ -307,6 +313,11 @@ export async function processVideoSummary(data: VideoSummaryJob): Promise<void> 
     // Resolved once — not per beat — since it's the same voice for every stem and the voiceA
     // branch presigns a reference URL (no need to re-presign per beat).
     const voice = await resolveSummaryVoice(data.voiceId);
+    // Voice-aware pace: the qwen clone (voiceA) is already fast at 1.0x; Google presets read slow
+    // and need the ~1.2x speed-up to hit the same brisk recap pace.
+    const narrationTempo = data.voiceId === 'voiceA'
+      ? VIDEO_SUMMARY_NARRATION_TEMPO_CLONE
+      : VIDEO_SUMMARY_NARRATION_TEMPO_PRESET;
     const stems: NarrationStem[] = [];
     const beatIsDiegetic = plan.beats.map((beat) => diegeticEnabled && beat.audioMode === 'diegetic');
     await stampStage('Recording narration…');
@@ -329,7 +340,7 @@ export async function processVideoSummary(data: VideoSummaryJob): Promise<void> 
         data.generationId,
         index,
         VIDEO_SUMMARY_VOICE_STYLE_PROMPT,
-        VIDEO_SUMMARY_NARRATION_TEMPO,
+        narrationTempo,
         voice,
       ));
     }
