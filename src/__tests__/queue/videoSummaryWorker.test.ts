@@ -3,6 +3,9 @@ jest.mock('bullmq', () => ({
   Worker: jest.fn().mockImplementation(() => ({ close: jest.fn(), on: jest.fn() })),
 }));
 
+const mockConfig = { videoSummaryDiegeticEnabled: false };
+jest.mock('../../config', () => ({ config: mockConfig }));
+
 jest.mock('../../config/formats', () => ({
   FORMATS_BY_ID: {
     explainer: {
@@ -37,13 +40,17 @@ jest.mock('../../services/geminiTtsService', () => ({
   VIDEO_SUMMARY_VOICE_STYLE_PROMPT: 'Narrate with a brisk, energetic pace.',
 }));
 jest.mock('../../services/lyriaService', () => ({ generateMusicBed: jest.fn() }));
-jest.mock('../../services/mediaProbe', () => ({ probeVideoMeta: jest.fn() }));
+jest.mock('../../services/mediaProbe', () => ({ probeVideoMeta: jest.fn(), probeHasAudioStream: jest.fn() }));
 jest.mock('../../services/providers/ReplicateProvider', () => ({ transcribeWordTimings: jest.fn() }));
 jest.mock('../../services/whisperxService', () => ({
   ...jest.requireActual('../../services/whisperxService'),
   getWordTimings: jest.fn(),
 }));
-jest.mock('../../services/wavUtil', () => ({ concatWavBuffers: jest.fn() }));
+jest.mock('../../services/wavUtil', () => ({
+  concatWavBuffers: jest.fn(),
+  silenceWav: jest.fn(),
+  wavDurationSeconds: jest.fn(),
+}));
 jest.mock('../../services/generationService', () => ({
   classifyFailureReason: jest.fn(() => 'generic_error'),
   markFailed: jest.fn(),
@@ -59,11 +66,12 @@ jest.mock('../../queue/ffmpegWorker', () => ({
 
 import {
   allocateSummaryClipDurations,
+  diegeticHighlightSeconds,
   processVideoSummary,
   resolveSummaryCaptionAnchor,
   VIDEO_SUMMARY_NARRATION_TEMPO,
 } from '../../queue/videoSummaryWorker';
-import { probeVideoMeta } from '../../services/mediaProbe';
+import { probeHasAudioStream, probeVideoMeta } from '../../services/mediaProbe';
 import {
   analyzeActionWindows,
   extractEmbeddedSubtitleText,
@@ -77,7 +85,7 @@ import {
 import { generateNarrationForScene } from '../../services/geminiTtsService';
 import { generateMusicBed } from '../../services/lyriaService';
 import { getWordTimings } from '../../services/whisperxService';
-import { concatWavBuffers } from '../../services/wavUtil';
+import { concatWavBuffers, silenceWav, wavDurationSeconds } from '../../services/wavUtil';
 import {
   markFailed,
   markProcessing,
@@ -147,6 +155,7 @@ const WORDS = [
 
 beforeEach(() => {
   jest.clearAllMocks();
+  mockConfig.videoSummaryDiegeticEnabled = false;
   ffmpegAdd.mockResolvedValue(undefined);
   (markProcessing as jest.Mock).mockResolvedValue(true);
   (markFailed as jest.Mock).mockResolvedValue(true);
@@ -167,6 +176,12 @@ beforeEach(() => {
   (getWordTimings as jest.Mock).mockResolvedValue(WORDS);
   (generateMusicBed as jest.Mock).mockResolvedValue({ r2Key: 'generations/gen-summary-1.music.wav' });
   (probeVideoMeta as jest.Mock).mockResolvedValue({ durationSeconds: 1440, width: 1920, height: 1080 });
+  (probeHasAudioStream as jest.Mock).mockResolvedValue(true);
+  (silenceWav as jest.Mock).mockImplementation((durationSeconds: number) => Buffer.from(`silence-${durationSeconds}`));
+  (wavDurationSeconds as jest.Mock).mockImplementation((buffer: Buffer) => {
+    const match = buffer.toString('utf8').match(/^silence-([\d.]+)/);
+    return match ? Number(match[1]) : 0;
+  });
   global.fetch = jest.fn().mockImplementation((url: string) => {
     if (url.includes('episode.mp4')) return Promise.resolve(new Response(Buffer.from('source video'), { status: 200 }));
     return Promise.resolve(new Response(Buffer.from('narration wav'), { status: 200 }));
@@ -355,5 +370,96 @@ describe('videoSummaryWorker', () => {
     expect(getUploadPresignedUrl).not.toHaveBeenCalled();
     expect(planVideoSummary).not.toHaveBeenCalled();
     expect(refundCredits).not.toHaveBeenCalled();
+  });
+
+  describe('diegeticHighlightSeconds', () => {
+    it('clamps the sum of raw clip durations to [3,6] seconds', () => {
+      expect(diegeticHighlightSeconds([{ startSeconds: 0, endSeconds: 1, description: 'x' }])).toBe(3);
+      expect(diegeticHighlightSeconds([{ startSeconds: 0, endSeconds: 4, description: 'x' }])).toBe(4);
+      expect(diegeticHighlightSeconds([{ startSeconds: 0, endSeconds: 10, description: 'x' }])).toBe(6);
+      expect(diegeticHighlightSeconds([
+        { startSeconds: 0, endSeconds: 2, description: 'a' },
+        { startSeconds: 10, endSeconds: 12.5, description: 'b' },
+      ])).toBe(4.5);
+    });
+  });
+
+  describe('"let the clip breathe" diegetic beat', () => {
+    // Two clips in one diegetic beat, so the resulting diegeticWindows must carry one window per
+    // underlying clip (not one per beat) — 2 + 2.5 = 4.5s, inside the [3,6] clamp.
+    const DIEGETIC_CLIPS = [
+      { startSeconds: 10, endSeconds: 12, description: 'clip a' },
+      { startSeconds: 20, endSeconds: 22.5, description: 'clip b' },
+    ];
+    const diegeticPlan = () => ({
+      ...PLAN,
+      beats: [
+        { narration: '', clips: DIEGETIC_CLIPS, audioMode: 'diegetic' as const },
+        PLAN.beats[1],
+      ],
+    });
+
+    it('skips TTS for a diegetic beat, uploads a silence stem sized to D_i, and threads per-clip diegeticWindows', async () => {
+      mockConfig.videoSummaryDiegeticEnabled = true;
+      (generateNarrationForScene as jest.Mock).mockReset().mockResolvedValueOnce({
+        r2Key: 'generations/gen-summary-1.narration.1.wav',
+        durationSeconds: 6.25,
+      });
+      (planVideoSummary as jest.Mock).mockResolvedValue(diegeticPlan());
+
+      await processVideoSummary(JOB);
+
+      // Only beat 1 (the narrated one) ever calls the TTS path.
+      expect(generateNarrationForScene).toHaveBeenCalledTimes(1);
+      expect(generateNarrationForScene).toHaveBeenCalledWith(
+        PLAN.beats[1]!.narration,
+        JOB.voiceId,
+        'gemini-tts-test',
+        JOB.generationId,
+        1,
+        expect.any(String),
+        VIDEO_SUMMARY_NARRATION_TEMPO,
+        undefined,
+      );
+
+      // Silence stem sized to D_i = clamp(2 + 2.5, 3, 6) = 4.5, uploaded under its own key.
+      expect(silenceWav).toHaveBeenCalledWith(4.5);
+      expect(uploadBufferToR2).toHaveBeenCalledWith(
+        expect.any(Buffer),
+        'generations/gen-summary-1.narration.0.silence.wav',
+        'audio/wav',
+      );
+
+      const call = ffmpegAdd.mock.calls.find(([, payload]) => payload.op === 'summary_compose')!;
+      expect(call[1].summaryCompose.diegeticWindows).toEqual([
+        { startSec: 0, endSec: 2, sourceClipStartSec: 10, sourceClipEndSec: 12 },
+        { startSec: 2, endSec: 4.5, sourceClipStartSec: 20, sourceClipEndSec: 22.5 },
+      ]);
+    });
+
+    it('flag off: forces every beat to narrated even if the plan marks one diegetic (defense in depth)', async () => {
+      mockConfig.videoSummaryDiegeticEnabled = false;
+      (planVideoSummary as jest.Mock).mockResolvedValue(diegeticPlan());
+
+      await processVideoSummary(JOB);
+
+      expect(generateNarrationForScene).toHaveBeenCalledTimes(2);
+      expect(silenceWav).not.toHaveBeenCalled();
+      const call = ffmpegAdd.mock.calls.find(([, payload]) => payload.op === 'summary_compose')!;
+      expect(call[1].summaryCompose.diegeticWindows).toBeUndefined();
+    });
+
+    it('no-audio-source fallback: forces narrated even with the flag on when the source has no audio stream', async () => {
+      mockConfig.videoSummaryDiegeticEnabled = true;
+      (probeHasAudioStream as jest.Mock).mockResolvedValue(false);
+      (planVideoSummary as jest.Mock).mockResolvedValue(diegeticPlan());
+
+      await processVideoSummary(JOB);
+
+      expect(generateNarrationForScene).toHaveBeenCalledTimes(2);
+      expect(silenceWav).not.toHaveBeenCalled();
+      const call = ffmpegAdd.mock.calls.find(([, payload]) => payload.op === 'summary_compose')!;
+      expect(call[1].summaryCompose.diegeticWindows).toBeUndefined();
+    });
   });
 });

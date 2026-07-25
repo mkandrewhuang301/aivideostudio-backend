@@ -36,6 +36,19 @@ export function pcm16ToWav(pcm: Buffer, sampleRate = 24_000, channels = 1): Buff
   return output;
 }
 
+/**
+ * N seconds of digital silence, wrapped in the SAME PCM16 RIFF/WAV shape `pcm16ToWav` produces by
+ * default (24kHz mono) — this is the "diegetic beat" silence stem (2026-07-25 spec): a beat where
+ * the original footage audio carries the moment and the narrator stays silent still needs a stem
+ * so `concatWavBuffers` can splice it into one continuous narration track with a silent gap where
+ * the diegetic clip plays. `Buffer.alloc` zero-fills by default, which IS silence for signed PCM.
+ */
+export function silenceWav(durationSeconds: number, sampleRate = 24_000, channels = 1): Buffer {
+  if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) throw new Error('Invalid silence duration');
+  const sampleCount = Math.max(1, Math.round(durationSeconds * sampleRate));
+  return pcm16ToWav(Buffer.alloc(sampleCount * channels * 2), sampleRate, channels);
+}
+
 function parseWav(wav: Buffer): ParsedWav {
   if (wav.length < 12 || wav.toString('ascii', 0, 4) !== 'RIFF' || wav.toString('ascii', 8, 12) !== 'WAVE') {
     throw new Error('Invalid WAV: expected a RIFF/WAVE container');

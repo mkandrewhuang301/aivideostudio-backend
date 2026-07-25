@@ -216,6 +216,79 @@ describe('validateGroundedNarration', () => {
     }, EVIDENCE, 60)).toThrow('non-chronological');
   });
 
+  describe('"let the clip breathe" diegetic beat', () => {
+    it('ignores audio_mode entirely while the feature is off, requiring narration like any other beat', () => {
+      const plan = validateGroundedNarration({
+        title: 'A recap', overview: 'Overview.', music_mood: 'dramatic',
+        beats: [
+          // Empty narration + audio_mode: 'diegetic' — but the feature is off, so this must be
+          // dropped exactly like any other beat with nothing to say, never silently rendered.
+          { narration: '', evidence_ids: ['e1'], audio_mode: 'diegetic' },
+          // e1 (setup) is still unclaimed since the beat above never consumed it — cited here so
+          // required causal coverage still holds after the drop.
+          { narration: 'Setup and cause.', evidence_ids: ['e1', 'e2'] },
+          { narration: 'It escalates.', evidence_ids: ['e3'] },
+          { narration: 'Payoff.', evidence_ids: ['e4'] },
+        ],
+      }, EVIDENCE, 60, false, false);
+
+      expect(plan.beats.map((beat) => beat.narration)).toEqual(['Setup and cause.', 'It escalates.', 'Payoff.']);
+      expect(plan.beats.every((beat) => beat.audioMode === undefined)).toBe(true);
+    });
+
+    it('marks a beat diegetic with empty narration when enabled, without dropping it', () => {
+      const plan = validateGroundedNarration({
+        title: 'A recap', overview: 'Overview.', music_mood: 'dramatic',
+        beats: [
+          { narration: '', evidence_ids: ['e1'], audio_mode: 'diegetic' },
+          { narration: 'Cause.', evidence_ids: ['e2'] },
+          { narration: 'It escalates.', evidence_ids: ['e3'] },
+          { narration: 'Payoff.', evidence_ids: ['e4'] },
+        ],
+      }, EVIDENCE, 60, false, true);
+
+      expect(plan.beats[0]!.audioMode).toBe('diegetic');
+      expect(plan.beats[0]!.narration).toBe('');
+      expect(plan.beats.slice(1).every((beat) => beat.audioMode === undefined)).toBe(true);
+    });
+
+    it('keeps only the FIRST diegetic beat, downgrading extras to narrated', () => {
+      const plan = validateGroundedNarration({
+        title: 'A recap', overview: 'Overview.', music_mood: 'dramatic',
+        beats: [
+          { narration: 'Cold open.', evidence_ids: ['e1'], audio_mode: 'diegetic' },
+          { narration: 'Cause.', evidence_ids: ['e2'] },
+          // A second beat also claims diegetic — must be downgraded, never trusted to self-limit.
+          { narration: 'It escalates.', evidence_ids: ['e3'], audio_mode: 'diegetic' },
+          { narration: 'Payoff.', evidence_ids: ['e4'] },
+        ],
+      }, EVIDENCE, 60, false, true);
+
+      expect(plan.beats.map((beat) => beat.audioMode ?? 'narrated')).toEqual([
+        'diegetic', 'narrated', 'narrated', 'narrated',
+      ]);
+    });
+
+    it('downgrades a diegetic beat whose narration is too long to actually be silence-compatible', () => {
+      const plan = validateGroundedNarration({
+        title: 'A recap', overview: 'Overview.', music_mood: 'dramatic',
+        beats: [
+          {
+            narration: 'This one runs on for well more than a single short line of narration text.',
+            evidence_ids: ['e1'],
+            audio_mode: 'diegetic',
+          },
+          { narration: 'Cause.', evidence_ids: ['e2'] },
+          { narration: 'It escalates.', evidence_ids: ['e3'] },
+          { narration: 'Payoff.', evidence_ids: ['e4'] },
+        ],
+      }, EVIDENCE, 60, false, true);
+
+      expect(plan.beats[0]!.audioMode).toBeUndefined();
+      expect(plan.beats[0]!.narration).toContain('well more than');
+    });
+  });
+
   it('lenient mode drops the out-of-order beat and salvages the run', () => {
     // Same out-of-order input, but the final (lenient) attempt keeps the payoff and drops the
     // backward-reaching setup beat rather than failing the whole generation.

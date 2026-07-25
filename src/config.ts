@@ -85,6 +85,12 @@ export const config = {
   // Direct Wikipedia lookup is cheap and fail-open. Set false for an emergency external-network
   // kill switch; timestamped source-evidence planning continues unchanged when disabled.
   videoSummaryWikipediaEnabled: process.env.VIDEO_SUMMARY_WIKIPEDIA_ENABLED !== 'false',
+  // "Let the clip breathe" diegetic-audio beat (2026-07-25 spec): lets the LLM mark AT MOST ONE
+  // beat where the original footage audio plays at full volume and the narrator stays silent.
+  // Defaults OFF (ships both behaviors) — off means the planner prompt never invites it AND
+  // validateGroundedNarration ignores any audio_mode the model returns anyway, so a recap is
+  // byte-identical to today's all-narrated pipeline until this is explicitly turned on.
+  videoSummaryDiegeticEnabled: process.env.VIDEO_SUMMARY_DIEGETIC_ENABLED === 'true',
   // Gemini Omni video generation runs through the Gemini Enterprise Agent Platform
   // Interactions endpoint. Keep this separate from firebaseProjectId: Firebase Auth lives in a
   // different Google project, while Agent Platform billing belongs to Fantasia's credit project.

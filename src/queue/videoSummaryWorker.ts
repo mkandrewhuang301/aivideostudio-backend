@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
+import { config } from '../config';
 import { FORMATS_BY_ID } from '../config/formats';
 import { getUploadPresignedUrl, getGenerationPresignedUrl, uploadBufferToR2 } from '../services/archivalService';
 import { refundCredits } from '../services/creditService';
@@ -25,6 +26,7 @@ import {
 // lives in geminiTtsService, shared with the Explainer voice resolver.
 export { VOICE_A_REFERENCE_R2_KEY, VOICE_A_TRANSCRIPT, VIDEO_SUMMARY_VOICE_STYLE_PROMPT };
 import { generateMusicBed } from '../services/lyriaService';
+import { probeHasAudioStream } from '../services/mediaProbe';
 import {
   classifyFailureReason,
   markFailed,
@@ -37,11 +39,11 @@ import {
   planVideoSummary,
   type VideoSummaryClip,
 } from '../services/videoSummaryService';
-import { concatWavBuffers } from '../services/wavUtil';
+import { concatWavBuffers, silenceWav, wavDurationSeconds } from '../services/wavUtil';
 import { buildSceneCues, getWordTimings } from '../services/whisperxService';
 import type { CaptionWordDraft } from '../services/captionTranscriptionService';
 import type { VideoSummaryJob } from './videoSummaryQueue';
-import { ffmpegQueue, type SummarySourceClipSpec } from './ffmpegWorker';
+import { ffmpegQueue, type SummaryDiegeticWindow, type SummarySourceClipSpec } from './ffmpegWorker';
 
 const QUEUE_NAME = 'video-summary';
 /**
@@ -88,6 +90,40 @@ async function resolveSummaryVoice(voiceId: string): Promise<NarrationVoice | un
 }
 /** Fixed gap between per-beat TTS calls, to stay under the native endpoint's burst rate limit. */
 const NARRATION_INTER_STEM_DELAY_MS = 1_200;
+
+// "Let the clip breathe" diegetic-audio beat (2026-07-25 spec) ----------------------------------
+/** Floor/ceiling for a diegetic beat's natural-speed highlight length D_i. */
+const MIN_DIEGETIC_HIGHLIGHT_SECONDS = 3;
+const MAX_DIEGETIC_HIGHLIGHT_SECONDS = 6;
+
+/**
+ * D_i — a diegetic beat's natural highlight duration: the sum of its (raw, unallocated) source
+ * clip durations, clamped to [MIN_DIEGETIC_HIGHLIGHT_SECONDS, MAX_DIEGETIC_HIGHLIGHT_SECONDS].
+ * This REPLACES "size footage to narration length" for that one beat — the clip plays at natural
+ * 1x for a bounded highlight instead. Its silence stem is built to exactly this length (see
+ * buildDiegeticSilenceStem), so allocateSummaryClipDurations below needs no special-casing at
+ * all: it just targets the stem's own (measured) duration like every other beat.
+ */
+export function diegeticHighlightSeconds(clips: VideoSummaryClip[]): number {
+  const totalSeconds = clips.reduce((sum, clip) => sum + (clip.endSeconds - clip.startSeconds), 0);
+  return Math.min(MAX_DIEGETIC_HIGHLIGHT_SECONDS, Math.max(MIN_DIEGETIC_HIGHLIGHT_SECONDS, totalSeconds));
+}
+
+/**
+ * A diegetic beat gets NO TTS — its "stem" is a silence WAV of length D_i, uploaded to R2 exactly
+ * like a real narration stem so concatWavBuffers (format-strict) still yields one continuous
+ * narration track with a silent gap where the diegetic clip's original audio plays instead.
+ */
+async function buildDiegeticSilenceStem(
+  generationId: string,
+  beatIndex: number,
+  clips: VideoSummaryClip[],
+): Promise<NarrationStem> {
+  const buffer = silenceWav(diegeticHighlightSeconds(clips));
+  const r2Key = `generations/${generationId}.narration.${beatIndex}.silence.wav`;
+  await uploadBufferToR2(buffer, r2Key, 'audio/wav');
+  return { r2Key, durationSeconds: wavDurationSeconds(buffer) };
+}
 
 const VIDEO_SUMMARY_MUSIC_DIRECTION = [
   'Use a dramatic cinematic instrumental underscore for a fast-paced story recap.',
@@ -241,9 +277,12 @@ export async function processVideoSummary(data: VideoSummaryJob): Promise<void> 
     await stampStage('Analyzing episode…');
     await downloadToFile(await getUploadPresignedUrl(data.sourceR2Key), sourcePath);
 
-    const [actionWindows, subtitleText] = await Promise.all([
+    const [actionWindows, subtitleText, sourceHasAudio] = await Promise.all([
       analyzeActionWindows(sourcePath, data.sourceDurationSeconds),
       extractEmbeddedSubtitleText(sourcePath),
+      // "Let the clip breathe" no-audio-source fallback (2026-07-25 spec): a diegetic beat needs
+      // real footage audio to carry — probed once, up front, off the same downloaded source file.
+      probeHasAudioStream(sourcePath),
     ]);
     await stampStage('Planning the story…');
     const plan = await planVideoSummary({
@@ -257,6 +296,11 @@ export async function processVideoSummary(data: VideoSummaryJob): Promise<void> 
       actionWindows,
       subtitleText,
     });
+    // Defense-in-depth belt #2 (belt #1 is validateGroundedNarration ignoring audio_mode outright
+    // while the flag is off): even if a beat somehow carries audio_mode: 'diegetic', it is only
+    // ever treated as diegetic here when the feature is enabled AND the source actually has audio
+    // to lift from — never a bare `plan.beats[i].audioMode === 'diegetic'` check.
+    const diegeticEnabled = config.videoSummaryDiegeticEnabled && sourceHasAudio;
 
     const format = FORMATS_BY_ID.explainer;
     if (!format) throw new Error('Explainer voice configuration unavailable');
@@ -264,8 +308,14 @@ export async function processVideoSummary(data: VideoSummaryJob): Promise<void> 
     // branch presigns a reference URL (no need to re-presign per beat).
     const voice = await resolveSummaryVoice(data.voiceId);
     const stems: NarrationStem[] = [];
+    const beatIsDiegetic = plan.beats.map((beat) => diegeticEnabled && beat.audioMode === 'diegetic');
     await stampStage('Recording narration…');
     for (let index = 0; index < plan.beats.length; index += 1) {
+      if (beatIsDiegetic[index]) {
+        // No TTS for a diegetic beat — its stem is silence, sized to its natural highlight D_i.
+        stems.push(await buildDiegeticSilenceStem(data.generationId, index, plan.beats[index]!.clips));
+        continue;
+      }
       // Space the per-beat TTS calls out. The native endpoint rate-limits under a tight burst, and
       // paying a small fixed gap up front is cheaper than absorbing the 429s + exponential backoff
       // that the retry would otherwise take (and far cheaper than falling through to Fal).
@@ -319,9 +369,31 @@ export async function processVideoSummary(data: VideoSummaryJob): Promise<void> 
       ))?.r2Key ?? null;
     }
 
-    const clips = plan.beats.flatMap((beat, index) => (
+    // Per-beat clip specs (still in beat order) so a diegetic beat's underlying clips can be
+    // threaded into diegeticWindows below — allocateSummaryClipDurations needs no diegetic
+    // special-casing at all: the silence stem built above already measures D_i, so it targets
+    // exactly like any other beat's stem duration.
+    const beatClipSpecs = plan.beats.map((beat, index) => (
       allocateSummaryClipDurations(beat.clips, stems[index]!.durationSeconds, data.sourceDurationSeconds)
     ));
+    const clips = beatClipSpecs.flat();
+
+    let diegeticOutputCursor = 0;
+    const diegeticWindows: SummaryDiegeticWindow[] = [];
+    beatClipSpecs.forEach((clipSpecs, beatIndex) => {
+      for (const clip of clipSpecs) {
+        if (beatIsDiegetic[beatIndex]) {
+          diegeticWindows.push({
+            startSec: diegeticOutputCursor,
+            endSec: diegeticOutputCursor + clip.outputDurationSeconds,
+            sourceClipStartSec: clip.startSeconds,
+            sourceClipEndSec: clip.endSeconds,
+          });
+        }
+        diegeticOutputCursor += clip.outputDurationSeconds;
+      }
+    });
+
     await mergeGenerationParams(data.generationId, {
       format_id: 'video-explainer',
       summary_mode: data.mode,
@@ -389,6 +461,10 @@ export async function processVideoSummary(data: VideoSummaryJob): Promise<void> 
         narrationR2Key,
         musicR2Key,
         musicVolume: 0.18,
+        // Absent when empty (the overwhelmingly common, flag-off case) so the compose job payload
+        // is unchanged from before this feature existed — buildSummaryComposeArgs treats an absent
+        // and an empty array identically anyway, but this keeps queued payloads minimal too.
+        ...(diegeticWindows.length > 0 ? { diegeticWindows } : {}),
         captionCues: cues,
         captionStyle: {
           fontSize: SUMMARY_CAPTION_FONT_SIZE,

@@ -377,10 +377,40 @@ export function buildSummaryComposeArgs(input: BuildSummaryComposeArgsInput): st
   filterParts.push(`${spec.clips.map((_, index) => `[v${index}]`).join('')}concat=n=${spec.clips.length}:v=1:a=0[vconcat]`);
   filterParts.push(`[vconcat]ass=filename=${captionAssPath}:fontsdir=${fontsDir}[vout]`);
 
-  let audioMap = '1:a';
   if (musicPath) {
     args.push('-stream_loop', '-1', '-i', musicPath);
-    filterParts.push(`[2:a]volume=${spec.musicVolume}[bed]`);
+  }
+  const musicInputIndex = '2:a';
+
+  let audioMap = '1:a';
+  const diegeticWindows = spec.diegeticWindows ?? [];
+  if (diegeticWindows.length > 0) {
+    // "Let the clip breathe" (2026-07-25 spec): the original footage audio ([0:a]) plays at full
+    // volume during each diegetic window, layered under the (silent-there) narration track and
+    // the optional music bed. normalize=0 (already used by buildExplainerComposeArgs above) keeps
+    // every input at its own full volume — amix's default normalize=1 would otherwise attenuate
+    // the diegetic audio right when it's supposed to carry the moment.
+    const diegeticLabels = diegeticWindows.map((window, index) => {
+      const label = `dieg${index}`;
+      const sourceStart = Math.max(0, window.sourceClipStartSec);
+      const sourceEnd = Math.max(sourceStart, window.sourceClipEndSec);
+      const delayMs = Math.max(0, Math.round(window.startSec * 1000));
+      filterParts.push(
+        `[0:a]atrim=start=${sourceStart}:end=${sourceEnd},asetpts=PTS-STARTPTS,adelay=${delayMs}|${delayMs}[${label}]`,
+      );
+      return `[${label}]`;
+    });
+
+    const bedLabel = musicPath ? '[bed]' : null;
+    if (bedLabel) filterParts.push(`[${musicInputIndex}]volume=${spec.musicVolume}${bedLabel}`);
+
+    const mixInputs = ['[1:a]', ...(bedLabel ? [bedLabel] : []), ...diegeticLabels];
+    filterParts.push(
+      `${mixInputs.join('')}amix=inputs=${mixInputs.length}:duration=first:dropout_transition=0:normalize=0[aout]`,
+    );
+    audioMap = '[aout]';
+  } else if (musicPath) {
+    filterParts.push(`[${musicInputIndex}]volume=${spec.musicVolume}[bed]`);
     filterParts.push('[1:a][bed]amix=inputs=2:duration=first:dropout_transition=0[aout]');
     audioMap = '[aout]';
   }

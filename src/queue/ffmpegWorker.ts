@@ -156,6 +156,21 @@ export interface SummarySourceClipSpec {
  */
 export type SummarySourceFraming = 'fill' | 'balanced' | 'fit';
 
+/**
+ * "Let the clip breathe" diegetic-audio beat (2026-07-25 spec). One OUTPUT-timeline window where
+ * the original footage audio (`[0:a]`) should play at full volume instead of narration. Built by
+ * videoSummaryWorker from a beat's own SummarySourceClipSpec entries — one window per underlying
+ * clip, so a multi-clip diegetic beat threads through as multiple contiguous windows.
+ */
+export interface SummaryDiegeticWindow {
+  /** Output-timeline seconds (post-concat) where this window starts/ends. */
+  startSec: number;
+  endSec: number;
+  /** Source-timeline range to lift audio from — matches the same clip's video trim range. */
+  sourceClipStartSec: number;
+  sourceClipEndSec: number;
+}
+
 export interface SummaryComposeSpec {
   width: number;
   height: number;
@@ -170,6 +185,8 @@ export interface SummaryComposeSpec {
   musicVolume: number;
   captionCues: ComposeCaptionCue[];
   captionStyle: ComposeCaptionStyle;
+  /** Absent/empty = today's graph exactly (narration, or narration+music amix) — no `[0:a]` use. */
+  diegeticWindows?: SummaryDiegeticWindow[];
 }
 
 export interface FfmpegJobData {

@@ -126,6 +126,29 @@ export async function probeDurationSeconds(input: string): Promise<number | null
   return durationSeconds;
 }
 
+/**
+ * Whether `input` has at least one audio stream — used by the "let the clip breathe" diegetic
+ * summary beat (2026-07-25 spec) to silently fall back to a normal narrated beat when the source
+ * has no audio track, so the compose graph never references a missing `[0:a]`. Fails CLOSED (a
+ * probe error resolves to `false`, i.e. "no audio") — the safe direction here is to assume no
+ * audio and skip the feature, never to assume audio that might not exist.
+ */
+export async function probeHasAudioStream(input: string): Promise<boolean> {
+  try {
+    const { stdout } = await execFileAsync('ffprobe', [
+      '-v', 'error',
+      '-select_streams', 'a',
+      '-show_entries', 'stream=index',
+      '-of', 'csv=p=0',
+      input,
+    ]);
+    return stdout.trim().length > 0;
+  } catch (err) {
+    console.error('[mediaProbe] probeHasAudioStream failed (assuming no audio):', err);
+    return false;
+  }
+}
+
 function parsePositiveNumber(value: string | undefined): number | null {
   if (value == null) return null;
   const parsed = Number(value);

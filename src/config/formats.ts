@@ -269,7 +269,7 @@ export interface CharacterVlogFormatDef extends FormatSummaryDef {
   flow: 'character_vlog';
   /** Total-length picker values (seconds). Take count/allocation is backend-decided. */
   duration_options: number[];
-  /** Display + cost basis: credits per second of TOTAL length (Mini $0.05/s 720p, cents
+  /** Display + cost basis: credits per second of TOTAL length (Mini $0.05/s 720p + per-take gpt-image still, cents
    *  rounded up — Andrew-verified 2026-07-24). Billing = ceil(seconds × per_second_credits). */
   per_second_credits: number;
   aspect_ratio: '9:16';
@@ -303,7 +303,7 @@ Every scene must use segment_type "dialogue" and include all seven required scen
 HARD RULES:
 1. LENGTH. The TOTAL NARRATION BUDGET in the user message bounds full_script as a whole — that is the real constraint, not any per-scene target. Per scene, keep each narration_segment under 9.5 seconds of speech (~24 words) as a hard CEILING (Omni clips have a 10-second ceiling); most scenes should be well under it. Beat lengths may vary naturally — a short four-second beat and a longer nine-second explanation in one video are desirable, as long as the sum fits the total budget.
 2. visual_prompt describes what is on screen while that scene's narration_segment plays. It must never depict a narrator, speaker, presenter, host, talking figure, or explaining figure. Show only illustrative content of the topic itself.
-3. SPECIFICITY — avoid generic training-data tropes. Every visual_prompt must state the ERA, the EXACT object or subject being depicted, and explicitly what NOT to show, so the image model cannot default to a modern or generic version of the subject. For historical or technical topics, name the period, materials, and defining features, and forbid anachronisms with one brief targeted negative placed AFTER the positive description (lead with positive specifics — gpt-image-2 follows those far better than long negative lists). Worked example: BAD = "a wind tunnel testing" (the model draws a modern car). GOOD = "a 1901 Wright brothers wooden box wind tunnel testing small model wing/airfoil shapes, early-1900s wood construction, brass fittings, gas-lit workshop; NO car, NO modern equipment." Diagrams are fine and encouraged — describe exactly what the diagram shows with the same literal specificity.
+3. SPECIFICITY — avoid generic training-data tropes. Every visual_prompt must state the ERA, the EXACT object or subject being depicted, and explicitly what NOT to show, so the image model cannot default to a modern or generic version of the subject. For historical or technical topics, name the period, materials, and defining features, and forbid anachronisms with one brief targeted negative placed AFTER the positive description (lead with positive specifics — gpt-image-2 follows those far better than long negative lists). Worked example: BAD = "a wind tunnel testing" (the model draws a modern car). GOOD = "a 1901 Wright brothers wooden box wind tunnel testing small model wing/airfoil shapes, early-1900s wood construction, brass fittings, gas-lit workshop; NO car, NO modern equipment." Diagrams are fine and encouraged — describe exactly what the diagram shows with the same literal specificity. Depict the subject COMPLETE unless deliberately cropped for composition — a vehicle shows its wheels/landing gear, a machine its key parts; a motion edit can only animate what the still actually contains.
 4. Every visual_prompt must reserve clean, simple, uncluttered negative space in the scene's text_zone so captions do not cover the subject.
 5. ON-IMAGE TEXT is allowed ONLY through the optional "on_image_text" field — an exact short string (5 words max, e.g. "1903" or "KITTY HAWK") that the image model bakes into the scene in-style. The user message states a CAP for the whole video; stay within it, and spend it only where the words add real information (a date, a place name, a one-word label) on a beat long enough to read (4+ seconds of narration). Position the text away from the scene's text_zone so it never collides with captions. NEVER write text into visual_prompt itself — an un-fielded request for words in the image is how garbled pseudo-text ships. When in doubt, use null: most scenes should have NO on-image text.
 6. motion_prompt must describe subtle, cinematic movement of the same scene, such as a gentle camera push, pan, or ambient subject motion. Never change scenes or introduce new subjects.
@@ -317,7 +317,7 @@ MOTION (every scene must include a "motion" object):
    - "ambient_life" — an atmospheric or landscape scene that would otherwise sit dead needs a subtle living touch (drifting smoke, shifting light, floating particles). 1 edit_step.
    - "ken_burns" — a calm scene that only needs a gentle camera push/pan, no content change. edit_steps: [].
    - "wiggle" — RESERVED for rare high-energy emphasis beats only: an explosion, a shiver, an impact, a shake. Never use it as a default "just add life" choice — a calm scene that only needs life gets "ken_burns". edit_steps: [].
-10. Each edit_steps entry is a SURGICAL delta: describe ONLY the one thing that changes in that step, and end the sentence with "keep everything else in the frame identical." Never describe the whole scene again.
+10. Each edit_steps entry is a SURGICAL delta: describe ONLY the one thing that changes in that step, and end the sentence with "keep everything else in the frame identical." Never describe the whole scene again. Animate elements that are ALREADY in the frame (spin the propeller that exists, flutter the flag that's planted) — never invent new parts, effects, or atmosphere (no conjured smoke, sparks, wheels, wires, extra objects). If the base still lacks it, the edit must not summon it.
 11. motion.priority is 1-5: how much this motion matters to comprehension or impact. A key transformation central to the idea = 5. Ambient garnish that's nice but skippable = 2. This is used to ration a limited nano-edit budget across the video, so be honest — do not mark everything a 5.
 12. transition_out is "cut" by default. Use "morph" only when this scene's subject visually relates to the next scene (a dissolve between them would read well) — aim for morph on roughly half of scene boundaries across the video, not all or none.`,
       segment_types_allowed: ['dialogue'],
@@ -539,7 +539,7 @@ MOTION (every scene must include a "motion" object):
     tile: {},
     flow: 'character_vlog',
     duration_options: [15, 30, 45, 60],
-    per_second_credits: 5,
+    per_second_credits: 6, // 7/25 arm-C: covers Mini $0.05/s + ~$0.03-0.04 gpt-image still per take
     aspect_ratio: '9:16',
     sheet: {
       description: 'Your character writes, stages, and films a multi-take vlog from one topic.',

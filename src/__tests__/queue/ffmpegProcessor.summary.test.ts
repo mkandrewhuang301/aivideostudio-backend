@@ -91,6 +91,103 @@ describe('buildSummaryComposeArgs', () => {
   });
 });
 
+describe('buildSummaryComposeArgs — "let the clip breathe" diegetic audio', () => {
+  it('leaves the graph exactly as before when diegeticWindows is absent (backward compat)', () => {
+    const withoutWindows = buildSummaryComposeArgs({
+      spec: SPEC,
+      sourcePath: '/tmp/source.mp4',
+      narrationPath: '/tmp/narration.wav',
+      musicPath: '/tmp/music.wav',
+      captionAssPath: '/tmp/captions.ass',
+      fontsDir: '/tmp/fonts',
+      outPath: '/tmp/out.mp4',
+    });
+    const withEmptyWindows = buildSummaryComposeArgs({
+      spec: { ...SPEC, diegeticWindows: [] },
+      sourcePath: '/tmp/source.mp4',
+      narrationPath: '/tmp/narration.wav',
+      musicPath: '/tmp/music.wav',
+      captionAssPath: '/tmp/captions.ass',
+      fontsDir: '/tmp/fonts',
+      outPath: '/tmp/out.mp4',
+    });
+    // Absent and empty are byte-identical to each other, and neither ever references [0:a].
+    expect(withEmptyWindows).toEqual(withoutWindows);
+    const graph = withoutWindows[withoutWindows.indexOf('-filter_complex') + 1]!;
+    expect(graph).not.toContain('[0:a]');
+    expect(graph).not.toContain('dieg');
+  });
+
+  it('adds an atrim/adelay branch per window and amixes it with narration+music at normalize=0', () => {
+    const args = buildSummaryComposeArgs({
+      spec: {
+        ...SPEC,
+        diegeticWindows: [
+          { startSec: 4, endSec: 8, sourceClipStartSec: 30, sourceClipEndSec: 34 },
+        ],
+      },
+      sourcePath: '/tmp/source.mp4',
+      narrationPath: '/tmp/narration.wav',
+      musicPath: '/tmp/music.wav',
+      captionAssPath: '/tmp/captions.ass',
+      fontsDir: '/tmp/fonts',
+      outPath: '/tmp/out.mp4',
+    });
+    const graph = args[args.indexOf('-filter_complex') + 1]!;
+
+    expect(graph).toContain('[0:a]atrim=start=30:end=34,asetpts=PTS-STARTPTS,adelay=4000|4000[dieg0]');
+    expect(graph).toContain('[2:a]volume=0.2[bed]');
+    expect(graph).toContain('[1:a][bed][dieg0]amix=inputs=3:duration=first:dropout_transition=0:normalize=0[aout]');
+    expect(args).toEqual(expect.arrayContaining(['-map', '[aout]']));
+  });
+
+  it('mixes the diegetic branch with narration alone when there is no music', () => {
+    const args = buildSummaryComposeArgs({
+      spec: {
+        ...SPEC,
+        musicR2Key: null,
+        diegeticWindows: [
+          { startSec: 0, endSec: 3, sourceClipStartSec: 10, sourceClipEndSec: 13 },
+        ],
+      },
+      sourcePath: '/tmp/source.mp4',
+      narrationPath: '/tmp/narration.wav',
+      musicPath: null,
+      captionAssPath: '/tmp/captions.ass',
+      fontsDir: '/tmp/fonts',
+      outPath: '/tmp/out.mp4',
+    });
+    const graph = args[args.indexOf('-filter_complex') + 1]!;
+
+    expect(graph).toContain('[0:a]atrim=start=10:end=13,asetpts=PTS-STARTPTS,adelay=0|0[dieg0]');
+    expect(graph).not.toContain('[bed]');
+    expect(graph).toContain('[1:a][dieg0]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]');
+  });
+
+  it('emits one atrim/adelay branch per window, in order, for a multi-window diegetic beat', () => {
+    const args = buildSummaryComposeArgs({
+      spec: {
+        ...SPEC,
+        diegeticWindows: [
+          { startSec: 0, endSec: 2, sourceClipStartSec: 10, sourceClipEndSec: 12 },
+          { startSec: 2, endSec: 4.5, sourceClipStartSec: 20, sourceClipEndSec: 22.5 },
+        ],
+      },
+      sourcePath: '/tmp/source.mp4',
+      narrationPath: '/tmp/narration.wav',
+      musicPath: null,
+      captionAssPath: '/tmp/captions.ass',
+      fontsDir: '/tmp/fonts',
+      outPath: '/tmp/out.mp4',
+    });
+    const graph = args[args.indexOf('-filter_complex') + 1]!;
+
+    expect(graph).toContain('[0:a]atrim=start=10:end=12,asetpts=PTS-STARTPTS,adelay=0|0[dieg0]');
+    expect(graph).toContain('[0:a]atrim=start=20:end=22.5,asetpts=PTS-STARTPTS,adelay=2000|2000[dieg1]');
+    expect(graph).toContain('[1:a][dieg0][dieg1]amix=inputs=3:duration=first:dropout_transition=0:normalize=0[aout]');
+  });
+});
+
 describe('buildSummarySizingFilter', () => {
   it('letterboxes a 4:3 slice inside the square when framing is balanced', () => {
     const filter = buildSummarySizingFilter({ width: 1080, height: 1920, sourceFraming: 'balanced' });
