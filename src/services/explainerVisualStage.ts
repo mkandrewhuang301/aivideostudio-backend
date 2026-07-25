@@ -25,6 +25,13 @@ import { promisify } from 'node:util';
 import { motionClassOf, sanitizeMotion, type ExplainerVisualMethod, type FormatAspectRatio, type FormatTextZone, type SceneMotion } from '../config/formats';
 import { getGenerationPresignedUrl, uploadBufferToR2 } from './archivalService';
 import { nanoEditStill, isBlankImage } from './geminiImageService';
+import {
+  hardenedEditPrompt,
+  hardenedStillPrompt,
+  judgeStill,
+  shouldRegenerate,
+  type JudgeStillContext,
+} from './imageJudgeService';
 import { animateScene } from './omniService';
 import { generateStyledStill } from './providers/ReplicateProvider';
 
@@ -71,6 +78,15 @@ export interface VisualStageInput {
   onImageText?: string;
   /** Scene's caption zone — on-image text is steered away from it so the two never collide. */
   textZone?: FormatTextZone;
+  /**
+   * Shared per-generation regeneration budget for the VLM image judge (2026-07-25): the worker
+   * creates ONE counter (ceil(sceneCount * 0.25), min 2) and passes it to every scene. A rejected
+   * still/frame is regenerated at most once and only while budget remains; the counter is the only
+   * cross-scene state. Absent = judging is skipped entirely (safe, budget-free default).
+   */
+  regenBudget?: { remaining: number };
+  /** Human style label ("Flat Vector") for the judge's style-consistency check. */
+  styleLabel?: string;
 }
 
 export interface VisualStageResult {
@@ -86,6 +102,20 @@ export interface VisualStage {
 }
 
 class SafeVisualStageError extends Error {}
+
+async function downloadBuffer(url: string): Promise<Buffer> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), STILL_DOWNLOAD_TIMEOUT_MS);
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    if (!response.ok) {
+      throw new SafeVisualStageError(`still download failed (${response.status})`);
+    }
+    return Buffer.from(await response.arrayBuffer());
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 async function downloadToFile(url: string, destPath: string): Promise<void> {
   const controller = new AbortController();
@@ -130,10 +160,13 @@ export function decorateStillPrompt(
 }
 
 /**
- * Generates + downloads one base still with the free sanity guardrail (2026-07-24): a
- * blank/solid-color return (a known silent generation failure — sharp stats on a file we already
- * have locally, no extra model call) is regenerated ONCE. If the retry is also blank we proceed
- * with it anyway and log — a possibly-flat scene beats a dead generation.
+ * Generates + downloads one base still with two guardrails:
+ *  1. BLANK GUARD (2026-07-24, free): a blank/solid-color return (a known silent generation
+ *     failure — sharp stats on a file we already have locally, no extra model call) is
+ *     regenerated. If the retry is also blank we proceed with it anyway and log.
+ *  2. VLM JUDGE (2026-07-25): the still is checked against the scene brief. One regeneration
+ *     with the judge's reason injected, only while the shared per-generation budget lasts, then
+ *     accepted unconditionally (1 retry, fail-open). Blank retries never consume judge budget.
  */
 async function generateAndDownloadStill(
   visualPrompt: string,
@@ -142,14 +175,30 @@ async function generateAndDownloadStill(
   keyBase: string,
   aspectRatio: FormatAspectRatio,
   destPath: string,
+  judge?: { context: JudgeStillContext; budget: { remaining: number } },
 ): Promise<void> {
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  let prompt = visualPrompt;
+  let judged = false; // a judge-triggered regen is accepted as-is (1 retry, fail-open)
+  for (let attempt = 0; attempt < 3; attempt += 1) {
     const key = attempt === 0 ? keyBase : `${keyBase}.retry${attempt}`;
-    const stillKey = await generateStyledStill(visualPrompt, styleAnchorUrl, imageModel, key, aspectRatio);
+    const stillKey = await generateStyledStill(prompt, styleAnchorUrl, imageModel, key, aspectRatio);
     const stillUrl = await getGenerationPresignedUrl(stillKey);
     await downloadToFile(stillUrl, destPath);
-    if (!(await isBlankImage(await readFile(destPath)))) return;
-    console.warn(`[explainer-visual] still ${keyBase} came back blank/solid (attempt ${attempt + 1})`);
+    const still = Buffer.from(await readFile(destPath));
+    if (await isBlankImage(still)) {
+      console.warn(`[explainer-visual] still ${keyBase} came back blank/solid (attempt ${attempt + 1})`);
+      continue;
+    }
+    if (!judge || judged) return;
+    const verdict = await judgeStill(still, judge.context);
+    if (!shouldRegenerate(verdict, judge.budget)) return;
+    judge.budget.remaining -= 1;
+    judged = true;
+    console.warn(
+      `[explainer-visual] judge rejected still ${keyBase} (${verdict.reason}); `
+      + `regenerating once (${judge.budget.remaining} regen(s) left)`,
+    );
+    prompt = hardenedStillPrompt(visualPrompt, verdict.reason ?? 'quality defect');
   }
 }
 
@@ -443,6 +492,12 @@ export const illustratedStage: VisualStage = {
       tempDir = await mkdtemp(path.join(tmpdir(), 'explainer-motion-'));
       const stillPath = path.join(tempDir, 'still.png');
       const outPath = path.join(tempDir, 'clip.mp4');
+      const freshJudge: JudgeStillContext = {
+        visualPrompt: input.visualPrompt,
+        onImageText: input.onImageText,
+        styleLabel: input.styleLabel,
+        mode: 'fresh',
+      };
       await generateAndDownloadStill(
         decorateStillPrompt(input.visualPrompt, input.onImageText, input.textZone),
         input.styleAnchorUrl,
@@ -450,6 +505,7 @@ export const illustratedStage: VisualStage = {
         `${input.generationId}.scene${input.sceneIndex}.still`,
         input.aspectRatio,
         stillPath,
+        input.regenBudget ? { context: freshJudge, budget: input.regenBudget } : undefined,
       );
 
       const plan = resolveMotionPlan(input.motion, input.resolvedNano ?? false);
@@ -480,7 +536,27 @@ export const illustratedStage: VisualStage = {
         // toBuffer() inside nanoEditStill can otherwise infer incompatible Buffer generics).
         let currentImage: Buffer = Buffer.from(await readFile(stillPath));
         for (let stepIndex = 0; stepIndex < plan.editSteps.length; stepIndex += 1) {
-          const edited = await nanoEditStill(currentImage, plan.editSteps[stepIndex]!);
+          const editStep = plan.editSteps[stepIndex]!;
+          let edited = await nanoEditStill(currentImage, editStep);
+          // VLM judge on the after-frame (2026-07-25): catches collage-look new-hero pastes and
+          // garbled text in edits. 1 retry with a hardened edit prompt while budget lasts.
+          if (edited !== null && input.regenBudget) {
+            const verdict = await judgeStill(edited, {
+              visualPrompt: input.visualPrompt,
+              onImageText: input.onImageText,
+              styleLabel: input.styleLabel,
+              mode: 'edit',
+              editStep,
+            });
+            if (shouldRegenerate(verdict, input.regenBudget)) {
+              input.regenBudget.remaining -= 1;
+              console.warn(
+                `[explainer-visual] judge rejected scene ${input.sceneIndex} edit ${stepIndex + 1} `
+                + `(${verdict.reason}); re-editing once (${input.regenBudget.remaining} regen(s) left)`,
+              );
+              edited = await nanoEditStill(currentImage, hardenedEditPrompt(editStep, verdict.reason ?? 'quality defect'));
+            }
+          }
           if (edited === null) continue;
           const framePath = path.join(tempDir, `frame${stepIndex + 1}.png`);
           await writeFile(framePath, edited);
@@ -503,16 +579,29 @@ export const illustratedStage: VisualStage = {
         let cumulativePrompt = decorateStillPrompt(input.visualPrompt, input.onImageText, input.textZone);
         for (let stepIndex = 0; stepIndex < plan.editSteps.length; stepIndex += 1) {
           cumulativePrompt = `${cumulativePrompt} Then: ${plan.editSteps[stepIndex]}`;
-          const stepStillKey = await generateStyledStill(
-            cumulativePrompt,
-            input.styleAnchorUrl,
-            input.imageModel,
-            `${input.generationId}.scene${input.sceneIndex}.step${stepIndex + 1}`,
-            input.aspectRatio,
-          );
-          const stepStillUrl = await getGenerationPresignedUrl(stepStillKey);
           const framePath = path.join(tempDir, `frame${stepIndex + 1}.png`);
-          await downloadToFile(stepStillUrl, framePath);
+          let stepPrompt = cumulativePrompt;
+          // VLM judge on each step still (same fresh-still rubric; 1 retry while budget lasts).
+          for (let attempt = 0; attempt < 2; attempt += 1) {
+            const stepStillKey = await generateStyledStill(
+              stepPrompt,
+              input.styleAnchorUrl,
+              input.imageModel,
+              `${input.generationId}.scene${input.sceneIndex}.step${stepIndex + 1}${attempt > 0 ? '.jretry' : ''}`,
+              input.aspectRatio,
+            );
+            const stepStillUrl = await getGenerationPresignedUrl(stepStillKey);
+            await downloadToFile(stepStillUrl, framePath);
+            if (!input.regenBudget || attempt > 0) break;
+            const verdict = await judgeStill(Buffer.from(await readFile(framePath)), freshJudge);
+            if (!shouldRegenerate(verdict, input.regenBudget)) break;
+            input.regenBudget.remaining -= 1;
+            console.warn(
+              `[explainer-visual] judge rejected scene ${input.sceneIndex} step ${stepIndex + 1} `
+              + `(${verdict.reason}); regenerating once (${input.regenBudget.remaining} regen(s) left)`,
+            );
+            stepPrompt = hardenedStillPrompt(cumulativePrompt, verdict.reason ?? 'quality defect');
+          }
           framePaths.push(framePath);
         }
         args = buildMotionSequenceArgs({
@@ -547,13 +636,42 @@ export const illustratedKenBurnsStage: VisualStage = illustratedStage;
 export const animatedOmniStage: VisualStage = {
   method: 'animated',
   async generateSceneClip(input: VisualStageInput): Promise<VisualStageResult> {
-    const stillKey = await generateStyledStill(
-      decorateStillPrompt(input.visualPrompt, input.onImageText, input.textZone),
+    // VLM judge BEFORE the Omni call (2026-07-25): a bad still here doesn't just look wrong, it
+    // gets animated at Omni's per-second price. 1 regeneration with the judge's reason injected
+    // while the shared budget lasts, then accepted unconditionally (fail-open).
+    let prompt = decorateStillPrompt(input.visualPrompt, input.onImageText, input.textZone);
+    let stillKey = await generateStyledStill(
+      prompt,
       input.styleAnchorUrl,
       input.imageModel,
       `${input.generationId}.scene${input.sceneIndex}.still`,
       input.aspectRatio,
     );
+    if (input.regenBudget) {
+      const stillUrl = await getGenerationPresignedUrl(stillKey);
+      const stillBuffer = await downloadBuffer(stillUrl);
+      const verdict = await judgeStill(stillBuffer, {
+        visualPrompt: input.visualPrompt,
+        onImageText: input.onImageText,
+        styleLabel: input.styleLabel,
+        mode: 'fresh',
+      });
+      if (shouldRegenerate(verdict, input.regenBudget)) {
+        input.regenBudget.remaining -= 1;
+        console.warn(
+          `[explainer-visual] judge rejected animated scene ${input.sceneIndex} still `
+          + `(${verdict.reason}); regenerating once (${input.regenBudget.remaining} regen(s) left)`,
+        );
+        prompt = hardenedStillPrompt(prompt, verdict.reason ?? 'quality defect');
+        stillKey = await generateStyledStill(
+          prompt,
+          input.styleAnchorUrl,
+          input.imageModel,
+          `${input.generationId}.scene${input.sceneIndex}.still.jretry`,
+          input.aspectRatio,
+        );
+      }
+    }
     const stillUrl = await getGenerationPresignedUrl(stillKey);
     const clip = await animateScene(
       stillUrl,

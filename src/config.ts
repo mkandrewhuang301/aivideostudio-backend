@@ -54,6 +54,11 @@ export const config = {
   // for a no-deploy rollback to the previous /v1/images/edits path.
   magicEditorProvider: process.env.MAGIC_EDITOR_PROVIDER ?? 'nano',
   nanoImageModel: process.env.NANO_IMAGE_MODEL ?? 'gemini-3.1-flash-image-preview',
+  // VLM quality judge for explainer stills (2026-07-25): gemini-3.5-flash via the native
+  // generativelanguage API using geminiApiKey (2.5-flash deprecated 2026-06-17 — do NOT regress).
+  // Fail-open everywhere; enabled-flag is the no-deploy kill switch.
+  imageJudgeEnabled: process.env.IMAGE_JUDGE_ENABLED !== 'false',
+  imageJudgeModel: process.env.IMAGE_JUDGE_MODEL ?? 'gemini-3.5-flash',
   // Native Gemini audio is materially cheaper than Fal's wrappers. Both APIs are preview, so
   // these switches provide a no-deploy rollback and an automatic provider fallback.
   googleNativeAudioEnabled: process.env.GOOGLE_NATIVE_AUDIO_ENABLED !== 'false',

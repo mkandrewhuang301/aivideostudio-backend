@@ -137,6 +137,11 @@ export async function processExplainerGeneration(data: ExplainerGenerationJob): 
     const tier = def.duration_tiers.find((candidate) => candidate.seconds === data.durationSeconds);
     const motionAllocation = allocateMotionBudget(script.scenes, tier?.edit_budget ?? 0);
 
+    // VLM image-judge regeneration budget (2026-07-25, LOCKED): ceil(sceneCount * 0.25), min 2,
+    // shared across every scene — 12 scenes→3, 24→6, 36→9. The judge still CHECKS every still
+    // after the budget is spent; it just stops paying for regenerations (fail-open always).
+    const regenBudget = { remaining: Math.max(2, Math.ceil(script.scenes.length * 0.25)) };
+
     const anchorUrl = await getGenerationPresignedUrl(style.anchor_r2_key);
     // Resolved ONCE, not per scene (2026-07-24 TTS routing flip): the same voice renders every
     // stem, and the clone branch presigns a reference URL. `voice` is undefined for preset Gemini
@@ -183,6 +188,8 @@ export async function processExplainerGeneration(data: ExplainerGenerationJob): 
         resolvedNano: motionAllocation[sceneIndex]?.resolvedNano ?? false,
         onImageText: scene.on_image_text,
         textZone: scene.text_zone,
+        regenBudget,
+        styleLabel: style.label,
       });
       clipKeys.push(clipR2Key);
     }

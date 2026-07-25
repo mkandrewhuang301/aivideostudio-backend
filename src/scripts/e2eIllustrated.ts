@@ -27,6 +27,7 @@ import { runFfmpegOp } from '../queue/ffmpegProcessor';
 const OUT = '/tmp/e2e-illustrated-2026-07-24.mp4';
 const TOPIC = 'How the Wright brothers achieved the first powered airplane flight in 1903';
 const STYLE_ID = 'flat-vector';   // illustrated-capable
+const STYLE_LABEL = 'Flat Vector'; // display label for the image judge's style check
 const VOICE = 'Kore';
 const ASPECT = '9:16' as const;
 
@@ -121,6 +122,10 @@ async function main() {
   console.log(`   motion allocation: ${grantedCount}/${script.scenes.length} scenes granted nano, ${nanoEditsGranted}/${tier.edit_budget} edits used`);
 
   const SCENE_CONCURRENCY = 5; // v3 saw zero 429s at 5 (2026-07-23 speed pass); account re-funded 7/24
+  // Shared image-judge regen budget, same formula as the worker (ceil(n*0.25), min 2). The scene
+  // pool runs concurrently; integer decrements on this object are the only cross-scene state.
+  const regenBudget = { remaining: Math.max(2, Math.ceil(script.scenes.length * 0.25)) };
+  console.log(`   image-judge regen budget: ${regenBudget.remaining}`);
   // Preallocated + written BY INDEX inside the pool (never push) so ordering survives concurrent
   // completion — narration concat, WhisperX offsets, and compose clips all depend on stems[i]/
   // clipKeys[i] lining up with script.scenes[i].
@@ -144,6 +149,8 @@ async function main() {
       styleAnchorUrl: anchorUrl, imageModel: def.image_model, omniModel: def.omni_model,
       narrationDurationSeconds: stem.durationSeconds, aspectRatio: ASPECT,
       motion: sc.motion, resolvedNano: allocation?.resolvedNano ?? false,
+      onImageText: sc.on_image_text, textZone: sc.text_zone,
+      regenBudget, styleLabel: STYLE_LABEL,
     });
     clipKeys[i] = clipR2Key;
     const plan = resolveMotionPlan(sc.motion, allocation?.resolvedNano ?? false);

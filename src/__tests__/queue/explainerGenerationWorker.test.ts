@@ -226,6 +226,10 @@ describe('processExplainerGeneration', () => {
       aspectRatio: '16:9',
       onImageText: 'DAY ONE',
       textZone: 'lower_third',
+      // VLM judge budget (2026-07-25): ceil(2 scenes * 0.25) = 1 -> floor of 2; shared object
+      // across scenes; style label feeds the judge's style-consistency check.
+      regenBudget: { remaining: 2 },
+      styleLabel: 'Pixel Art',
     }));
     expect(mockGenerateSceneClip).toHaveBeenNthCalledWith(2, expect.objectContaining({
       sceneIndex: 1,
