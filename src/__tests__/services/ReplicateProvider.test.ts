@@ -13,11 +13,14 @@ jest.mock('../../config', () => ({
 
 const mockCreate = jest.fn();
 const mockGet = jest.fn();
+const mockRun = jest.fn();
 
 class MockReplicate {
   predictions: { create: jest.Mock; get: jest.Mock };
+  run: jest.Mock;
   constructor() {
     this.predictions = { create: mockCreate, get: mockGet };
+    this.run = mockRun;
   }
 }
 
@@ -26,7 +29,7 @@ jest.mock('replicate', () => ({
   default: MockReplicate,
 }));
 
-import { ReplicateProvider, parseWhisperXWords } from '../../services/providers/ReplicateProvider';
+import { ReplicateProvider, parseWhisperXWords, generateClaudeText } from '../../services/providers/ReplicateProvider';
 import type { GenerationInput } from '../../services/providers/ModelProvider';
 
 describe('ReplicateProvider.dispatch — kling-v3-motion-control', () => {
@@ -123,5 +126,54 @@ describe('parseWhisperXWords (caption-timing fill, not drop)', () => {
       segments: [{ start: 0, end: 1, words: [{ word: '', start: 0, end: 1 }, { word: 'ok', start: 0.2, end: 1 }] }],
     });
     expect(out.map((w) => w.word)).toEqual(['ok']);
+  });
+});
+
+describe('generateClaudeText', () => {
+  beforeEach(() => {
+    mockRun.mockReset();
+  });
+
+  it('sends prompt/system_prompt/max_tokens/effort and joins streamed text fragments', async () => {
+    mockRun.mockResolvedValue(['{"scenes":', ' []}']);
+
+    const text = await generateClaudeText('anthropic/claude-sonnet-5', {
+      prompt: 'Topic: volcanoes',
+      systemPrompt: 'You write scripts.',
+      maxTokens: 8000,
+      effort: 'medium',
+    });
+
+    expect(text).toBe('{"scenes": []}');
+    expect(mockRun).toHaveBeenCalledWith('anthropic/claude-sonnet-5', {
+      input: {
+        prompt: 'Topic: volcanoes',
+        system_prompt: 'You write scripts.',
+        max_tokens: 8000,
+        effort: 'medium',
+      },
+    });
+  });
+
+  it('accepts a plain-string output and omits unset optional fields', async () => {
+    mockRun.mockResolvedValue('plain text');
+
+    const text = await generateClaudeText('anthropic/claude-sonnet-5', {
+      prompt: 'hi',
+      maxTokens: 100,
+    });
+
+    expect(text).toBe('plain text');
+    const input = mockRun.mock.calls[0]![1].input;
+    expect(input.system_prompt).toBeUndefined();
+    expect(input.effort).toBeUndefined();
+  });
+
+  it('throws on an empty completion so the caller can fall back', async () => {
+    mockRun.mockResolvedValue(['', ' ']);
+
+    await expect(
+      generateClaudeText('anthropic/claude-sonnet-5', { prompt: 'hi', maxTokens: 100 }),
+    ).rejects.toThrow('claude returned no text');
   });
 });

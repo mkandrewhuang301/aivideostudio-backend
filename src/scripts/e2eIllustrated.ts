@@ -24,7 +24,7 @@ import { buildSceneCues, getWordTimings } from '../services/whisperxService';
 import type { CaptionWordDraft } from '../services/captionTranscriptionService';
 import { runFfmpegOp } from '../queue/ffmpegProcessor';
 
-const OUT = '/private/tmp/claude-501/-Users-andrewhuang/8c987e81-5615-4184-8b9d-16896aae4c16/scratchpad/e2e-illustrated-v4.mp4';
+const OUT = '/tmp/e2e-illustrated-2026-07-24.mp4';
 const TOPIC = 'How the Wright brothers achieved the first powered airplane flight in 1903';
 const STYLE_ID = 'flat-vector';   // illustrated-capable
 const VOICE = 'Kore';
@@ -120,7 +120,10 @@ async function main() {
     .reduce((sum, a) => sum + (script.scenes[a.sceneIndex]!.motion?.edit_steps.length ?? 0), 0);
   console.log(`   motion allocation: ${grantedCount}/${script.scenes.length} scenes granted nano, ${nanoEditsGranted}/${tier.edit_budget} edits used`);
 
-  const SCENE_CONCURRENCY = 8; // v3 saw zero 429s at 5 (2026-07-23 speed pass)
+  // Replicate account is in the low-credit tier (<$5): 6 predictions/min, burst 1. Run scenes
+  // SEQUENTIALLY so the per-scene TTS latency naturally spaces the still calls, and let the
+  // provider's 429 retry soak up the remainder. (v3 ran at 8 with a funded account.)
+  const SCENE_CONCURRENCY = 1;
   // Preallocated + written BY INDEX inside the pool (never push) so ordering survives concurrent
   // completion — narration concat, WhisperX offsets, and compose clips all depend on stems[i]/
   // clipKeys[i] lining up with script.scenes[i].

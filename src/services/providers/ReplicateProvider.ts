@@ -147,6 +147,48 @@ export async function transcribeWordTimings(audioUrl: string): Promise<WhisperXW
   return words;
 }
 
+// ─── Claude text generation (explainer script LLM, 2026-07-24 swap off gpt-4o) ─────────────
+// anthropic/claude-sonnet-5 on Replicate ($2/$10 per 1M tokens, API-parity — verified live on the
+// model page 2026-07-24). Chosen for the explainer script + production-brief calls because the
+// failure mode being fixed is FACTUAL hallucination under style-focused rules (gpt-4o put two
+// pilots on the 1903 Flyer); careful factual writing is the Claude hallmark. Replicate exposes NO
+// structured-output param, so JSON is prompt discipline + the caller's parse/validate — the same
+// contract the OpenAI path already had. `effort` gates thinking depth (billed as output tokens):
+// 'medium' is the accuracy lever for fact-bearing calls; 'low' (default, thinking off) for
+// mechanical ones.
+
+export type ClaudeEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
+export interface ClaudeTextInput {
+  prompt: string;
+  systemPrompt?: string;
+  maxTokens: number;
+  effort?: ClaudeEffort;
+}
+
+/** Runs one Claude text completion. Returns the raw text. Throws on any failure so the caller can
+ *  apply its own fallback policy. */
+export async function generateClaudeText(model: string, input: ClaudeTextInput): Promise<string> {
+  const replicateInput: Record<string, unknown> = {
+    prompt: input.prompt,
+    max_tokens: input.maxTokens,
+  };
+  if (input.systemPrompt) replicateInput.system_prompt = input.systemPrompt;
+  if (input.effort) replicateInput.effort = input.effort;
+
+  const output = (await withReplicateRetry(
+    () => replicate.run(model as `${string}/${string}`, { input: replicateInput }),
+    'claude-text',
+  )) as unknown;
+  // Anthropic models on Replicate emit the completion as an array of streamed text fragments
+  // (aggregated by replicate.run); normalize both shapes.
+  const text = Array.isArray(output) ? output.join('') : output;
+  if (typeof text !== 'string' || text.trim().length === 0) {
+    throw new Error('claude returned no text');
+  }
+  return text;
+}
+
 // ─── qwen3-tts narration (single TTS engine, per 2026-07-23 TTS strategy) ──────
 // Live schema verified 2026-07-23 (GET api.replicate.com/v1/models/qwen/qwen3-tts): output is a
 // WAV URI (RIFF, audio/wav) so no transcode is needed downstream. One model, three modes:

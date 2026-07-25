@@ -10,6 +10,7 @@
 // must never block the whole generation.
 
 import { config } from '../config';
+import { generateClaudeText } from './providers/ReplicateProvider';
 import type {
   ExplainerScene,
   ExplainerScript,
@@ -24,7 +25,13 @@ import { sanitizeMotion } from '../config/formats';
 
 const OPENAI_CHAT_COMPLETIONS_URL = 'https://api.openai.com/v1/chat/completions';
 const SCRIPT_EXPANSION_MODEL = 'gpt-4o-mini';
-const EXPLAINER_SCRIPT_MODEL = 'gpt-4o';
+// Explainer script runs on Claude Sonnet 5 via Replicate (2026-07-24 swap off gpt-4o — the
+// factual-hallucination fix; see generateClaudeText). gpt-4o-mini stays on the cheap mechanical
+// paths (prompt intelligence, vlog expansion) where factual care doesn't matter.
+const EXPLAINER_SCRIPT_MODEL = 'anthropic/claude-sonnet-5';
+// Claude bills thinking tokens as output, so the cap must cover effort:'medium' reasoning + the
+// ~2k-token script JSON (gpt-4o's 2000 was output-only).
+const EXPLAINER_SCRIPT_MAX_TOKENS = 8_000;
 const MAX_TOKENS = 400;
 const TEMPERATURE = 0.7;
 const EXPLAINER_MUSIC_MOODS = new Set(['uplifting', 'ambient', 'dramatic', 'playful']);
@@ -384,34 +391,24 @@ export async function expandExplainerScript(
       + 'video. At the beat length in the pacing guidance above, that usually lands somewhere '
       + `around ${args.sceneCount} scenes — an estimate, NOT a target. Write the script to the word `
       + 'budget, break it at natural boundaries, and let the scene count fall where it falls.';
-    const response = await fetch(OPENAI_CHAT_COMPLETIONS_URL, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${config.openaiApiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: EXPLAINER_SCRIPT_MODEL,
-        response_format: { type: 'json_object' },
-        messages: [
-          { role: 'system', content: args.scriptTemplate.system_prompt },
-          {
-            role: 'user',
-            content: `Topic: ${args.topic}\nVisual style: ${args.styleLabel}${budgetBlock}${groundingBlock}`,
-          },
-        ],
-        max_tokens: 2_000,
-        temperature: TEMPERATURE,
-      }),
-    });
-
-    if (!response.ok) {
-      console.error(`[openaiScriptService] Explainer completion error: ${response.status}, using structural fallback`);
+    let rawContent: string;
+    try {
+      rawContent = await generateClaudeText(EXPLAINER_SCRIPT_MODEL, {
+        systemPrompt: args.scriptTemplate.system_prompt,
+        prompt: `Topic: ${args.topic}\nVisual style: ${args.styleLabel}${budgetBlock}${groundingBlock}`,
+        maxTokens: EXPLAINER_SCRIPT_MAX_TOKENS,
+        // effort 'medium' is the accuracy lever — the whole point of the swap off gpt-4o is
+        // factual care in visual_prompts (era/subject/count details), which lives in thinking.
+        effort: 'medium',
+      });
+    } catch (error) {
+      console.error('[openaiScriptService] Explainer completion unavailable, using structural fallback:', error);
       return explainerFallback(args);
     }
 
-    const json = (await response.json()) as OpenAIChatCompletionResponse;
-    const content = json.choices?.[0]?.message?.content?.trim();
+    // Replicate exposes no structured-output param, so the JSON contract is prompt discipline;
+    // strip the markdown fences Claude occasionally wraps around bare JSON before validating.
+    const content = rawContent.trim().replace(/^```(?:json)?\s*\n?/i, '').replace(/\n?```\s*$/, '');
     if (!content) return explainerFallback(args);
 
     const parsed = JSON.parse(content) as Record<string, unknown>;

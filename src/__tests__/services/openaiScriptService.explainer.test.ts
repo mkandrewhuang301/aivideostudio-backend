@@ -4,11 +4,15 @@ jest.mock('../../config', () => ({
   },
 }));
 
+jest.mock('../../services/providers/ReplicateProvider', () => ({
+  generateClaudeText: jest.fn(),
+}));
+
 import { FORMATS_BY_ID } from '../../config/formats';
 import { expandExplainerScript } from '../../services/openaiScriptService';
+import { generateClaudeText } from '../../services/providers/ReplicateProvider';
 
-const mockFetch = jest.fn();
-global.fetch = mockFetch as unknown as typeof fetch;
+const mockGenerateClaudeText = generateClaudeText as jest.Mock;
 
 const scriptTemplate = FORMATS_BY_ID.explainer!.script_template;
 const baseArgs = {
@@ -17,13 +21,6 @@ const baseArgs = {
   styleLabel: 'pixel art',
   scriptTemplate,
 };
-
-function responseWith(content: string) {
-  return {
-    ok: true,
-    json: async () => ({ choices: [{ message: { content } }] }),
-  };
-}
 
 function validScene(overrides: Record<string, unknown> = {}) {
   return {
@@ -42,11 +39,11 @@ beforeEach(() => {
 
 describe('expandExplainerScript', () => {
   it('returns validated scenes and clamps only a runaway scene count (count is emergent, not dictated)', async () => {
-    mockFetch.mockResolvedValue(responseWith(JSON.stringify({
+    mockGenerateClaudeText.mockResolvedValue(JSON.stringify({
       full_script: 'Magma rises beneath the volcano.',
       scenes: [validScene(), validScene(), validScene()],
       music_mood: 'dramatic',
-    })));
+    }));
 
     const result = await expandExplainerScript(baseArgs);
 
@@ -57,11 +54,11 @@ describe('expandExplainerScript', () => {
   });
 
   it('clamps a runaway scene count to the sanity band', async () => {
-    mockFetch.mockResolvedValue(responseWith(JSON.stringify({
+    mockGenerateClaudeText.mockResolvedValue(JSON.stringify({
       full_script: 'Magma rises beneath the volcano.',
       scenes: Array.from({ length: 20 }, () => validScene()),
       music_mood: 'dramatic',
-    })));
+    }));
 
     const result = await expandExplainerScript(baseArgs);
 
@@ -70,14 +67,14 @@ describe('expandExplainerScript', () => {
   });
 
   it('keeps verbatim segments that re-join to full_script', async () => {
-    mockFetch.mockResolvedValue(responseWith(JSON.stringify({
+    mockGenerateClaudeText.mockResolvedValue(JSON.stringify({
       full_script: 'Magma rises beneath the volcano. Pressure builds until it erupts.',
       scenes: [
         validScene({ narration_segment: 'Magma rises beneath the volcano.' }),
         validScene({ narration_segment: 'Pressure builds until it erupts.' }),
       ],
       music_mood: 'ambient',
-    })));
+    }));
 
     const result = await expandExplainerScript(baseArgs);
 
@@ -87,14 +84,14 @@ describe('expandExplainerScript', () => {
   });
 
   it('re-flows an authoritative full_script across scenes when the segments drift', async () => {
-    mockFetch.mockResolvedValue(responseWith(JSON.stringify({
+    mockGenerateClaudeText.mockResolvedValue(JSON.stringify({
       full_script: 'Magma rises beneath the volcano. Pressure builds underground. The volcano erupts violently. Ash covers everything nearby.',
       scenes: [
         validScene({ narration_segment: 'The volcano gets angry.' }), // paraphrase, not a verbatim slice
         validScene({ narration_segment: 'It explodes.' }),
       ],
       music_mood: 'ambient',
-    })));
+    }));
 
     const result = await expandExplainerScript(baseArgs);
 
@@ -109,10 +106,10 @@ describe('expandExplainerScript', () => {
   });
 
   it('degrades to joined segments when full_script is missing', async () => {
-    mockFetch.mockResolvedValue(responseWith(JSON.stringify({
+    mockGenerateClaudeText.mockResolvedValue(JSON.stringify({
       scenes: [validScene()],
       music_mood: 'ambient',
-    })));
+    }));
 
     const result = await expandExplainerScript(baseArgs);
 
@@ -121,7 +118,7 @@ describe('expandExplainerScript', () => {
   });
 
   it('still parses legacy narration_line fields', async () => {
-    mockFetch.mockResolvedValue(responseWith(JSON.stringify({
+    mockGenerateClaudeText.mockResolvedValue(JSON.stringify({
       scenes: [{
         visual_prompt: 'a cutaway diagram of a volcano with a clean lower third',
         motion_prompt: 'gentle camera push-in',
@@ -130,7 +127,7 @@ describe('expandExplainerScript', () => {
         segment_type: 'dialogue',
       }],
       music_mood: 'ambient',
-    })));
+    }));
 
     const result = await expandExplainerScript(baseArgs);
 
@@ -138,7 +135,7 @@ describe('expandExplainerScript', () => {
   });
 
   it('returns a structural single-scene fallback for malformed JSON', async () => {
-    mockFetch.mockResolvedValue(responseWith('not-json'));
+    mockGenerateClaudeText.mockResolvedValue('not-json');
 
     const result = await expandExplainerScript(baseArgs);
 
@@ -157,21 +154,20 @@ describe('expandExplainerScript', () => {
   });
 
   it('sends the registry prohibition against narrator and presenter figures', async () => {
-    mockFetch.mockResolvedValue(responseWith(JSON.stringify({ scenes: [validScene()], music_mood: 'ambient' })));
+    mockGenerateClaudeText.mockResolvedValue(JSON.stringify({ scenes: [validScene()], music_mood: 'ambient' }));
 
     await expandExplainerScript(baseArgs);
 
-    const body = JSON.parse(mockFetch.mock.calls[0]![1].body as string);
-    const systemPrompt = body.messages[0].content.toLowerCase();
+    const systemPrompt = (mockGenerateClaudeText.mock.calls[0]![1].systemPrompt as string).toLowerCase();
     expect(systemPrompt).toContain('narrator');
     expect(systemPrompt).toContain('presenter');
   });
 
   it('defensively rewrites narrator-figure phrases in visual prompts', async () => {
-    mockFetch.mockResolvedValue(responseWith(JSON.stringify({
+    mockGenerateClaudeText.mockResolvedValue(JSON.stringify({
       scenes: [validScene({ visual_prompt: 'A narrator explaining plate tectonics' })],
       music_mood: 'ambient',
-    })));
+    }));
 
     const result = await expandExplainerScript(baseArgs);
 
@@ -180,10 +176,10 @@ describe('expandExplainerScript', () => {
   });
 
   it('coerces disallowed segment types and invalid text zones', async () => {
-    mockFetch.mockResolvedValue(responseWith(JSON.stringify({
+    mockGenerateClaudeText.mockResolvedValue(JSON.stringify({
       scenes: [validScene({ segment_type: 'vocab', text_zone: 'left' })],
       music_mood: 'unknown',
-    })));
+    }));
 
     const result = await expandExplainerScript(baseArgs);
 
@@ -193,13 +189,13 @@ describe('expandExplainerScript', () => {
   });
 
   it('parses a valid motion object and transition_out as-is', async () => {
-    mockFetch.mockResolvedValue(responseWith(JSON.stringify({
+    mockGenerateClaudeText.mockResolvedValue(JSON.stringify({
       scenes: [validScene({
         motion: { type: 'before_after', priority: 4, edit_steps: ['a seed sprouts a tiny green shoot, keep everything else identical', 'the shoot grows into a sapling, keep everything else identical'] },
         transition_out: 'morph',
       })],
       music_mood: 'ambient',
-    })));
+    }));
 
     const result = await expandExplainerScript(baseArgs);
 
@@ -215,10 +211,10 @@ describe('expandExplainerScript', () => {
   });
 
   it('defaults motion and transition_out when missing or malformed', async () => {
-    mockFetch.mockResolvedValue(responseWith(JSON.stringify({
+    mockGenerateClaudeText.mockResolvedValue(JSON.stringify({
       scenes: [validScene({ motion: undefined, transition_out: 'sideways' })],
       music_mood: 'ambient',
-    })));
+    }));
 
     const result = await expandExplainerScript(baseArgs);
 
@@ -227,7 +223,7 @@ describe('expandExplainerScript', () => {
   });
 
   it('clamps edit_steps to 3, clamps priority to 1-5, and sanitizes narrator figures in edit_steps', async () => {
-    mockFetch.mockResolvedValue(responseWith(JSON.stringify({
+    mockGenerateClaudeText.mockResolvedValue(JSON.stringify({
       scenes: [validScene({
         motion: {
           type: 'before_after',
@@ -241,7 +237,7 @@ describe('expandExplainerScript', () => {
         },
       })],
       music_mood: 'ambient',
-    })));
+    }));
 
     const result = await expandExplainerScript(baseArgs);
     const motion = result.scenes[0]!.motion!;
@@ -253,12 +249,12 @@ describe('expandExplainerScript', () => {
   });
 
   it("retires progressive_reveal (2026-07-23): remaps to ken_burns with edit_steps cleared, even though it's still a recognized type", async () => {
-    mockFetch.mockResolvedValue(responseWith(JSON.stringify({
+    mockGenerateClaudeText.mockResolvedValue(JSON.stringify({
       scenes: [validScene({
         motion: { type: 'progressive_reveal', priority: 5, edit_steps: ['label A appears', 'label B appears'] },
       })],
       music_mood: 'ambient',
-    })));
+    }));
 
     const result = await expandExplainerScript(baseArgs);
 
@@ -266,10 +262,10 @@ describe('expandExplainerScript', () => {
   });
 
   it('rejects an unknown motion.type but keeps other valid fields (field-level fallback)', async () => {
-    mockFetch.mockResolvedValue(responseWith(JSON.stringify({
+    mockGenerateClaudeText.mockResolvedValue(JSON.stringify({
       scenes: [validScene({ motion: { type: 'zoom-enhance', priority: 3, edit_steps: [] } })],
       music_mood: 'ambient',
-    })));
+    }));
 
     const result = await expandExplainerScript(baseArgs);
 
@@ -277,19 +273,39 @@ describe('expandExplainerScript', () => {
   });
 
   it('includes factual grounding only when grounding text is present', async () => {
-    mockFetch.mockResolvedValue(responseWith(JSON.stringify({ scenes: [validScene()], music_mood: 'ambient' })));
+    mockGenerateClaudeText.mockResolvedValue(JSON.stringify({ scenes: [validScene()], music_mood: 'ambient' }));
 
     await expandExplainerScript({
       ...baseArgs,
       groundingText: 'Mount St. Helens erupted in 1980.',
     });
-    const groundedBody = JSON.parse(mockFetch.mock.calls[0]![1].body as string);
-    expect(groundedBody.messages[1].content).toContain('SOURCE MATERIAL');
-    expect(groundedBody.messages[1].content).toContain('Mount St. Helens erupted in 1980.');
+    const groundedPrompt = mockGenerateClaudeText.mock.calls[0]![1].prompt as string;
+    expect(groundedPrompt).toContain('SOURCE MATERIAL');
+    expect(groundedPrompt).toContain('Mount St. Helens erupted in 1980.');
 
-    mockFetch.mockClear();
+    mockGenerateClaudeText.mockClear();
     await expandExplainerScript(baseArgs);
-    const ungroundedBody = JSON.parse(mockFetch.mock.calls[0]![1].body as string);
-    expect(ungroundedBody.messages[1].content).not.toContain('SOURCE MATERIAL');
+    const ungroundedPrompt = mockGenerateClaudeText.mock.calls[0]![1].prompt as string;
+    expect(ungroundedPrompt).not.toContain('SOURCE MATERIAL');
+  });
+
+  it('strips markdown fences around the JSON (Replicate has no structured-output param)', async () => {
+    mockGenerateClaudeText.mockResolvedValue(
+      '```json\n' + JSON.stringify({ scenes: [validScene()], music_mood: 'ambient' }) + '\n```',
+    );
+
+    const result = await expandExplainerScript(baseArgs);
+
+    expect(result.scenes).toHaveLength(1);
+    expect(result.scenes[0]!.narration_line).toBe('Magma rises beneath the volcano.');
+  });
+
+  it('returns the structural fallback when the Claude call throws', async () => {
+    mockGenerateClaudeText.mockRejectedValue(new Error('replicate 500'));
+
+    const result = await expandExplainerScript(baseArgs);
+
+    expect(result.scenes).toHaveLength(1);
+    expect(result.scenes[0]!.narration_line).toBe('volcanoes');
   });
 });
