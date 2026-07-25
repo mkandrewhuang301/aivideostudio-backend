@@ -120,10 +120,7 @@ async function main() {
     .reduce((sum, a) => sum + (script.scenes[a.sceneIndex]!.motion?.edit_steps.length ?? 0), 0);
   console.log(`   motion allocation: ${grantedCount}/${script.scenes.length} scenes granted nano, ${nanoEditsGranted}/${tier.edit_budget} edits used`);
 
-  // Replicate account is in the low-credit tier (<$5): 6 predictions/min, burst 1. Run scenes
-  // SEQUENTIALLY so the per-scene TTS latency naturally spaces the still calls, and let the
-  // provider's 429 retry soak up the remainder. (v3 ran at 8 with a funded account.)
-  const SCENE_CONCURRENCY = 1;
+  const SCENE_CONCURRENCY = 5; // v3 saw zero 429s at 5 (2026-07-23 speed pass); account re-funded 7/24
   // Preallocated + written BY INDEX inside the pool (never push) so ordering survives concurrent
   // completion — narration concat, WhisperX offsets, and compose clips all depend on stems[i]/
   // clipKeys[i] lining up with script.scenes[i].
