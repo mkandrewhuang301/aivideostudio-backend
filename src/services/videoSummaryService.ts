@@ -108,6 +108,10 @@ export interface VideoSummaryBeat {
    * than once per plan.
    */
   audioMode?: 'narrated' | 'diegetic';
+  /** Model-supplied phrase naming the sound that carries a diegetic beat (e.g. "the transformation
+   * roar") — surfaced downstream for visibility into WHICH moment was chosen and why. Only
+   * meaningful when audioMode === 'diegetic'. */
+  audioModeReason?: string;
 }
 
 export interface VideoSummaryPlan {
@@ -274,6 +278,9 @@ const GROUNDED_NARRATION_SCHEMA = {
           // entirely still validates, and validateGroundedNarration ignores it outright while
           // config.videoSummaryDiegeticEnabled is off (see MAX_DIEGETIC_NARRATION_WORDS there).
           audio_mode: { type: 'string', enum: ['narrated', 'diegetic'] },
+          // Optional companion to audio_mode:'diegetic' — a brief phrase naming the sound that
+          // carries the beat, recorded downstream so the diegetic pick is inspectable, never random.
+          audio_mode_reason: { type: 'string' },
         },
         required: ['narration', 'evidence_ids'],
       },
@@ -1001,11 +1008,15 @@ Identity confidence: ${args.sourceKnowledge.confidence.toFixed(2)}`
     ? `\nREVISION REQUIRED\nRemove or rewrite these unsupported claims:\n- ${args.revisionNotes.join('\n- ')}\n`
     : '';
   const diegeticInstruction = args.diegeticEnabled
-    ? '\nDIEGETIC BEAT — OPTIONAL\nYou MAY mark AT MOST ONE beat as "audio_mode": "diegetic" — an opening hook or a single'
-      + ' climactic moment where the original footage audio should carry it and the narrator should go silent. Give a'
-      + ' diegetic beat an empty or one-line narration (a short line is fine; do not write a full narrated beat for'
-      + ' it). Prefer the cold open (the very first beat) or the single most monumental moment. If unsure, mark none'
-      + ' — every other beat must omit audio_mode (or set it to "narrated").\n'
+    ? '\nDIEGETIC BEAT — OPTIONAL\nYou MAY mark AT MOST ONE beat as "audio_mode": "diegetic" — a moment whose ORIGINAL'
+      + ' footage audio is strong enough to carry it ALONE, so the narrator goes silent and that audio lands: a'
+      + ' memorable line of dialogue, a dramatic music swell, or a signature sound (a called-out attack, a roar, a'
+      + ' decisive impact). Judge it by the SOUND — choose the moment that plays BETTER with no narration over it,'
+      + ' not merely the plot climax. The cold open (the very first beat) is a strong default hook. When you mark'
+      + ' one, ALSO set "audio_mode_reason" to a brief phrase naming the exact sound that carries it (e.g. "the'
+      + ' transformation roar" or "the villain\'s final line). Give a diegetic beat an empty or one-line narration'
+      + ' (do not write a full narrated beat for it). If no moment\'s audio truly lands on its own, mark none —'
+      + ' every other beat must omit audio_mode (or set it to "narrated").\n'
     : '';
   const plotMap = [
     `Characters/subjects: ${args.plotUnderstanding.characters.join('; ')}`,
@@ -1125,7 +1136,14 @@ export function validateGroundedNarration(
         evidence: [...item.visualFacts, ...item.spokenFacts],
         confidence: item.confidence,
       })),
-      ...(audioMode === 'diegetic' ? { audioMode } : {}),
+      ...(audioMode === 'diegetic'
+        ? {
+          audioMode,
+          ...(typeof beat.audio_mode_reason === 'string' && beat.audio_mode_reason.trim()
+            ? { audioModeReason: beat.audio_mode_reason.trim() }
+            : {}),
+        }
+        : {}),
     });
   }
   if (beats.length < 2) throw new Error('Grounded narrator returned too few usable beats');

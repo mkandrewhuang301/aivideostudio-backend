@@ -405,8 +405,30 @@ export async function processVideoSummary(data: VideoSummaryJob): Promise<void> 
       }
     });
 
+    // Surface WHICH moment the planner chose to "let breathe" (beat index, the source-time span its
+    // audio plays from, and the model's reason) so the diegetic pick is inspectable — never random.
+    const diegeticBeatIndex = beatIsDiegetic.findIndex(Boolean);
+    const diegeticSelection = diegeticWindows.length > 0 && diegeticBeatIndex >= 0
+      ? {
+        beat_index: diegeticBeatIndex,
+        reason: plan.beats[diegeticBeatIndex]!.audioModeReason ?? null,
+        source_start_seconds: Math.min(...diegeticWindows.map((w) => w.sourceClipStartSec)),
+        source_end_seconds: Math.max(...diegeticWindows.map((w) => w.sourceClipEndSec)),
+        output_start_seconds: Math.min(...diegeticWindows.map((w) => w.startSec)),
+        output_end_seconds: Math.max(...diegeticWindows.map((w) => w.endSec)),
+      }
+      : null;
+    if (diegeticSelection) {
+      console.log(
+        `[video-summary] diegetic beat #${diegeticSelection.beat_index}: source `
+        + `${diegeticSelection.source_start_seconds.toFixed(1)}-${diegeticSelection.source_end_seconds.toFixed(1)}s`
+        + ` — ${diegeticSelection.reason ?? '(no reason given)'}`,
+      );
+    }
+
     await mergeGenerationParams(data.generationId, {
       format_id: 'video-explainer',
+      diegetic_selection: diegeticSelection,
       summary_mode: data.mode,
       summary_title: plan.title,
       summary_overview: plan.overview,
