@@ -130,8 +130,11 @@ async function describeImageFactually(url: string): Promise<string> {
       Authorization: `Bearer ${config.openaiApiKey}`,
       'Content-Type': 'application/json',
     },
+    // gpt-5 family is a reasoning model: max_completion_tokens (not max_tokens), no temperature,
+    // reasoning_effort instead. 'minimal' — factual 1-2 sentence description, no thought needed.
+    // gpt-5-nano takes image input; the 300 cap covers reasoning tokens + the short output.
     body: JSON.stringify({
-      model: 'gpt-4o-mini',
+      model: 'gpt-5-nano',
       messages: [{
         role: 'user',
         content: [
@@ -142,8 +145,8 @@ async function describeImageFactually(url: string): Promise<string> {
           { type: 'image_url', image_url: { url } },
         ],
       }],
-      max_tokens: 180,
-      temperature: 0,
+      max_completion_tokens: 300,
+      reasoning_effort: 'minimal',
     }),
   });
   if (!response.ok) throw new Error(`image grounding failed (${response.status})`);

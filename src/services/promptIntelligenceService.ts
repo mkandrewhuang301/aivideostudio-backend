@@ -14,9 +14,12 @@
 import { config } from '../config';
 
 const OPENAI_CHAT_COMPLETIONS_URL = 'https://api.openai.com/v1/chat/completions';
-const MODEL = 'gpt-4o-mini';
-const MAX_TOKENS = 500;
-const TEMPERATURE = 0.7;
+// gpt-5 family is a reasoning model: max_completion_tokens (not max_tokens), no temperature,
+// reasoning_effort instead. 'low' — a little thought helps the creative rewrite; 'minimal'
+// produces flatter prompts. The token cap must cover reasoning tokens + the visible output.
+const MODEL = 'gpt-5-mini';
+const MAX_COMPLETION_TOKENS = 800;
+const REASONING_EFFORT = 'low';
 
 export class PromptIntelligenceError extends Error {
   constructor(message: string) {
@@ -72,8 +75,8 @@ async function chatCompletion(messages: ChatMessage[]): Promise<string> {
       body: JSON.stringify({
         model: MODEL,
         messages,
-        max_tokens: MAX_TOKENS,
-        temperature: TEMPERATURE,
+        max_completion_tokens: MAX_COMPLETION_TOKENS,
+        reasoning_effort: REASONING_EFFORT,
       }),
     });
   } catch (err) {
