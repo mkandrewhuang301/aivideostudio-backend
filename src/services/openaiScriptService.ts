@@ -1,6 +1,6 @@
 // src/services/openaiScriptService.ts
 // LLM script-expansion helper for the character vlogger system (Phase 9.3, D-05).
-// Takes the user's raw short script + a server-side dialogue template and asks gpt-4o-mini to
+// Takes the user's raw short script + a server-side dialogue template and asks gpt-5-nano to
 // expand it into a Seedance-ready prompt: spoken dialogue lines + selfie-cam vlog framing, generic
 // character branding only (no real creator likeness).
 //
@@ -24,16 +24,19 @@ import type {
 import { sanitizeMotion } from '../config/formats';
 
 const OPENAI_CHAT_COMPLETIONS_URL = 'https://api.openai.com/v1/chat/completions';
-const SCRIPT_EXPANSION_MODEL = 'gpt-4o-mini';
+// gpt-5 family is a reasoning model: max_completion_tokens (not max_tokens), no temperature,
+// reasoning_effort instead. 'minimal' — this expansion is mechanical templating work.
+const SCRIPT_EXPANSION_MODEL = 'gpt-5-nano';
 // Explainer script runs on Claude Sonnet 5 via Replicate (2026-07-24 swap off gpt-4o — the
-// factual-hallucination fix; see generateClaudeText). gpt-4o-mini stays on the cheap mechanical
-// paths (prompt intelligence, vlog expansion) where factual care doesn't matter.
+// factual-hallucination fix; see generateClaudeText). gpt-5-nano covers the cheap mechanical
+// paths (vlog expansion) where factual care doesn't matter.
 const EXPLAINER_SCRIPT_MODEL = 'anthropic/claude-sonnet-5';
 // Claude bills thinking tokens as output, so the cap must cover effort:'medium' reasoning + the
 // ~2k-token script JSON (gpt-4o's 2000 was output-only).
 const EXPLAINER_SCRIPT_MAX_TOKENS = 8_000;
-const MAX_TOKENS = 400;
-const TEMPERATURE = 0.7;
+// gpt-5-nano bills reasoning tokens against this cap too — headroom above the old 400 output cap.
+const MAX_COMPLETION_TOKENS = 600;
+const REASONING_EFFORT = 'minimal';
 const EXPLAINER_MUSIC_MOODS = new Set(['uplifting', 'ambient', 'dramatic', 'playful']);
 const FORMAT_TEXT_ZONES = new Set<FormatTextZone>(['lower_third', 'upper_third', 'center']);
 const BANNED_NARRATOR_FIGURE = /(a |the )?(narrator|presenter|host|talking head|speaker)( figure| standing| talking| explaining)?/gi;
@@ -169,7 +172,7 @@ function templatedFallback(args: ExpandScriptArgs): string {
 }
 
 /**
- * Expands a user's short script into a dialogue prompt via gpt-4o-mini: creative on staging and
+ * Expands a user's short script into a dialogue prompt via gpt-5-nano: creative on staging and
  * delivery, strict on word count (sized to the clip) and on speech-only audio.
  * Never throws — on any error, empty content, or non-OK response it falls back to the templated
  * prompt (dialogueTemplate with {script} substituted, plus the same audio direction).
@@ -195,8 +198,8 @@ export async function expandScript(args: ExpandScriptArgs): Promise<string> {
           { role: 'system', content: buildScriptSystemPrompt(durationSeconds) },
           { role: 'user', content: userContent },
         ],
-        max_tokens: MAX_TOKENS,
-        temperature: TEMPERATURE,
+        max_completion_tokens: MAX_COMPLETION_TOKENS,
+        reasoning_effort: REASONING_EFFORT,
       }),
     });
 

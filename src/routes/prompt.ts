@@ -3,7 +3,7 @@
 //   POST /enhance    — { prompt, mode?: 'prompt'|'script', preset_id? }        → { prompt }
 //   POST /from-image — { generation_id? | upload_id?, preset_id?, hint? }      → { prompt }
 //
-// Both are FREE (no credit deduction — gpt-4o-mini costs fractions of a cent) and fail loud
+// Both are FREE (no credit deduction — gpt-5-mini costs fractions of a cent) and fail loud
 // (502 llm_unavailable) rather than echoing input back. Per-preset behavior comes from
 // PresetDef.prompt_intelligence (SERVER-ONLY registry config) keyed by the optional preset_id.
 //
