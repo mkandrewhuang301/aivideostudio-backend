@@ -269,7 +269,9 @@ describe('decorateStillPrompt (on_image_text, 2026-07-25)', () => {
   it('requests the exact string legibly and steers it away from the caption zone', () => {
     const prompt = decorateStillPrompt(scene, 'KITTY HAWK', 'lower_third');
     expect(prompt).toContain('"KITTY HAWK"');
-    expect(prompt).toContain('away from the lower third of the frame');
+    // 2026-07-25: placement is SPECIFIC (named region), plus the caption-zone avoidance.
+    expect(prompt).toContain('Place it deliberately in the upper third of the frame');
+    expect(prompt).toContain('away from the lower third');
     expect(prompt).toContain('No other words, letters, or numbers anywhere.');
     expect(prompt).not.toContain('No text, words, letters, or numbers anywhere in the image.');
   });

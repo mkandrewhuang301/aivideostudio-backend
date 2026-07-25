@@ -358,7 +358,7 @@ describe('expandExplainerScript', () => {
     expect(result.scenes[2]!.on_image_text).toBeUndefined();
   });
 
-  it('scales the cap with target length (~1 per 20s) and announces it in the user message', async () => {
+  it('scales the cap with target length (~1 per 15s) and announces it in the user message', async () => {
     mockGenerateClaudeText.mockResolvedValue(JSON.stringify({
       full_script: 'Magma rises beneath the volcano.',
       scenes: [
@@ -366,15 +366,16 @@ describe('expandExplainerScript', () => {
         validScene({ on_image_text: 'TWO' }),
         validScene({ on_image_text: 'THREE' }),
         validScene({ on_image_text: 'FOUR' }),
+        validScene({ on_image_text: 'FIVE' }),
       ],
       music_mood: 'ambient',
     }));
 
-    // 60s tier -> cap 3 (60/20). 90s would allow 4.
+    // 60s tier -> cap 4 (60/15). 90s would allow 6.
     const result = await expandExplainerScript({ ...baseArgs, sceneCount: 24, targetTotalSeconds: 60 });
 
-    expect(result.scenes.map((scene) => scene.on_image_text)).toEqual(['ONE', 'TWO', 'THREE', undefined]);
+    expect(result.scenes.map((scene) => scene.on_image_text)).toEqual(['ONE', 'TWO', 'THREE', 'FOUR', undefined]);
     const userMessage = mockGenerateClaudeText.mock.calls[0]![1].prompt as string;
-    expect(userMessage).toContain('at most 3 scene(s)');
+    expect(userMessage).toContain('at most 4 scene(s)');
   });
 });

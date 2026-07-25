@@ -72,7 +72,7 @@ export const EXPLAINER_VOICE_STYLE_PROMPT = 'Speak in a voice like an explainer,
  * The script's spoken-word budget scales off this same constant, so scenes still fill the tier
  * target — the pacing rises, the duration doesn't drop.
  */
-export const EXPLAINER_NARRATION_TEMPO = 1.22;
+export const EXPLAINER_NARRATION_TEMPO = 1.17;
 
 /**
  * Native Gemini TTS voices the Explainer format offers (mirrors the voices list in

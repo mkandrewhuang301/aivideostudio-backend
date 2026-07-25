@@ -46,13 +46,14 @@ const MAX_EDIT_STEPS = 3;
 
 // on_image_text (2026-07-25): the prompt rule says 5 words max; the parser enforces 6 as a hard
 // backstop (slack, not a second target). Longer strings are exactly the typo-prone case — DROP the
-// field rather than truncate mid-phrase. Per-video ration: ~1 text scene per 20s of tier length
-// (20s→1, 45→2, 60→3, 90→4), enforced after parsing since the LLM can't be trusted to count.
+// field rather than truncate mid-phrase. Per-video ration: ~1 text scene per 15s of tier length
+// (20s→1, 30→2, 45→3, 60→4, 90→6), enforced after parsing since the LLM can't be trusted to count.
+// (Raised from /20 on 2026-07-25 user review: "barely any text" in the 30s e2e — cap 1 was too sparse.)
 const MAX_ON_IMAGE_TEXT_WORDS = 6;
 
-/** Per-video cap on scenes carrying on_image_text (~1 per 20s of target length, min 1). */
+/** Per-video cap on scenes carrying on_image_text (~1 per 15s of target length, min 1). */
 export function onImageTextCapFor(targetTotalSeconds: number): number {
-  return Math.max(1, Math.floor(targetTotalSeconds / 20));
+  return Math.max(1, Math.floor(targetTotalSeconds / 15));
 }
 
 /** Natural speaking pace. A 5s clip is ~12 words — the whole clip, not a paragraph. */

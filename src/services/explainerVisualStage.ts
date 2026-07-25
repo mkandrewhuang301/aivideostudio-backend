@@ -152,9 +152,17 @@ export function decorateStillPrompt(
   const trimmed = onImageText?.trim();
   if (trimmed) {
     const zone = (textZone ?? 'lower_third').replace('_', ' ');
+    // 2026-07-25 user review: text placement must be SPECIFIC, not just "away from captions" —
+    // name the exact region so the model places it deliberately instead of drifting to center.
+    const target = textZone === 'upper_third'
+      ? 'lower third, above the caption-safe margin'
+      : textZone === 'center'
+        ? 'top edge of the frame'
+        : 'upper third';
     return `${visualPrompt}\n\nTEXT: Render this exact text legibly in the scene, matching its `
-      + `illustration style: "${trimmed}". Position it away from the ${zone} of the frame (that `
-      + 'area is reserved for captions). No other words, letters, or numbers anywhere.';
+      + `illustration style: "${trimmed}". Place it deliberately in the ${target} of the frame, `
+      + `integrated with the composition, away from the ${zone} (that area is reserved for `
+      + 'captions). No other words, letters, or numbers anywhere.';
   }
   return `${visualPrompt}\n\nNo text, words, letters, or numbers anywhere in the image.`;
 }
@@ -239,12 +247,21 @@ export function buildKenBurnsArgs(input: KenBurnsArgsInput): string[] {
   const safeDuration = Math.max(0.1, durationSeconds);
   const frames = Math.max(1, Math.round(safeDuration * KEN_BURNS_FPS));
   const zoomIncrement = (KEN_BURNS_MAX_ZOOM - 1) / frames;
-  const dirX = sceneIndex % 2 === 0 ? 1 : -1;
-  const dirY = sceneIndex % 3 === 0 ? -1 : 1;
 
-  const zoomExpr = `min(zoom+${zoomIncrement.toFixed(8)},${KEN_BURNS_MAX_ZOOM})`;
-  const xExpr = `(iw-iw/zoom)/2+${dirX}*(on/${frames})*iw*${KEN_BURNS_DRIFT_FRAC}`;
-  const yExpr = `(ih-ih/zoom)/2+${dirY}*(on/${frames})*ih*${KEN_BURNS_DRIFT_FRAC}`;
+  // Continuous ken burns (2026-07-25 user ruling): the zoom must NEVER snap back to 1.0 at a
+  // scene cut — "treat the video as one image's ken burns." Even scenes zoom IN 1.00->MAX and
+  // drift 0->d; odd scenes zoom OUT MAX->1.00 and drift d->0, so every scene starts exactly
+  // where the previous one ended and the push oscillates smoothly across the whole video.
+  // (Continuity holds between adjacent ken_burns scenes; nano/wiggle scenes are static-frame
+  // sequences and inherently reset the chain.) Drift direction is FIXED (not per-scene) so the
+  // pan position is also continuous at boundaries.
+  const zoomIn = sceneIndex % 2 === 0;
+  const zoomExpr = zoomIn
+    ? `min(1+on*${zoomIncrement.toFixed(8)},${KEN_BURNS_MAX_ZOOM})`
+    : `max(${KEN_BURNS_MAX_ZOOM}-on*${zoomIncrement.toFixed(8)},1)`;
+  const driftT = zoomIn ? `(on/${frames})` : `((${frames}-on)/${frames})`;
+  const xExpr = `(iw-iw/zoom)/2+${driftT}*iw*${KEN_BURNS_DRIFT_FRAC}`;
+  const yExpr = `(ih-ih/zoom)/2-${driftT}*ih*${KEN_BURNS_DRIFT_FRAC}`;
 
   // Upscale 2x before zoompan so the zoom/crop always has real source pixels to sample from
   // (zoompan reads from the filtered frame, not the original still).
