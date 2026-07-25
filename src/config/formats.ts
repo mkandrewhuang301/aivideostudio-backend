@@ -258,19 +258,21 @@ export interface VideoSummaryFormatDef extends FormatSummaryDef {
 export type AnyFormatDef = FormatDef | VideoSummaryFormatDef | SoonFormatDef | CharacterVlogFormatDef;
 
 /**
- * Character-vlog format (gorilla multi-take, 2026-07-24 spec). A `flow` row like video-summary:
- * excluded from FORMATS_BY_ID / formatResolver (its inputs don't fit the explainer shape) and
- * dispatched through its own route + worker. Carries NO server-only fields — provider model id
- * lives in the worker, character assets in characters.ts — because flow rows pass through the
- * client projection unchanged.
+ * Character-vlog format (v1 ONE-SHOT, 2026-07-25 lock — the 7/24 multi-take planner shape is
+ * shelved). A `flow` row like video-summary: excluded from FORMATS_BY_ID / formatResolver (its
+ * inputs don't fit the explainer shape) and dispatched through its own route + worker. Carries
+ * NO server-only fields — provider model id lives in the worker, character assets in
+ * characters.ts — because flow rows pass through the client projection unchanged.
  */
 export interface CharacterVlogFormatDef extends FormatSummaryDef {
   status: 'live';
   flow: 'character_vlog';
-  /** Total-length picker values (seconds). Take count/allocation is backend-decided. */
+  /** Per-clip length picker values (seconds) — v1 is one shot, so these live inside Mini's
+   *  4..15s window (and under the 15s reference-audio cap). */
   duration_options: number[];
-  /** Display + cost basis: credits per second of TOTAL length (Mini $0.05/s 720p + per-take gpt-image still, cents
-   *  rounded up — Andrew-verified 2026-07-24). Billing = ceil(seconds × per_second_credits). */
+  /** Display + cost basis: credits per second of clip length (Mini $0.05/s 720p + haiku
+   *  expansion + per-beat qwen clone ≈ $0.052/s all-in, cents rounded up).
+   *  Billing = ceil(seconds × per_second_credits). */
   per_second_credits: number;
   aspect_ratio: '9:16';
   sheet: FormatSheetMeta;
@@ -524,26 +526,27 @@ MOTION (every scene must include a "motion" object):
     status: 'soon',
     tile: {},
   },
-  // Character Vlogs (gorilla multi-take, 2026-07-24): user picks a nonhuman character from the
-  // roster + topic/vibe + TOTAL length; the Sonnet-5 planner owns script and setting per take;
-  // takes are addressable units (view prompt, regenerate one take). Dispatch is the dedicated
+  // Character Vlogs (v1 one-shot, 2026-07-25): user picks a nonhuman character from the roster,
+  // writes ONE beat, picks a clip length — a silent expansion pass writes the shot + the line,
+  // qwen clones the line in the character's voice, Mini films one clip. The take unit stays
+  // addressable (view "prompt used", regenerate the clip). Dispatch is the dedicated
   // /api/character-vlogs route + vlogGenerationWorker — NOT formatResolver.
   {
     format_id: 'character-vlog',
     title: 'Character Vlogs',
-    subtitle: 'Pick a character, give it a topic — it vlogs the rest',
+    subtitle: 'Pick a character, give it a beat — it vlogs the rest',
     section: 'formats',
     badge: 'NEW',
     sort_order: 15,
     status: 'live',
     tile: {},
     flow: 'character_vlog',
-    duration_options: [15, 30, 45, 60],
-    per_second_credits: 6, // 7/25 arm-C: covers Mini $0.05/s + ~$0.03-0.04 gpt-image still per take
+    duration_options: [5, 10, 15],
+    per_second_credits: 6, // Mini $0.05/s + haiku expansion + qwen clone ≈ $0.052/s, rounded up
     aspect_ratio: '9:16',
     sheet: {
-      description: 'Your character writes, stages, and films a multi-take vlog from one topic.',
-      preparing_label: 'Planning your vlog…',
+      description: 'Your character stages, voices, and films a one-shot vlog from a single beat.',
+      preparing_label: 'Filming your vlog…',
     },
   },
 ];

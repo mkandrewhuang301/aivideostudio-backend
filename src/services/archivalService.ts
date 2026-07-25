@@ -27,24 +27,16 @@ export async function uploadBufferToR2(
   await upload.done();
 }
 
-export async function archiveToR2(
+/** Shared fetch→stream→R2 core. Key is verbatim — callers own the full key. */
+async function archiveUrlToKey(
   outputUrl: string,
-  generationId: string,
-  contentType: string = 'video/mp4',
+  key: string,
+  contentType: string,
 ): Promise<string> {
   const response = await fetch(outputUrl);
   if (!response.ok || !response.body) {
     throw new Error(`Failed to fetch Replicate output: ${response.status}`);
   }
-
-  // Derive file extension from content type
-  const ext =
-    contentType === 'video/mp4' ? 'mp4' :
-    contentType === 'video/quicktime' ? 'mov' :
-    contentType === 'image/webp' ? 'webp' :
-    contentType === 'image/png'  ? 'png'  :
-    'jpg';  // default for image/jpeg and any unknown image type
-  const key = `generations/${generationId}.${ext}`;
 
   // Perf: stream the download straight into the R2 upload instead of buffering the entire
   // file into memory first (Buffer.from(await response.arrayBuffer())) and only then starting
@@ -64,6 +56,36 @@ export async function archiveToR2(
   await upload.done();
 
   return key;
+}
+
+/**
+ * Verbatim-key archive (2026-07-25, character-vlog fix): the caller passes the FULL R2 key —
+ * no `generations/` prefix, no derived extension. archiveToR2 below munges its arg into
+ * `generations/{arg}.{ext}`, which double-prefixed and double-extensioned every vlog asset
+ * (`generations/generations/…take_0.mp4.mp4`) — write=read so smokes passed, but purge-by-prefix
+ * would have missed them all.
+ */
+export async function archiveKeyToR2(
+  outputUrl: string,
+  r2Key: string,
+  contentType: string,
+): Promise<string> {
+  return archiveUrlToKey(outputUrl, r2Key, contentType);
+}
+
+export async function archiveToR2(
+  outputUrl: string,
+  generationId: string,
+  contentType: string = 'video/mp4',
+): Promise<string> {
+  // Derive file extension from content type
+  const ext =
+    contentType === 'video/mp4' ? 'mp4' :
+    contentType === 'video/quicktime' ? 'mov' :
+    contentType === 'image/webp' ? 'webp' :
+    contentType === 'image/png'  ? 'png'  :
+    'jpg';  // default for image/jpeg and any unknown image type
+  return archiveUrlToKey(outputUrl, `generations/${generationId}.${ext}`, contentType);
 }
 
 // 09.2-08: Magic Editor's OpenAI mask-edit call can return a base64-encoded PNG instead of a

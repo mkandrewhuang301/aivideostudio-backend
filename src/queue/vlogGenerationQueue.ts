@@ -1,7 +1,8 @@
-// BullMQ queue for the character-vlog multi-take pipeline (gorilla, 2026-07-24 spec).
-// One queue, two modes: 'plan' runs the full planner → N takes → concat pipeline; 'regen'
-// re-films ONE persisted take and re-stitches (per-take billing — cost carries only that
-// take's seconds so the ffmpeg timeout-refund path refunds the right amount).
+// BullMQ queue for the character-vlog ONE-SHOT pipeline (v1, 2026-07-25 lock — the 7/24
+// multi-take planner shape is shelved). One queue, two modes: 'create' runs expansion →
+// qwen voice clone → one Mini clip → direct completion; 'regen' re-films the single persisted
+// take (per-take billing — cost carries only that take's seconds so the failure path refunds
+// the right amount).
 
 import { Queue } from 'bullmq';
 
@@ -15,15 +16,14 @@ const connectionOptions = {
 
 export type VlogGenerationJob =
   | {
-      mode: 'plan';
+      mode: 'create';
       generationId: string;
       userId: string;
-      /** Full upfront cost (total seconds) — refunded whole on any failure. */
+      /** Full upfront cost (clip seconds) — refunded whole on any failure. */
       cost: number;
       characterId: string;
-      topic: string;
-      vibe?: string;
-      totalSeconds: number;
+      beat: string;
+      durationSeconds: number;
     }
   | {
       mode: 'regen';

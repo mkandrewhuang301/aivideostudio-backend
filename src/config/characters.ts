@@ -7,10 +7,10 @@ export type CharacterCategory = 'popular' | 'anime' | '3d_generated';
 export type CharacterStatus = 'soon' | 'live';
 
 /**
- * Character-vlog capability block (gorilla multi-take, 2026-07-24 spec at
- * ~/.planning/notes/2026-07-24-gorilla-multitake-planner-spec.md). Presence marks the character
- * as selectable in the character-vlog format roster — independent of the Cast page `status`
- * (Cast stays look-only; the vlog roster is the live surface).
+ * Character-vlog capability block (v1 one-shot, 2026-07-25 lock: user writes ONE beat → one
+ * cheap LLM expansion pass → one Mini clip; the 7/24 multi-take planner shape is shelved).
+ * Presence marks the character as selectable in the character-vlog format roster — independent
+ * of the Cast page `status` (Cast stays look-only; the vlog roster is the live surface).
  *
  * The roster is ALL-NONHUMAN by design (Andrew lock): fictional characters never trip Mini's
  * real-face E005 rejection, so reference_images injection is safe.
@@ -27,13 +27,17 @@ export interface CharacterVlogConfig {
    *  (sheet_url above is the client-facing twin; O-3 replaces both with final art). */
   sheet_r2_key?: string;
   /**
-   * SERVER-ONLY. Pinned qwen-clone voice reference (≤3×15s) injected into Mini
-   * `reference_audios` — the cross-take voice-consistency mechanism. OPTIONAL: the voice asset
-   * doesn't exist yet (comes with the frontend voice work); the worker OMITS reference_audios
-   * entirely while unset rather than blocking the format.
+   * SERVER-ONLY. R2 key of the canonical qwen voice-clone reference clip (≤15s) for this
+   * character. The worker clones EACH beat's spoken_line through qwen3-tts voice_clone against
+   * this clip, and that per-beat audio goes to Mini as reference_audios — voice identity AND
+   * lip-sync in one mechanism (2026-07-25 lock, supersedes the 7/24 "one pinned clip" spec).
+   * OPTIONAL: while unset the worker skips the TTS stage and Mini rolls its own voice.
    */
-  voice_asset_url?: string;
-  /** Fallback voice direction when a take's planner direction is missing. */
+  voice_reference_r2_key?: string;
+  /** SERVER-ONLY. Transcript of the voice reference clip (qwen reference_text — raw clones
+   *  look worse without it). */
+  voice_reference_text?: string;
+  /** qwen style_instruction + Mini-prompt delivery note (pace/energy), character-consistent. */
   default_voice_direction: string;
 }
 
@@ -175,6 +179,10 @@ export const SERVER_CHARACTERS: CharacterDef[] = [
       sheet_url: 'https://assets.fantasia.example/characters/gorilla/sheet-v1.jpg',
       // Smoke-grade real art (Andrew's gorilla selfie, uploaded 2026-07-25) until O-3 final art.
       sheet_r2_key: 'assets/characters/gorilla/sheet-smoke.png',
+      // Stand-in clone reference (harvard.wav 14s trim, smoke-proven 2026-07-25). No transcript
+      // until the canonical clip lands — raw clone beat the unpinned baseline in the smoke.
+      // TODO(O-3): Andrew's canonical gorilla voice clip + voice_reference_text transcript.
+      voice_reference_r2_key: 'assets/characters/gorilla/voice-smoke-harvard.wav',
       default_voice_direction: 'warm, gravelly, conversational',
     },
   },

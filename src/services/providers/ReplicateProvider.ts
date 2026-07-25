@@ -5,7 +5,7 @@
 import Replicate, { validateWebhook } from 'replicate';
 import { config } from '../../config';
 import { ModelProvider, GenerationInput, DispatchResult, PredictionStatus } from './ModelProvider';
-import { archiveToR2 } from '../archivalService';
+import { archiveKeyToR2, archiveToR2 } from '../archivalService';
 
 const replicate = new Replicate({ auth: config.replicateApiToken });
 const WHISPERX_MODEL = 'victor-upmeet/whisperx:655845d6190ef70573c669245f245892cd039df4b880a1e3a65852c09252f5cc';
@@ -359,7 +359,8 @@ export async function runVlogTake(input: VlogTakeInput, outputKey: string): Prom
     throw new Error('bytedance/seedance-2.0-mini returned no output video');
   }
   // Provider URLs expire (CLAUDE.md Rule 2) — archive immediately, never serve the Replicate URL.
-  return archiveToR2(outputUrl, outputKey, 'video/mp4');
+  // outputKey is a FULL R2 key (verbatim variant — 2026-07-25 double-prefix fix).
+  return archiveKeyToR2(outputUrl, outputKey, 'video/mp4');
 }
 
 /**
@@ -398,7 +399,7 @@ export async function generateVlogStill(
   if (!outputUrl) {
     throw new Error('openai/gpt-image-2 returned no output image');
   }
-  return archiveToR2(outputUrl, outputKey, 'image/png');
+  return archiveKeyToR2(outputUrl, outputKey, 'image/png');
 }
 
 /**

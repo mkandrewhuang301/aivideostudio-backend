@@ -65,6 +65,7 @@ import { openaiGenerationQueue } from '../queue/openaiGenerationQueue';
 import { chainGenerationQueue } from '../queue/chainGenerationQueue';
 import { explainerGenerationQueue } from '../queue/explainerGenerationQueue';
 import { vlogGenerationQueue } from '../queue/vlogGenerationQueue';
+import { computeVlogCostCredits } from './characterVlogs';
 import { influencerProQueue } from '../queue/influencerProQueue';
 import { falImageToolQueue } from '../queue/falImageToolQueue';
 import { getFalWebhookUrl, getReplicateWebhookUrl } from '../config';
@@ -1418,20 +1419,15 @@ generationsRouter.get('/:id', async (req: Request, res: Response) => {
       : null;
     // D-11/SC3/T-09.1-03: null the expanded template for preset rows; params.preset_id retained.
     const prompt = p?.preset_id === 'magic-editor' ? item.prompt : p?.preset_id ? null : item.prompt;
-    // Character-vlog take projection (2026-07-24 spec §10): the take-management UI renders one
-    // row per take — clip (presigned), the spoken line, and the exact resolved Mini prompt.
-    // Server-only internals (reference arrays, R2 keys) never leave this serializer.
+    // Character-vlog take projection (v1 one-shot, 2026-07-25): the take UI renders the clip
+    // (presigned), the spoken line, and the exact resolved Mini prompt ("prompt used" —
+    // 7/24 regen-visibility lock). Server-only internals (R2 keys) never leave this serializer.
     const takes = p?.format_id === 'character-vlog' && Array.isArray(p?.takes)
       ? await Promise.all((p.takes as Array<Record<string, unknown>>).map(async (take) => ({
           index: take.index,
           status: take.status,
           duration_seconds: take.duration_seconds,
           spoken_line: take.spoken_line,
-          setting: take.setting,
-          setting_tag: take.setting_tag,
-          framing_tag: take.framing_tag,
-          visual_direction: take.visual_direction,
-          voice_direction: take.voice_direction,
           resolved_prompt: take.resolved_prompt,
           attempts: take.attempts,
           clip_url: typeof take.clip_r2_key === 'string'
@@ -1477,11 +1473,11 @@ generationsRouter.patch('/:id/favorite', async (req: Request, res: Response) => 
   }
 });
 
-// POST /api/generations/:id/takes/:takeIndex/regenerate — character-vlog per-take regen
-// (2026-07-24 spec §9): re-films ONE take with its persisted prompt/refs and re-stitches,
-// billed at that take's seconds only. There is deliberately NO delete-take endpoint — take
-// management mirrors the studio-project clip UI with delete removed and regenerate in its
-// place (Andrew, 2026-07-24).
+// POST /api/generations/:id/takes/:takeIndex/regenerate — character-vlog per-take regen:
+// re-films ONE take with its persisted resolved prompt + persisted clone audio (visuals-only
+// re-roll, spec O-5), billed at that take's seconds only. There is deliberately NO delete-take
+// endpoint — take management mirrors the studio-project clip UI with delete removed and
+// regenerate in its place (Andrew, 2026-07-24).
 generationsRouter.post('/:id/takes/:takeIndex/regenerate', async (req: Request, res: Response) => {
   if (!req.user?.dbUserId) { res.status(401).json({ error: 'Not authenticated' }); return; }
   const generationId = req.params.id as string;
@@ -1512,12 +1508,9 @@ generationsRouter.post('/:id/takes/:takeIndex/regenerate', async (req: Request, 
       return;
     }
 
-    // Per-take billing (spec §8): this take's seconds only, same atomic deduction as dispatch.
-    const cost = computeCostCredits({
-      durationSeconds: take.duration_seconds,
-      resolution: '720p',
-      model: 'bytedance/seedance-2.0-mini',
-    });
+    // Per-take billing: this take's seconds at the format's per-second credits (same basis as
+    // the dispatch route — computeVlogCostCredits, 6cr/s), same atomic deduction as dispatch.
+    const cost = computeVlogCostCredits(take.duration_seconds);
     if (!await deductCredits(req.user.dbUserId, cost)) {
       res.status(402).json({ error: 'Insufficient credits', code: 'INSUFFICIENT_CREDITS', cost_credits: cost });
       return;
