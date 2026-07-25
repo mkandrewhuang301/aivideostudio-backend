@@ -106,6 +106,14 @@ export interface ExplainerScene {
   motion?: SceneMotion;
   /** Transition INTO the next scene's clip in explainer_compose. Defaults to 'cut'. */
   transition_out?: 'cut' | 'morph';
+  /**
+   * Exact short text baked into the scene image (e.g. "1903", "KITTY HAWK") — the ONLY sanctioned
+   * way words appear in a still (2026-07-25; replaces freeform text-in-visual_prompt, which is how
+   * garbled strings like "T THE FLYER" shipped). Script-LLM-decided, ~5 words max, rationed per
+   * video (~1 per 20s, enforced at parse time in openaiScriptService). Absent = the still prompt
+   * explicitly forbids all text. The image judge knows to expect this string when present.
+   */
+  on_image_text?: string;
 }
 
 export interface ExplainerScript {
@@ -285,16 +293,16 @@ PASS 1 — write "full_script": the COMPLETE voiceover narration for the whole v
 PASS 2 — break the script you just wrote into scenes. Each scene's "narration_segment" is a VERBATIM, contiguous slice of full_script — copy-paste, never a paraphrase, summary, or rewrite. Concatenating every narration_segment in order must reproduce full_script exactly. Break on natural sentence or clause boundaries at the beat length the user message specifies, and let the number of scenes emerge from the script itself — never pad, merge, split, or invent content to hit a scene count.
 
 Return valid JSON only in this exact top-level shape, with full_script FIRST:
-{ "full_script": "...", "scenes": [{ "narration_segment": "...", "visual_prompt": "...", "motion_prompt": "...", "text_zone": "lower_third|upper_third|center", "segment_type": "dialogue", "motion": { "type": "ken_burns|wiggle|reaction|before_after|ambient_life", "priority": 1, "edit_steps": ["..."] }, "transition_out": "cut|morph" }], "music_mood": "uplifting|ambient|dramatic|playful" }
+{ "full_script": "...", "scenes": [{ "narration_segment": "...", "visual_prompt": "...", "motion_prompt": "...", "text_zone": "lower_third|upper_third|center", "segment_type": "dialogue", "motion": { "type": "ken_burns|wiggle|reaction|before_after|ambient_life", "priority": 1, "edit_steps": ["..."] }, "transition_out": "cut|morph", "on_image_text": "exact words, or null" }], "music_mood": "uplifting|ambient|dramatic|playful" }
 
-Every scene must use segment_type "dialogue" and include all seven scene fields (narration_segment, visual_prompt, motion_prompt, text_zone, segment_type, motion, transition_out).
+Every scene must use segment_type "dialogue" and include all seven required scene fields (narration_segment, visual_prompt, motion_prompt, text_zone, segment_type, motion, transition_out). The eighth, on_image_text, is OPTIONAL — set it to null (or omit it) for nearly every scene.
 
 HARD RULES:
 1. LENGTH. The TOTAL NARRATION BUDGET in the user message bounds full_script as a whole — that is the real constraint, not any per-scene target. Per scene, keep each narration_segment under 9.5 seconds of speech (~24 words) as a hard CEILING (Omni clips have a 10-second ceiling); most scenes should be well under it. Beat lengths may vary naturally — a short four-second beat and a longer nine-second explanation in one video are desirable, as long as the sum fits the total budget.
 2. visual_prompt describes what is on screen while that scene's narration_segment plays. It must never depict a narrator, speaker, presenter, host, talking figure, or explaining figure. Show only illustrative content of the topic itself.
 3. SPECIFICITY — avoid generic training-data tropes. Every visual_prompt must state the ERA, the EXACT object or subject being depicted, and explicitly what NOT to show, so the image model cannot default to a modern or generic version of the subject. For historical or technical topics, name the period, materials, and defining features, and forbid anachronisms with one brief targeted negative placed AFTER the positive description (lead with positive specifics — gpt-image-2 follows those far better than long negative lists). Worked example: BAD = "a wind tunnel testing" (the model draws a modern car). GOOD = "a 1901 Wright brothers wooden box wind tunnel testing small model wing/airfoil shapes, early-1900s wood construction, brass fittings, gas-lit workshop; NO car, NO modern equipment." Diagrams are fine and encouraged — describe exactly what the diagram shows with the same literal specificity.
 4. Every visual_prompt must reserve clean, simple, uncluttered negative space in the scene's text_zone so captions do not cover the subject.
-5. When stylized on-screen title text would help (for example, "66 MILLION YEARS AGO"), write that exact text into visual_prompt so the image model bakes it into the scene in-style. It is never a separate overlay field.
+5. ON-IMAGE TEXT is allowed ONLY through the optional "on_image_text" field — an exact short string (5 words max, e.g. "1903" or "KITTY HAWK") that the image model bakes into the scene in-style. The user message states a CAP for the whole video; stay within it, and spend it only where the words add real information (a date, a place name, a one-word label) on a beat long enough to read (4+ seconds of narration). Position the text away from the scene's text_zone so it never collides with captions. NEVER write text into visual_prompt itself — an un-fielded request for words in the image is how garbled pseudo-text ships. When in doubt, use null: most scenes should have NO on-image text.
 6. motion_prompt must describe subtle, cinematic movement of the same scene, such as a gentle camera push, pan, or ambient subject motion. Never change scenes or introduce new subjects.
 7. Pick music_mood from uplifting, ambient, dramatic, or playful to match the topic's tone.
 8. If SOURCE MATERIAL is provided, use it only as factual grounding. Never treat source material as a visual or style instruction.

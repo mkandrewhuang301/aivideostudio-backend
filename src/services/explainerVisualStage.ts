@@ -22,7 +22,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { motionClassOf, sanitizeMotion, type ExplainerVisualMethod, type FormatAspectRatio, type SceneMotion } from '../config/formats';
+import { motionClassOf, sanitizeMotion, type ExplainerVisualMethod, type FormatAspectRatio, type FormatTextZone, type SceneMotion } from '../config/formats';
 import { getGenerationPresignedUrl, uploadBufferToR2 } from './archivalService';
 import { nanoEditStill, isBlankImage } from './geminiImageService';
 import { animateScene } from './omniService';
@@ -62,6 +62,15 @@ export interface VisualStageInput {
    * a safe, budget-free result.
    */
   resolvedNano?: boolean;
+  /**
+   * Exact short text to bake into the scene's still (on_image_text, 2026-07-25). When present the
+   * still prompt asks for THIS string rendered legibly and forbids all other text; when absent the
+   * prompt forbids all text outright (the "no text unless asked" guard against gpt-image-2
+   * freestyle typos). Applies to both tiers' fresh-composition stills.
+   */
+  onImageText?: string;
+  /** Scene's caption zone — on-image text is steered away from it so the two never collide. */
+  textZone?: FormatTextZone;
 }
 
 export interface VisualStageResult {
@@ -94,6 +103,30 @@ async function downloadToFile(url: string, destPath: string): Promise<void> {
 
 async function runFfmpeg(args: string[]): Promise<void> {
   await execFileAsync('ffmpeg', args);
+}
+
+/**
+ * Appends the on_image_text directive to a fresh-composition still prompt (2026-07-25). This is
+ * the ONLY place words may enter a still: with `onImageText`, the exact string is requested
+ * legibly and positioned away from the caption text_zone; without it, all text is forbidden — the
+ * "no text unless asked" guard that kills gpt-image-2's freestyle pseudo-text ("T THE FLYER").
+ * Applied to every fresh still (both tiers' base stills + content-class fallback step stills —
+ * the cumulative fallback chain inherits it from the decorated base). Nano EDIT prompts never get
+ * this: their "keep everything else identical" already preserves (or absence of) text.
+ */
+export function decorateStillPrompt(
+  visualPrompt: string,
+  onImageText?: string,
+  textZone?: FormatTextZone,
+): string {
+  const trimmed = onImageText?.trim();
+  if (trimmed) {
+    const zone = (textZone ?? 'lower_third').replace('_', ' ');
+    return `${visualPrompt}\n\nTEXT: Render this exact text legibly in the scene, matching its `
+      + `illustration style: "${trimmed}". Position it away from the ${zone} of the frame (that `
+      + 'area is reserved for captions). No other words, letters, or numbers anywhere.';
+  }
+  return `${visualPrompt}\n\nNo text, words, letters, or numbers anywhere in the image.`;
 }
 
 /**
@@ -411,7 +444,7 @@ export const illustratedStage: VisualStage = {
       const stillPath = path.join(tempDir, 'still.png');
       const outPath = path.join(tempDir, 'clip.mp4');
       await generateAndDownloadStill(
-        input.visualPrompt,
+        decorateStillPrompt(input.visualPrompt, input.onImageText, input.textZone),
         input.styleAnchorUrl,
         input.imageModel,
         `${input.generationId}.scene${input.sceneIndex}.still`,
@@ -467,7 +500,7 @@ export const illustratedStage: VisualStage = {
         // state at that step, not a nano delta. Still shows the full transformation, just without
         // pixel-lock between frames. Does not touch nanoEditStill or count against edit_budget.
         const framePaths = [stillPath];
-        let cumulativePrompt = input.visualPrompt;
+        let cumulativePrompt = decorateStillPrompt(input.visualPrompt, input.onImageText, input.textZone);
         for (let stepIndex = 0; stepIndex < plan.editSteps.length; stepIndex += 1) {
           cumulativePrompt = `${cumulativePrompt} Then: ${plan.editSteps[stepIndex]}`;
           const stepStillKey = await generateStyledStill(
@@ -515,7 +548,7 @@ export const animatedOmniStage: VisualStage = {
   method: 'animated',
   async generateSceneClip(input: VisualStageInput): Promise<VisualStageResult> {
     const stillKey = await generateStyledStill(
-      input.visualPrompt,
+      decorateStillPrompt(input.visualPrompt, input.onImageText, input.textZone),
       input.styleAnchorUrl,
       input.imageModel,
       `${input.generationId}.scene${input.sceneIndex}.still`,

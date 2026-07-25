@@ -134,6 +134,7 @@ const SCRIPT = {
       narration_line: 'First scene',
       text_zone: 'lower_third' as const,
       segment_type: 'dialogue' as const,
+      on_image_text: 'DAY ONE',
     },
     {
       visual_prompt: 'pixel-art eclipse shadow with clean lower third',
@@ -223,6 +224,8 @@ describe('processExplainerGeneration', () => {
       omniModel: 'google/gemini-omni-flash/image-to-video',
       narrationDurationSeconds: 1,
       aspectRatio: '16:9',
+      onImageText: 'DAY ONE',
+      textZone: 'lower_third',
     }));
     expect(mockGenerateSceneClip).toHaveBeenNthCalledWith(2, expect.objectContaining({
       sceneIndex: 1,

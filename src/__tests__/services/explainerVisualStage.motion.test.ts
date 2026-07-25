@@ -10,7 +10,7 @@ jest.mock('../../config', () => ({
   },
 }));
 
-import { buildWiggleArgs, buildMotionSequenceArgs, resolveMotionPlan } from '../../services/explainerVisualStage';
+import { buildWiggleArgs, buildMotionSequenceArgs, resolveMotionPlan, decorateStillPrompt } from '../../services/explainerVisualStage';
 import type { SceneMotion } from '../../config/formats';
 
 function motion(overrides: Partial<SceneMotion> = {}): SceneMotion {
@@ -245,5 +245,36 @@ describe('buildMotionSequenceArgs', () => {
     expect(args).toEqual(expect.arrayContaining(['-map', '[vout]']));
     expect(args.some((arg) => arg.startsWith('ffmpeg '))).toBe(false);
     expect(args[args.indexOf('-filter_complex') + 1]).toContain('[vout]');
+  });
+});
+
+describe('decorateStillPrompt (on_image_text, 2026-07-25)', () => {
+  const scene = 'a 1901 Wright brothers wooden wind tunnel in a gas-lit workshop';
+
+  it('forbids all text when onImageText is absent, null-ish, or blank', () => {
+    for (const value of [undefined, ''] as const) {
+      const prompt = decorateStillPrompt(scene, value, 'lower_third');
+      expect(prompt).toContain(scene);
+      expect(prompt).toContain('No text, words, letters, or numbers anywhere in the image.');
+      expect(prompt).not.toContain('TEXT:');
+    }
+  });
+
+  it('requests the exact string legibly and steers it away from the caption zone', () => {
+    const prompt = decorateStillPrompt(scene, 'KITTY HAWK', 'lower_third');
+    expect(prompt).toContain('"KITTY HAWK"');
+    expect(prompt).toContain('away from the lower third of the frame');
+    expect(prompt).toContain('No other words, letters, or numbers anywhere.');
+    expect(prompt).not.toContain('No text, words, letters, or numbers anywhere in the image.');
+  });
+
+  it('maps every text_zone to readable phrasing (default lower_third)', () => {
+    expect(decorateStillPrompt(scene, '1903', 'upper_third')).toContain('away from the upper third');
+    expect(decorateStillPrompt(scene, '1903', 'center')).toContain('away from the center');
+    expect(decorateStillPrompt(scene, '1903')).toContain('away from the lower third');
+  });
+
+  it('trims surrounding whitespace from the requested string', () => {
+    expect(decorateStillPrompt(scene, '  1903  ', 'center')).toContain('"1903"');
   });
 });

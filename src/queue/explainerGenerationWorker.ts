@@ -181,6 +181,8 @@ export async function processExplainerGeneration(data: ExplainerGenerationJob): 
         aspectRatio,
         motion: scene.motion,
         resolvedNano: motionAllocation[sceneIndex]?.resolvedNano ?? false,
+        onImageText: scene.on_image_text,
+        textZone: scene.text_zone,
       });
       clipKeys.push(clipR2Key);
     }

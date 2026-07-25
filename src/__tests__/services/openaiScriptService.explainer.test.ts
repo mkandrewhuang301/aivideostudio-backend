@@ -308,4 +308,73 @@ describe('expandExplainerScript', () => {
     expect(result.scenes).toHaveLength(1);
     expect(result.scenes[0]!.narration_line).toBe('volcanoes');
   });
+
+  it('passes a valid on_image_text through and treats null/missing as absent', async () => {
+    mockGenerateClaudeText.mockResolvedValue(JSON.stringify({
+      full_script: 'Magma rises beneath the volcano.',
+      scenes: [
+        validScene({ on_image_text: 'KITTY HAWK' }),
+        validScene({ on_image_text: null }),
+        validScene(),
+      ],
+      music_mood: 'ambient',
+    }));
+
+    const result = await expandExplainerScript(baseArgs);
+
+    expect(result.scenes[0]!.on_image_text).toBe('KITTY HAWK');
+    expect(result.scenes[1]!.on_image_text).toBeUndefined();
+    expect(result.scenes[2]!.on_image_text).toBeUndefined();
+  });
+
+  it('drops (not truncates) an on_image_text over the word backstop', async () => {
+    mockGenerateClaudeText.mockResolvedValue(JSON.stringify({
+      full_script: 'Magma rises beneath the volcano.',
+      scenes: [validScene({ on_image_text: 'one two three four five six seven' })],
+      music_mood: 'ambient',
+    }));
+
+    const result = await expandExplainerScript(baseArgs);
+
+    expect(result.scenes[0]!.on_image_text).toBeUndefined();
+  });
+
+  it('enforces the per-video on_image_text cap, keeping the first text scenes in order', async () => {
+    // baseArgs: sceneCount 2, no targetTotalSeconds -> 2 * 5s = 10s target -> cap = 1.
+    mockGenerateClaudeText.mockResolvedValue(JSON.stringify({
+      full_script: 'Magma rises beneath the volcano.',
+      scenes: [
+        validScene({ on_image_text: 'FIRST' }),
+        validScene(),
+        validScene({ on_image_text: 'SECOND' }),
+      ],
+      music_mood: 'ambient',
+    }));
+
+    const result = await expandExplainerScript(baseArgs);
+
+    expect(result.scenes[0]!.on_image_text).toBe('FIRST');
+    expect(result.scenes[1]!.on_image_text).toBeUndefined();
+    expect(result.scenes[2]!.on_image_text).toBeUndefined();
+  });
+
+  it('scales the cap with target length (~1 per 20s) and announces it in the user message', async () => {
+    mockGenerateClaudeText.mockResolvedValue(JSON.stringify({
+      full_script: 'Magma rises beneath the volcano.',
+      scenes: [
+        validScene({ on_image_text: 'ONE' }),
+        validScene({ on_image_text: 'TWO' }),
+        validScene({ on_image_text: 'THREE' }),
+        validScene({ on_image_text: 'FOUR' }),
+      ],
+      music_mood: 'ambient',
+    }));
+
+    // 60s tier -> cap 3 (60/20). 90s would allow 4.
+    const result = await expandExplainerScript({ ...baseArgs, sceneCount: 24, targetTotalSeconds: 60 });
+
+    expect(result.scenes.map((scene) => scene.on_image_text)).toEqual(['ONE', 'TWO', 'THREE', undefined]);
+    const userMessage = mockGenerateClaudeText.mock.calls[0]![1].prompt as string;
+    expect(userMessage).toContain('at most 3 scene(s)');
+  });
 });

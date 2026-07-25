@@ -44,6 +44,17 @@ const TRANSITION_OUTS = new Set(['cut', 'morph']);
 const DEFAULT_SCENE_MOTION: SceneMotion = { type: 'ken_burns', priority: 2, edit_steps: [] };
 const MAX_EDIT_STEPS = 3;
 
+// on_image_text (2026-07-25): the prompt rule says 5 words max; the parser enforces 6 as a hard
+// backstop (slack, not a second target). Longer strings are exactly the typo-prone case — DROP the
+// field rather than truncate mid-phrase. Per-video ration: ~1 text scene per 20s of tier length
+// (20s→1, 45→2, 60→3, 90→4), enforced after parsing since the LLM can't be trusted to count.
+const MAX_ON_IMAGE_TEXT_WORDS = 6;
+
+/** Per-video cap on scenes carrying on_image_text (~1 per 20s of target length, min 1). */
+export function onImageTextCapFor(targetTotalSeconds: number): number {
+  return Math.max(1, Math.floor(targetTotalSeconds / 20));
+}
+
 /** Natural speaking pace. A 5s clip is ~12 words — the whole clip, not a paragraph. */
 const WORDS_PER_SECOND = 2.5;
 const DEFAULT_CLIP_SECONDS = 5;
@@ -291,6 +302,15 @@ function parseExplainerScene(
     ? scene.transition_out as 'cut' | 'morph'
     : 'cut';
 
+  // on_image_text: exact string only, hard-clamped at MAX_ON_IMAGE_TEXT_WORDS (dropped, not
+  // truncated, when over — a cut-off phrase is worse than no text). The per-video ration is
+  // enforced by the caller, which alone knows the tier length.
+  let onImageText = nonEmptyString(scene.on_image_text) ? scene.on_image_text.trim() : undefined;
+  if (onImageText && onImageText.split(/\s+/).length > MAX_ON_IMAGE_TEXT_WORDS) {
+    console.warn(`[openaiScriptService] dropping over-long on_image_text (${onImageText.split(/\s+/).length} words): "${onImageText}"`);
+    onImageText = undefined;
+  }
+
   return {
     visual_prompt: scene.visual_prompt.trim().replace(BANNED_NARRATOR_FIGURE, 'the subject'),
     motion_prompt: scene.motion_prompt.trim(),
@@ -299,6 +319,7 @@ function parseExplainerScene(
     segment_type: segmentType,
     motion: parseSceneMotion(scene.motion),
     transition_out: transitionOut,
+    on_image_text: onImageText,
   };
 }
 
@@ -390,7 +411,9 @@ export async function expandExplainerScript(
       + `natural speech at roughly ${WORDS_PER_SECOND} words/sec). This is a TOTAL for the whole `
       + 'video. At the beat length in the pacing guidance above, that usually lands somewhere '
       + `around ${args.sceneCount} scenes — an estimate, NOT a target. Write the script to the word `
-      + 'budget, break it at natural boundaries, and let the scene count fall where it falls.';
+      + 'budget, break it at natural boundaries, and let the scene count fall where it falls.'
+      + `\n\nON-IMAGE TEXT CAP: at most ${onImageTextCapFor(targetTotalSeconds)} scene(s) in the `
+      + 'whole video may carry on_image_text. Every other scene must use null.';
     let rawContent: string;
     try {
       rawContent = await generateClaudeText(EXPLAINER_SCRIPT_MODEL, {
@@ -422,6 +445,20 @@ export async function expandExplainerScript(
       .filter((scene): scene is ExplainerScene => scene !== null)
       .slice(0, maxScenes);
     if (scenes.length === 0) return explainerFallback(args);
+
+    // on_image_text ration (2026-07-25): the LLM is told the cap but can't be trusted to count —
+    // keep the first N text scenes in narrative order, clear the rest. Clearing (not moving) is
+    // right: the no-text clause in the still prompt is the safe default.
+    const onImageTextCap = onImageTextCapFor(targetTotalSeconds);
+    let onImageTextUsed = 0;
+    for (const scene of scenes) {
+      if (!scene.on_image_text) continue;
+      onImageTextUsed += 1;
+      if (onImageTextUsed > onImageTextCap) {
+        console.warn(`[openaiScriptService] on_image_text over cap ${onImageTextCap}; clearing scene text: "${scene.on_image_text}"`);
+        scene.on_image_text = undefined;
+      }
+    }
 
     // full_script ↔ segments consistency check (script-first contract): concatenating the
     // narration segments in order must reproduce full_script. On drift, full_script is
