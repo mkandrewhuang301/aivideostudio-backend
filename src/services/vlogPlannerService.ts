@@ -242,3 +242,17 @@ Setting: ${take.setting}.
 Action: ${take.visual_direction}.
 Speaking the following as spoken dialogue, ${voiceDirection}: "${take.spoken_line}"`;
 }
+
+/**
+ * gpt-image-2 still prompt for the frame-first pipeline (2026-07-25 arm-C lock: stills win
+ * scenes, still-as-REFERENCE keeps the voice pin — first-frame image is E006-banned with
+ * reference_audios). Still-frame language only: no speech, no motion — Mini adds both from
+ * buildTakePrompt. Also persisted on the take unit (user-visible).
+ */
+export function buildTakeStillPrompt(character: CharacterVlogConfig, take: PlannedTake): string {
+  return `${character.vlog_framing_prefix}
+This is a STILL FRAME — one frozen instant, no motion.
+Setting: ${take.setting}.
+Composition/action: ${take.visual_direction}.
+Framing style: ${take.framing_tag}.`;
+}

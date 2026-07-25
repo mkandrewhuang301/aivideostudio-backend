@@ -313,6 +313,18 @@ export interface VlogTakeInput {
   durationSeconds: number;
   referenceImages: string[];
   referenceAudios?: string[];
+  /**
+   * Frame-first arm (2026-07-25 A/B): a gpt-image-2 still used as Mini's `image` (first frame).
+   * Live schema: `image` CANNOT be combined with reference_images — when set, reference_images
+   * are dropped and character consistency becomes the still's job (the still was rendered from
+   * the character sheet upstream).
+   * ⚠️ LIVE FINDING 2026-07-25 (E006): reference_AUDIOS is also banned with first/last frame
+   * images ("Reference images, videos, and audios cannot be used together with first or last
+   * frame images") — frame-first and voice-pinning are MUTUALLY EXCLUSIVE on Mini. Callers must
+   * omit referenceAudios when firstFrameImage is set; Mini rolls its own voice from the quoted
+   * dialogue instead.
+   */
+  firstFrameImage?: string;
 }
 
 export async function runVlogTake(input: VlogTakeInput, outputKey: string): Promise<string> {
@@ -323,19 +335,70 @@ export async function runVlogTake(input: VlogTakeInput, outputKey: string): Prom
     aspect_ratio: '9:16',
     generate_audio: true,
   };
-  if (input.referenceImages.length) replicateInput.reference_images = input.referenceImages;
+  if (input.firstFrameImage) {
+    replicateInput.image = input.firstFrameImage;
+  } else if (input.referenceImages.length) {
+    replicateInput.reference_images = input.referenceImages;
+  }
   if (input.referenceAudios?.length) replicateInput.reference_audios = input.referenceAudios;
 
   const output = (await withReplicateRetry(
     () => replicate.run('bytedance/seedance-2.0-mini', { input: replicateInput }),
     'vlog-take',
   )) as unknown;
-  const outputUrl = Array.isArray(output) ? output[0] : output;
-  if (typeof outputUrl !== 'string' || !outputUrl) {
+  // replicate client v1.x returns FileOutput object(s) with .url(), not plain strings — same
+  // normalization as generateStyledStill/generateVlogStill (first live smoke run crashed here
+  // 2026-07-25 after the prediction completed: "returned no output video").
+  const first = Array.isArray(output) ? output[0] : output;
+  const outputUrl = typeof first === 'string'
+    ? first
+    : (first && typeof (first as { url?: unknown }).url === 'function')
+      ? String((first as { url: () => unknown }).url())
+      : '';
+  if (!outputUrl) {
     throw new Error('bytedance/seedance-2.0-mini returned no output video');
   }
   // Provider URLs expire (CLAUDE.md Rule 2) — archive immediately, never serve the Replicate URL.
   return archiveToR2(outputUrl, outputKey, 'video/mp4');
+}
+
+/**
+ * Frame-first vlog still (2026-07-25 A/B vs text-only takes): gpt-image-2 renders the take's
+ * first frame FROM the character sheet — the opposite anchoring of generateStyledStill above
+ * (which is style-only and forbids copying the subject). Here the character MUST carry over:
+ * same face, same body, same gear, dropped into the planner's new setting. Mini then animates
+ * the still via runVlogTake's firstFrameImage, so the video model never invents scenery.
+ */
+export async function generateVlogStill(
+  scenePrompt: string,
+  characterSheetUrl: string,
+  outputKey: string,
+): Promise<string> {
+  const characterLockedPrompt =
+    'The attached image is the CHARACTER SHEET for the vlogger. Render a new photorealistic '
+    + 'video frame featuring THIS EXACT character — same face, same body, same fur, same gear '
+    + '(including anything worn on the head) — instantly recognizable as the same individual. '
+    + 'Everything else (location, background, extras, lighting, props) comes from the scene '
+    + 'description below.\n\nSCENE:\n'
+    + scenePrompt;
+  const output = (await withReplicateRetry(() => replicate.run('openai/gpt-image-2', {
+    input: {
+      prompt: characterLockedPrompt,
+      input_images: [characterSheetUrl],
+      aspect_ratio: '9:16',
+      quality: 'medium',
+    },
+  }), 'generateVlogStill')) as unknown;
+  const first = Array.isArray(output) ? output[0] : output;
+  const outputUrl = typeof first === 'string'
+    ? first
+    : (first && typeof (first as { url?: unknown }).url === 'function')
+      ? String((first as { url: () => unknown }).url())
+      : '';
+  if (!outputUrl) {
+    throw new Error('openai/gpt-image-2 returned no output image');
+  }
+  return archiveToR2(outputUrl, outputKey, 'image/png');
 }
 
 /**

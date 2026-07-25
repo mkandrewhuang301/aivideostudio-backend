@@ -11,8 +11,11 @@
 // row restored to 'completed' (the original final video is still intact).
 
 import { Job, Worker } from 'bullmq';
+import { GetObjectCommand } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { SERVER_CHARACTERS, type CharacterVlogConfig } from '../config/characters';
-import { runVlogTake } from '../services/providers/ReplicateProvider';
+import { generateVlogStill, runVlogTake } from '../services/providers/ReplicateProvider';
+import { r2, R2_BUCKET } from '../storage/r2';
 import { refundCredits } from '../services/creditService';
 import {
   classifyFailureReason,
@@ -26,6 +29,7 @@ import {
 import {
   allocateTakes,
   buildTakePrompt,
+  buildTakeStillPrompt,
   planVlogTakes,
   type PlannedTake,
 } from '../services/vlogPlannerService';
@@ -56,6 +60,10 @@ export interface VlogTakeUnit {
   reference_images: string[];
   /** Empty until the character's pinned qwen-clone voice asset exists (spec O-3). */
   reference_audios: string[];
+  /** Frame-first (7/25 arm-C lock): the gpt-image-2 still Mini gets as reference_images[0].
+   *  Persisted so regen can re-roll the still and the take screen can show it. */
+  still_r2_key: string | null;
+  still_prompt: string | null;
   clip_r2_key: string | null;
   attempts: number;
 }
@@ -82,18 +90,48 @@ function takeUnitFromPlan(
     spoken_line: planned.spoken_line,
     voice_direction: planned.voice_direction || character.default_voice_direction,
     resolved_prompt: buildTakePrompt(character, planned),
-    reference_images: [character.sheet_url],
+    reference_images: [], // populated by filmTake with the per-take STILL (arm-C), not the sheet
     reference_audios: character.voice_asset_url ? [character.voice_asset_url] : [],
+    still_r2_key: null,
+    still_prompt: null,
     clip_r2_key: null,
     attempts: 0,
   };
 }
 
+async function presignKey(key: string): Promise<string> {
+  return getSignedUrl(r2, new GetObjectCommand({ Bucket: R2_BUCKET, Key: key }), { expiresIn: 3600 });
+}
+
+/**
+ * Frame-first film (2026-07-25 arm-C lock, replacing the text-only sheet-reference path):
+ * gpt-image-2 renders the take's still FROM the character sheet → Mini films with the STILL as
+ * reference_images[0] (+ voice pin when the asset exists). First-frame `image` mode is NOT
+ * used — E006 bans it with reference_audios, and the still-as-reference arm matched its scene
+ * fidelity in the live A/B/C smoke while keeping the voice pin.
+ */
 async function filmTake(
   generationId: string,
   take: VlogTakeUnit,
+  character: CharacterVlogConfig,
   clipKey: string,
+  stillKey: string,
 ): Promise<string> {
+  if (!character.sheet_r2_key) throw new Error('character has no sheet_r2_key (O-3 asset missing)');
+  const sheetUrl = await presignKey(character.sheet_r2_key);
+  const takePlan: PlannedTake = {
+    take_index: take.index,
+    duration_seconds: take.duration_seconds,
+    setting: take.setting,
+    setting_tag: take.setting_tag,
+    framing_tag: take.framing_tag,
+    visual_direction: take.visual_direction,
+    spoken_line: take.spoken_line,
+    voice_direction: take.voice_direction,
+  };
+  take.still_prompt = buildTakeStillPrompt(character, takePlan);
+  take.still_r2_key = await generateVlogStill(take.still_prompt, sheetUrl, stillKey);
+  take.reference_images = [await presignKey(take.still_r2_key)];
   return runVlogTake(
     {
       prompt: take.resolved_prompt,
@@ -164,7 +202,9 @@ async function processPlanJob(data: Extract<VlogGenerationJob, { mode: 'plan' }>
       take.clip_r2_key = await filmTake(
         data.generationId,
         take,
+        character.vlog,
         `generations/${data.generationId}/take_${take.index}.mp4`,
+        `generations/${data.generationId}/take_${take.index}_still.png`,
       );
       take.status = 'done';
       take.attempts = 1;
@@ -206,13 +246,16 @@ async function processRegenJob(data: Extract<VlogGenerationJob, { mode: 'regen' 
     take.status = 'regenerating';
     await mergeGenerationParams(data.generationId, { takes, stage_label: `Re-filming take ${take.index + 1}…` });
 
-    // NEW key per attempt: the old clip survives a failed re-film, and the pointer only swaps
-    // on success.
+    // NEW keys per attempt: the old clip AND old still survive a failed re-film, and the
+    // pointers only swap on success. Regen re-rolls BOTH still and clip (visuals only —
+    // same spoken line, spec O-5).
     const attempt = take.attempts + 1;
     const clipKey = await filmTake(
       data.generationId,
       take,
+      character.vlog,
       `generations/${data.generationId}/take_${take.index}_a${attempt}.mp4`,
+      `generations/${data.generationId}/take_${take.index}_still_a${attempt}.png`,
     );
     take.clip_r2_key = clipKey;
     take.attempts = attempt;

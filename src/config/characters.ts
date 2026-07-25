@@ -20,8 +20,12 @@ export interface CharacterVlogConfig {
   persona_prompt: string;
   /** SERVER-ONLY. Framing prefix every resolved take prompt starts from (selfie-cam language). */
   vlog_framing_prefix: string;
-  /** Bundled character reference sheet — injected into Mini `reference_images` on every take. */
+  /** Bundled character reference sheet — injected into gpt-image-2 `input_images` for the
+   *  per-take still (frame-first pipeline, 7/25 arm-C lock). Client-displayable URL. */
   sheet_url: string;
+  /** SERVER-ONLY. R2 key of the canonical sheet the worker presigns for provider calls
+   *  (sheet_url above is the client-facing twin; O-3 replaces both with final art). */
+  sheet_r2_key?: string;
   /**
    * SERVER-ONLY. Pinned qwen-clone voice reference (≤3×15s) injected into Mini
    * `reference_audios` — the cross-take voice-consistency mechanism. OPTIONAL: the voice asset
@@ -169,6 +173,8 @@ export const SERVER_CHARACTERS: CharacterDef[] = [
         'phone to film themself talking directly to the camera, natural gestures, casual vlog ' +
         'energy.',
       sheet_url: 'https://assets.fantasia.example/characters/gorilla/sheet-v1.jpg',
+      // Smoke-grade real art (Andrew's gorilla selfie, uploaded 2026-07-25) until O-3 final art.
+      sheet_r2_key: 'assets/characters/gorilla/sheet-smoke.png',
       default_voice_direction: 'warm, gravelly, conversational',
     },
   },
