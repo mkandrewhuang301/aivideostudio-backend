@@ -44,7 +44,7 @@ async function withRetry<T>(label: string, fn: () => Promise<T>): Promise<T> {
 async function main() {
   const preset = SERVER_PRESETS.find((p) => p.preset_id === 'gorilla-vlogs');
   if (!preset) throw new Error('gorilla-vlogs preset not found');
-  const maxSeconds = preset.cost?.type === 'per_second' ? preset.cost.max_seconds : 5;
+  const maxSeconds = preset.cost?.type === 'per_second' ? (preset.cost.max_seconds ?? 5) : 5;
   const template = preset.dialogue_prompt_template || preset.prompt_template || '{script}';
 
   console.log(`1. expandScript() — preset duration ${maxSeconds}s (budget ${Math.round(maxSeconds * 2.5)} words)`);

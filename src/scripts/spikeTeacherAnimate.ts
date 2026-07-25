@@ -89,7 +89,7 @@ async function klingAnimate(imgUrl: string): Promise<string> {
   const res = (await fal.subscribe(KLING, {
     input: {
       elements: [{ frontal_image_url: imgUrl, reference_image_urls: [imgUrl] }],
-      duration: String(DURATION),
+      duration: `${DURATION}`,
       aspect_ratio: '9:16',
       generate_audio: true,
       prompt: `@Element1 ${PROMPT}`,

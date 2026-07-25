@@ -52,7 +52,7 @@ async function save(url: string, name: string): Promise<string> {
 
 async function main() {
   const preset = SERVER_PRESETS.find((p) => p.preset_id === 'gorilla-vlogs')!;
-  const maxSeconds = preset.cost?.type === 'per_second' ? preset.cost.max_seconds : 5;
+  const maxSeconds = preset.cost?.type === 'per_second' ? (preset.cost.max_seconds ?? 5) : 5;
   const template = preset.dialogue_prompt_template || preset.prompt_template || '{script}';
 
   const prompt = await expandScript({
@@ -88,7 +88,7 @@ async function main() {
       const res = (await fal.subscribe(KLING_O3, {
         input: {
           elements: [{ frontal_image_url: charUrl, reference_image_urls: [charUrl] }],
-          duration: String(maxSeconds),
+          duration: String(maxSeconds) as "5", // gorilla preset max_seconds=5; fal Kling schema wants the literal union
           aspect_ratio: '9:16',
           generate_audio: true,
           prompt: `@Element1 ${prompt}`,
