@@ -169,6 +169,13 @@ export interface FormatCaptionConfig {
   textColor: string;
   highlightColor: string;
   position: 'bottom';
+  /** Optional glyph outline / drop shadow / box override forwarded to the ASS burn. White text on
+   * light illustration styles (flat-vector cream) is unreadable without these — the 2026-07-22
+   * Illustrated quality recipe locks outline 4 + shadow 1.2 + no background box. Optional so
+   * pre-tiers format rows (and iOS's decoder) keep parsing. */
+  outlineWidth?: number;
+  shadowDepth?: number;
+  backgroundBox?: boolean;
 }
 
 export interface FormatSheetMeta {
@@ -380,6 +387,12 @@ MOTION (every scene must include a "motion" object):
       textColor: '#FFFFFF',
       highlightColor: '#FFD60A',
       position: 'bottom',
+      // 2026-07-24 contrast fix: white-on-cream was unreadable on light illustration styles in the
+      // 7/24 e2e. The 7/22 Illustrated recipe (black outline 4 + small shadow, no box) was locked
+      // but never wired — this is the wiring. Matches what videoSummaryWorker already passed inline.
+      outlineWidth: 4,
+      shadowDepth: 1.2,
+      backgroundBox: false,
     },
     // Live-verified fal pricing (14-01): Omni $0.13/output-second dominates 78–86% of cost,
     // plus TTS $0.15/1k chars, one $0.10 Lyria clip, WhisperX, script, and 2.5 average candidate

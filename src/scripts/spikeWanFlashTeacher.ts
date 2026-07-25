@@ -18,9 +18,8 @@ import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
 const OUT = `${process.env.HOME}/Downloads/spike-teacher-wanflash`;
 const STILL = `${process.env.HOME}/Downloads/spike-teacher-ab/still-A-side-by-side.png`;
-// Voice A CLONE (qwen voice_clone mode) — NOT a qwen prebuilt speaker. Andrew 7/24: the prebuilt
-// defaults read Chinese-accented; teacher voice = clone (Voice A) or another non-default.
-const AUDIO = `${process.env.HOME}/Downloads/spike-lesson-codeswitch/3-voiceA-mixed-auto.wav`; // 7.12s bilingual
+// Retry round: fresh Voice A clone clip — short teacher line, slow/calm style (3.12s, fits 5s slot).
+const AUDIO = `${OUT}/voiceA-teacher-short.wav`;
 const MODEL = 'wan-video/wan2.6-i2v-flash';
 
 const SPOKEN = 'Hola. Today\'s word is manzana. Manzana means apple. Repeat after me: manzana.';
@@ -31,6 +30,13 @@ const PROMPT_A = 'A friendly Spanish teacher speaks directly to the camera in a 
 const PROMPT_B = 'A friendly Spanish teacher speaks directly to the camera in a calm, clear teaching voice, '
   + 'occasionally gesturing toward the whiteboard beside her. Her speech is provided as an audio file — '
   + 'synchronize her lip movement and delivery to that audio exactly; do not generate any other speech.';
+// Retry round: background-lock bit (Andrew saw background drift in arm A) — tests whether Wan's
+// scene drift is promptable or a model ceiling.
+const BGLOCK = ' The classroom, the whiteboard, all text and decorations on it, the lighting, and the '
+  + 'camera framing stay completely unchanged for the entire clip — the ONLY motion is her speaking '
+  + 'and making natural hand gestures.';
+const NEGATIVE = 'scene change, background change, morphing or shifting background, camera movement, '
+  + 'zoom, pan, objects appearing or disappearing, text changing';
 
 const replicate = new Replicate();
 
@@ -46,7 +52,7 @@ async function audioUrl(path: string): Promise<string> {
     },
   });
   const Bucket = process.env.R2_BUCKET_NAME!;
-  const Key = `spikes/wanflash/voiceA-mixed.wav`;
+  const Key = `spikes/wanflash/voiceA-teacher-short.wav`;
   await s3.send(new PutObjectCommand({
     Bucket, Key, Body: readFileSync(path), ContentType: 'audio/wav',
   }));
@@ -80,7 +86,28 @@ async function main(): Promise<void> {
 
   // Sequential — Replicate account was near the 429 burst throttle on 7/24 eve.
   // armA already succeeded (armA_native_audio.mp4 in OUT) — re-run armB only.
-  if (!process.argv.includes('--armB-only')) {
+  if (process.argv.includes('--retry')) {
+    // Retry round: both arms at 5s with the background-lock bit + negative prompt.
+    await run('armA2_native_bglock', {
+      image,
+      prompt: PROMPT_A + BGLOCK,
+      negative_prompt: NEGATIVE,
+      duration: 5,
+      resolution: '720p',
+      audio_enabled: true,
+      enable_prompt_expansion: false,
+    });
+    await run('armB2_voiceA_bglock', {
+      image,
+      audio,
+      prompt: PROMPT_B + BGLOCK,
+      negative_prompt: NEGATIVE,
+      duration: 5,
+      resolution: '720p',
+      audio_enabled: true,
+      enable_prompt_expansion: false,
+    });
+  } else if (!process.argv.includes('--armB-only')) {
     await run('armA_native_audio', {
       image,
       prompt: PROMPT_A,
@@ -91,15 +118,17 @@ async function main(): Promise<void> {
     });
   }
 
-  await run('armB_voiceA_lipsync', {
-    image,
-    audio,
-    prompt: PROMPT_B,
-    duration: 10, // enum 5/10/15; the Voice A clip is 7.12s
-    resolution: '720p',
-    audio_enabled: true,
-    enable_prompt_expansion: false,
-  });
+  if (!process.argv.includes('--retry')) {
+    await run('armB_voiceA_lipsync', {
+      image,
+      audio,
+      prompt: PROMPT_B,
+      duration: 10, // enum 5/10/15; the Voice A clip is 7.12s
+      resolution: '720p',
+      audio_enabled: true,
+      enable_prompt_expansion: false,
+    });
+  }
 
   console.log('done — clips in', OUT);
 }

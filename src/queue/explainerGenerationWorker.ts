@@ -264,6 +264,9 @@ export async function processExplainerGeneration(data: ExplainerGenerationJob): 
           color: def.caption_style.textColor,
           highlightColor: def.caption_style.highlightColor,
           position: def.caption_style.position,
+          outlineWidth: def.caption_style.outlineWidth,
+          shadowDepth: def.caption_style.shadowDepth,
+          backgroundBox: def.caption_style.backgroundBox,
         },
       },
     });

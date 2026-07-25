@@ -183,7 +183,7 @@ async function main() {
       clips: script.scenes.map((s, i) => ({ r2Key: clipKeys[i]!, durationSeconds: stems[i]!.durationSeconds, transition: s.transition_out ?? 'cut' })),
       narrationR2Key: narrationKey, musicR2Key: musicKey, musicVolume: 0.1,
       captionCues: cues,
-      captionStyle: { fontSize: def.caption_style.fontSize, color: def.caption_style.textColor, highlightColor: def.caption_style.highlightColor, position: def.caption_style.position },
+      captionStyle: { fontSize: def.caption_style.fontSize, color: def.caption_style.textColor, highlightColor: def.caption_style.highlightColor, position: def.caption_style.position, outlineWidth: def.caption_style.outlineWidth, shadowDepth: def.caption_style.shadowDepth, backgroundBox: def.caption_style.backgroundBox },
     },
   } as any);
 
