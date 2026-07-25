@@ -107,7 +107,9 @@ describe('buildAssFile', () => {
     const dialogue = ass.split('\n').find((line) => line.startsWith('Dialogue:')) ?? '';
     expect(dialogue).toContain('Yuji returns.');
     expect(dialogue).not.toMatch(/\{\\k\d+\}/);
-    expect(ass).toContain(',1,3,1.5,5,10,10,10,1');
+    // Style tail: BorderStyle=1 (backgroundBox:false), Outline=3, Shadow=1.5, Alignment=5,
+    // MarginL/R = round(0.14 * 1080) = 151 (the safe-margin column), MarginV=10, Encoding=1.
+    expect(ass).toContain(',1,3,1.5,5,151,151,10,1');
   });
 
   it('produces 2 Dialogue lines for 2 cues with correct H:MM:SS.cc start/end timestamps', () => {

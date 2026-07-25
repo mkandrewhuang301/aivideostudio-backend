@@ -165,9 +165,9 @@ export function buildAssFile(cues: CaptionCue[], style: CaptionStyle, canvas: Ca
   // Item 3: every Dialogue line below carries an explicit `\an5\pos(x,y)` override (box-CENTER
   // anchor, same convention buildTextOverlayAss already uses), so the Style row's Alignment field
   // is inert dead weight left at 5 (middle-center) for documentation only — MarginL/R/V likewise
-  // no longer determine vertical placement, but MarginL/R are KEPT at their prior 10/10 values
-  // because ASS still uses them to compute wrap width even under `\pos` override, and changing
-  // that would regress existing multi-word wrap behavior, which is out of this item's scope.
+  // no longer determine vertical placement. MarginL/R carry the symmetric `sideMargin` (~14% of
+  // width) computed above, since ASS still uses them to compute the centered wrap column even under
+  // the `\pos` override; MarginV stays at 10 (inert under `\pos`).
   const centerX = Math.round(canvas.width / 2);
   const centerY = Math.round(resolveCaptionYOffsetNorm(style) * canvas.height);
 
