@@ -20,6 +20,7 @@ import './queue/openaiGenerationWorker';
 import './queue/falImageToolWorker';
 import './queue/chainGenerationWorker';
 import './queue/explainerGenerationWorker';
+import './queue/vlogGenerationWorker';
 import './queue/videoSummaryWorker';
 import './queue/influencerProWorker';
 import './queue/ffmpegWorker';
@@ -37,6 +38,7 @@ import { charactersRouter } from './routes/characters';
 import { promptRouter } from './routes/prompt';
 import { videoTranslationRouter } from './routes/videoTranslation';
 import { videoSummariesRouter } from './routes/videoSummaries';
+import { characterVlogsRouter } from './routes/characterVlogs';
 
 // Eagerly initialize Firebase Admin at startup — prevents double-init on concurrent requests
 getFirebaseAdmin();
@@ -108,6 +110,7 @@ app.use('/api/me', meRouter);
 app.use('/api/generations', videoTranslationRouter);
 app.use('/api/generations', generationsRouter);
 app.use('/api/video-summaries', videoSummariesRouter);
+app.use('/api/character-vlogs', characterVlogsRouter);
 app.use('/api/reports', reportsRouter);
 app.use('/api/uploads', uploadsRouter);
 app.use('/api/projects', projectsRouter);

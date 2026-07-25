@@ -23,7 +23,10 @@ export const MODEL_RATES: Record<string, { nonVideoIn: Record<string, number>; v
     videoIn:    { '480p': 0.08, '720p': 0.17 },
   },
   'bytedance/seedance-2.0-mini': {
-    nonVideoIn: { '480p': 0.04, '720p': 0.09 },
+    // 720p nonVideoIn corrected 2026-07-24 (Andrew): $0.09 → $0.05/s, matching the 7/24 spike
+    // measurement (~$0.044/s) and Replicate's current Mini pricing. videoIn NOT re-verified —
+    // check before billing reference-video traffic off this row.
+    nonVideoIn: { '480p': 0.04, '720p': 0.05 },
     videoIn:    { '480p': 0.05, '720p': 0.11 },
   },
   'bytedance/seedance-2.0': {
@@ -370,6 +373,35 @@ export async function markProcessing(generationId: string): Promise<boolean> {
     RETURNING id
   `);
   return (result.rows?.length ?? 0) > 0;
+}
+
+/**
+ * Per-take regen (character-vlog): flips a COMPLETED row back to 'processing' so the ffmpeg
+ * concat worker's markCompleted + APNs path works identically to the initial run (markCompleted
+ * only accepts pending/processing). iOS renders the brief re-processing state honestly — the
+ * final video IS being re-stitched; per-take 'regenerating' detail lives in params.takes.
+ */
+export async function markRegenerating(generationId: string): Promise<boolean> {
+  const result = await db.execute(sql`
+    UPDATE generations
+    SET status = 'processing'
+    WHERE id = ${generationId}::uuid AND status = 'completed'
+    RETURNING id
+  `);
+  return (result.rows?.length ?? 0) > 0;
+}
+
+/**
+ * Character-vlog regen failure companion to markRegenerating: the re-film/re-stitch failed but
+ * the ORIGINAL final video is still intact at r2_key — put the row back to 'completed' rather
+ * than marking the whole generation failed. The take-level refund is the worker's job.
+ */
+export async function restoreCompletedAfterRegenFailure(generationId: string): Promise<void> {
+  await db.execute(sql`
+    UPDATE generations
+    SET status = 'completed'
+    WHERE id = ${generationId}::uuid AND status = 'processing' AND r2_key IS NOT NULL
+  `);
 }
 
 export async function attachPredictionId(generationId: string, predictionId: string): Promise<void> {

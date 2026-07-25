@@ -11,9 +11,9 @@ const app = express();
 app.use('/api/characters', charactersRouter);
 
 describe('characters registry config', () => {
-  it('publishes the nine-row v0 roster across the three launch genres', () => {
+  it('publishes the v0 roster (nine Cast rows + the gorilla vlogger) across the launch genres', () => {
     expect(CHARACTERS_VERSION).toBe(1);
-    expect(SERVER_CHARACTERS).toHaveLength(9);
+    expect(SERVER_CHARACTERS).toHaveLength(10);
     expect(new Set(SERVER_CHARACTERS.map((row) => row.category))).toEqual(
       new Set(['popular', 'anime', '3d_generated']),
     );

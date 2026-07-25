@@ -197,9 +197,9 @@ describe('fal video background removal cost', () => {
 // ─── computeCostCredits ───────────────────────────────────────────────────────
 
 describe('computeCostCredits', () => {
-  it('computes exact cost for 6s at 720p mini: ceil(6 * 0.09 * 100) = 54', () => {
-    const cost = computeCostCredits({ durationSeconds: 6, resolution: '720p', model: 'bytedance/seedance-2.0-mini' });
-    expect(cost).toBe(54);
+  it('computes exact cost for 10s at 720p mini: ceil(10 * 0.05 * 100) = 50', () => {
+    const cost = computeCostCredits({ durationSeconds: 10, resolution: '720p', model: 'bytedance/seedance-2.0-mini' });
+    expect(cost).toBe(50);
   });
 
   it('returns a positive integer for 480p (lower than 720p)', () => {
@@ -590,17 +590,17 @@ describe('computeCostCredits — extended', () => {
   });
 
   it('mini costs less than 2.0 standard', () => {
-    const miniCost = computeCostCredits({ durationSeconds: 6, resolution: '720p', model: 'bytedance/seedance-2.0-mini' });
-    const standardCost = computeCostCredits({ durationSeconds: 6, resolution: '720p', model: 'bytedance/seedance-2.0' });
+    const miniCost = computeCostCredits({ durationSeconds: 10, resolution: '720p', model: 'bytedance/seedance-2.0-mini' });
+    const standardCost = computeCostCredits({ durationSeconds: 10, resolution: '720p', model: 'bytedance/seedance-2.0' });
     expect(miniCost).toBeLessThan(standardCost);
-    // mini 720p nonVideoIn: ceil(6 * 0.09 * 100) = 54 credits
-    expect(miniCost).toBe(54);
+    // mini 720p nonVideoIn: ceil(10 * 0.05 * 100) = 50 credits (rate corrected 2026-07-24)
+    expect(miniCost).toBe(50);
   });
 
   it('applies ceiling to fractional credit costs (never underbills)', () => {
-    // mini 5s * 0.09 * 100 = 45 → ceil = 45
+    // mini 5s * 0.05 * 100 = 25 → ceil = 25
     const cost = computeCostCredits({ durationSeconds: 5, resolution: '720p', model: 'bytedance/seedance-2.0-mini' });
-    expect(cost).toBe(45);
+    expect(cost).toBe(25);
   });
 
   it('applies 480p half-rate for mini videoIn', () => {

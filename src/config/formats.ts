@@ -244,7 +244,26 @@ export interface VideoSummaryFormatDef extends FormatSummaryDef {
   sheet: FormatSheetMeta;
 }
 
-export type AnyFormatDef = FormatDef | VideoSummaryFormatDef | SoonFormatDef;
+export type AnyFormatDef = FormatDef | VideoSummaryFormatDef | SoonFormatDef | CharacterVlogFormatDef;
+
+/**
+ * Character-vlog format (gorilla multi-take, 2026-07-24 spec). A `flow` row like video-summary:
+ * excluded from FORMATS_BY_ID / formatResolver (its inputs don't fit the explainer shape) and
+ * dispatched through its own route + worker. Carries NO server-only fields — provider model id
+ * lives in the worker, character assets in characters.ts — because flow rows pass through the
+ * client projection unchanged.
+ */
+export interface CharacterVlogFormatDef extends FormatSummaryDef {
+  status: 'live';
+  flow: 'character_vlog';
+  /** Total-length picker values (seconds). Take count/allocation is backend-decided. */
+  duration_options: number[];
+  /** Display + cost basis: credits per second of TOTAL length (Mini $0.05/s 720p, cents
+   *  rounded up — Andrew-verified 2026-07-24). Billing = ceil(seconds × per_second_credits). */
+  per_second_credits: number;
+  aspect_ratio: '9:16';
+  sheet: FormatSheetMeta;
+}
 
 export const SERVER_FORMATS: AnyFormatDef[] = [
   {
@@ -494,10 +513,36 @@ MOTION (every scene must include a "motion" object):
     status: 'soon',
     tile: {},
   },
+  // Character Vlogs (gorilla multi-take, 2026-07-24): user picks a nonhuman character from the
+  // roster + topic/vibe + TOTAL length; the Sonnet-5 planner owns script and setting per take;
+  // takes are addressable units (view prompt, regenerate one take). Dispatch is the dedicated
+  // /api/character-vlogs route + vlogGenerationWorker — NOT formatResolver.
+  {
+    format_id: 'character-vlog',
+    title: 'Character Vlogs',
+    subtitle: 'Pick a character, give it a topic — it vlogs the rest',
+    section: 'formats',
+    badge: 'NEW',
+    sort_order: 15,
+    status: 'live',
+    tile: {},
+    flow: 'character_vlog',
+    duration_options: [15, 30, 45, 60],
+    per_second_credits: 5,
+    aspect_ratio: '9:16',
+    sheet: {
+      description: 'Your character writes, stages, and films a multi-take vlog from one topic.',
+      preparing_label: 'Planning your vlog…',
+    },
+  },
 ];
 
 export const VIDEO_SUMMARY_FORMAT = SERVER_FORMATS.find((format): format is VideoSummaryFormatDef => (
   format.status === 'live' && 'flow' in format && format.flow === 'video_summary'
+));
+
+export const CHARACTER_VLOG_FORMAT = SERVER_FORMATS.find((format): format is CharacterVlogFormatDef => (
+  format.status === 'live' && 'flow' in format && format.flow === 'character_vlog'
 ));
 
 function isGeneratedFormat(def: AnyFormatDef): def is FormatDef {
@@ -522,7 +567,7 @@ export type ClientLiveFormatDef = Omit<
 > & {
   style_grid: Array<Omit<FormatStyleOption, 'anchor_r2_key'>>;
 };
-export type ClientFormatDef = ClientLiveFormatDef | VideoSummaryFormatDef | SoonFormatDef;
+export type ClientFormatDef = ClientLiveFormatDef | VideoSummaryFormatDef | SoonFormatDef | CharacterVlogFormatDef;
 
 /**
  * Client-facing projection. Server prompt IP, provider routing, and private R2

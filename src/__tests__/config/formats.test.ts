@@ -95,7 +95,7 @@ describe('formats registry config', () => {
 
   it('publishes the Video Summarizer upload flow with narrator and measured pricing choices', () => {
     const format = CLIENT_FORMATS.find((row) => row.format_id === 'video-explainer');
-    if (!format || format.status !== 'live' || !('flow' in format)) {
+    if (!format || format.status !== 'live' || !('flow' in format) || format.flow !== 'video_summary') {
       throw new Error('live Video Summarizer missing');
     }
 

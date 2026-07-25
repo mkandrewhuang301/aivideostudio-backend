@@ -58,12 +58,13 @@ import {
   FAL_VIDEO_BACKGROUND_REMOVAL_MODEL,
   isFalAsyncVideoModel,
 } from '../services/providers/FalProvider';
-import { refundCredits } from '../services/creditService';
+import { refundCredits, deductCredits } from '../services/creditService';
 import { classifyFailureReason, markFailed } from '../services/generationService';
 import { getGenerationPresignedUrl, getUploadPresignedUrl } from '../services/archivalService';
 import { openaiGenerationQueue } from '../queue/openaiGenerationQueue';
 import { chainGenerationQueue } from '../queue/chainGenerationQueue';
 import { explainerGenerationQueue } from '../queue/explainerGenerationQueue';
+import { vlogGenerationQueue } from '../queue/vlogGenerationQueue';
 import { influencerProQueue } from '../queue/influencerProQueue';
 import { falImageToolQueue } from '../queue/falImageToolQueue';
 import { getFalWebhookUrl, getReplicateWebhookUrl } from '../config';
@@ -1237,7 +1238,11 @@ function presetSafeSerialization(item: {
   const isVideoTranslation = p?.tool === 'video_translation';
   const formatParams = {
     ...(typeof p?.format_id === 'string' ? { format_id: p.format_id } : {}),
-    ...(typeof p?.stage_label === 'string' ? { stage_label: p.stage_label } : {}),
+    ...(typeof p?.stage_label === 'string' && p.stage_label ? { stage_label: p.stage_label } : {}),
+    // Character-vlog roster id is client-safe and needed by the take-management UI.
+    ...(p?.format_id === 'character-vlog' && typeof p?.character_id === 'string'
+      ? { character_id: p.character_id }
+      : {}),
   };
   return {
     media_type: item.media_type === 'faceswap' ? 'image' : item.media_type,
@@ -1413,12 +1418,34 @@ generationsRouter.get('/:id', async (req: Request, res: Response) => {
       : null;
     // D-11/SC3/T-09.1-03: null the expanded template for preset rows; params.preset_id retained.
     const prompt = p?.preset_id === 'magic-editor' ? item.prompt : p?.preset_id ? null : item.prompt;
+    // Character-vlog take projection (2026-07-24 spec §10): the take-management UI renders one
+    // row per take — clip (presigned), the spoken line, and the exact resolved Mini prompt.
+    // Server-only internals (reference arrays, R2 keys) never leave this serializer.
+    const takes = p?.format_id === 'character-vlog' && Array.isArray(p?.takes)
+      ? await Promise.all((p.takes as Array<Record<string, unknown>>).map(async (take) => ({
+          index: take.index,
+          status: take.status,
+          duration_seconds: take.duration_seconds,
+          spoken_line: take.spoken_line,
+          setting: take.setting,
+          setting_tag: take.setting_tag,
+          framing_tag: take.framing_tag,
+          visual_direction: take.visual_direction,
+          voice_direction: take.voice_direction,
+          resolved_prompt: take.resolved_prompt,
+          attempts: take.attempts,
+          clip_url: typeof take.clip_r2_key === 'string'
+            ? await getGenerationPresignedUrl(take.clip_r2_key)
+            : null,
+        })))
+      : null;
     // D-F (faceswap→image) + D-G (null model + strip params for preset rows). Spread AFTER ...item.
     res.status(200).json({
       ...item,
       prompt,
       ...presetSafeSerialization(item),
       video_url,
+      takes,
       reference_urls,
       preset_input_urls: preset_input_urls?.some(Boolean) ? preset_input_urls : null,
       magic_editor_mask_url: magicEditorMaskId && referenceRowMap[magicEditorMaskId]
@@ -1447,6 +1474,74 @@ generationsRouter.patch('/:id/favorite', async (req: Request, res: Response) => 
   } catch (err) {
     console.error('[generations] Error setting favorite:', err);
     res.status(500).json({ error: 'Failed to update favorite' });
+  }
+});
+
+// POST /api/generations/:id/takes/:takeIndex/regenerate — character-vlog per-take regen
+// (2026-07-24 spec §9): re-films ONE take with its persisted prompt/refs and re-stitches,
+// billed at that take's seconds only. There is deliberately NO delete-take endpoint — take
+// management mirrors the studio-project clip UI with delete removed and regenerate in its
+// place (Andrew, 2026-07-24).
+generationsRouter.post('/:id/takes/:takeIndex/regenerate', async (req: Request, res: Response) => {
+  if (!req.user?.dbUserId) { res.status(401).json({ error: 'Not authenticated' }); return; }
+  const generationId = req.params.id as string;
+  const takeIndex = Number(req.params.takeIndex);
+  if (!Number.isInteger(takeIndex) || takeIndex < 0) {
+    res.status(400).json({ error: 'Invalid take index', code: 'INVALID_TAKE' });
+    return;
+  }
+  try {
+    const generation = await getGenerationById(generationId, req.user.dbUserId);
+    const params = generation?.params as Record<string, unknown> | null;
+    if (!generation || params?.format_id !== 'character-vlog') {
+      res.status(404).json({ error: 'Not found', code: 'NOT_FOUND' });
+      return;
+    }
+    if (generation.status !== 'completed') {
+      res.status(409).json({ error: 'Generation is still processing', code: 'NOT_READY' });
+      return;
+    }
+    const takes = Array.isArray(params.takes) ? params.takes as Array<Record<string, unknown>> : [];
+    const take = takes[takeIndex];
+    if (!take || typeof take.duration_seconds !== 'number') {
+      res.status(404).json({ error: 'Unknown take', code: 'INVALID_TAKE' });
+      return;
+    }
+    if (take.status !== 'done') {
+      res.status(409).json({ error: 'Take is already regenerating', code: 'TAKE_BUSY' });
+      return;
+    }
+
+    // Per-take billing (spec §8): this take's seconds only, same atomic deduction as dispatch.
+    const cost = computeCostCredits({
+      durationSeconds: take.duration_seconds,
+      resolution: '720p',
+      model: 'bytedance/seedance-2.0-mini',
+    });
+    if (!await deductCredits(req.user.dbUserId, cost)) {
+      res.status(402).json({ error: 'Insufficient credits', code: 'INSUFFICIENT_CREDITS', cost_credits: cost });
+      return;
+    }
+
+    try {
+      await vlogGenerationQueue.add('regenerate', {
+        mode: 'regen',
+        generationId,
+        userId: req.user.dbUserId,
+        cost,
+        takeIndex,
+      });
+    } catch (queueErr) {
+      console.error('[generations] Failed to enqueue take regen:', queueErr);
+      await refundCredits(req.user.dbUserId, cost, `regen-dispatch-failure-${generationId}-${takeIndex}`);
+      res.status(502).json({ error: 'Generation service unavailable. Credits have been refunded.' });
+      return;
+    }
+
+    res.status(200).json({ generation_id: generationId, take_index: takeIndex, status: 'regenerating', cost_credits: cost });
+  } catch (err) {
+    console.error('[generations] Error starting take regen:', err);
+    res.status(500).json({ error: 'Failed to regenerate take' });
   }
 });
 

@@ -296,6 +296,49 @@ export async function generateKeyframeFromPhotos(
 }
 
 /**
+ * Character-vlog take runner (gorilla multi-take, 2026-07-24 spec). Synchronous `replicate.run()`
+ * on Seedance 2.0 Mini — same CALL SHAPE as generateKeyframeFromPhotos above, first synchronous
+ * VIDEO call: the vlog worker needs each take's archived R2 key before dispatching the next (and
+ * the row's single replicate_prediction_id column can't track N takes through the webhook).
+ *
+ * reference_audios is the format's voice-pinning mechanism (one pinned qwen-clone per character,
+ * kills the per-take voice lottery). OPTIONAL until the voice assets exist — callers omit it and
+ * Mini rolls its own voice per take; acceptable interim, flagged in the spec (O-3).
+ *
+ * ⚠️ reference_audios field name assumed from the 7/24 spike — NOT yet verified against the live
+ * Replicate schema (spec O-2). If Mini rejects it, the error surfaces in the worker's refund path.
+ */
+export interface VlogTakeInput {
+  prompt: string;
+  durationSeconds: number;
+  referenceImages: string[];
+  referenceAudios?: string[];
+}
+
+export async function runVlogTake(input: VlogTakeInput, outputKey: string): Promise<string> {
+  const replicateInput: Record<string, unknown> = {
+    prompt: input.prompt,
+    duration: input.durationSeconds,
+    resolution: '720p',
+    aspect_ratio: '9:16',
+    generate_audio: true,
+  };
+  if (input.referenceImages.length) replicateInput.reference_images = input.referenceImages;
+  if (input.referenceAudios?.length) replicateInput.reference_audios = input.referenceAudios;
+
+  const output = (await withReplicateRetry(
+    () => replicate.run('bytedance/seedance-2.0-mini', { input: replicateInput }),
+    'vlog-take',
+  )) as unknown;
+  const outputUrl = Array.isArray(output) ? output[0] : output;
+  if (typeof outputUrl !== 'string' || !outputUrl) {
+    throw new Error('bytedance/seedance-2.0-mini returned no output video');
+  }
+  // Provider URLs expire (CLAUDE.md Rule 2) — archive immediately, never serve the Replicate URL.
+  return archiveToR2(outputUrl, outputKey, 'video/mp4');
+}
+
+/**
  * Generates one synchronous gpt-image-2 scene candidate with Andrew's frozen style anchor.
  * Candidate generation is intentionally cheap and repeatable; the worker vision-picks one result
  * before making the single expensive Omni call for the scene.
@@ -468,6 +511,9 @@ export class ReplicateProvider implements ModelProvider {
       };
       if (input.referenceImages?.length) replicateInput.reference_images = input.referenceImages;
       if (input.referenceVideos?.length) replicateInput.reference_videos = input.referenceVideos;
+      // Pinned voice reference (character-vlog takes). Seedance-family only input today;
+      // harmless to send only when populated — callers omit it when no voice asset exists.
+      if (input.referenceAudios?.length) replicateInput.reference_audios = input.referenceAudios;
     }
 
     const prediction = await replicate.predictions.create({

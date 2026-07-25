@@ -13,6 +13,7 @@ export interface GenerationInput {
   audioEnabled?: boolean;
   referenceImages?: string[];            // presigned R2 URLs; @Image1 auto-appended to prompt (D-23)
   referenceVideos?: string[];            // presigned R2 URLs; @Video1 auto-appended to prompt (D-24)
+  referenceAudios?: string[];            // voice-reference URLs → Mini reference_audios (character-vlog)
   videoTranslationLanguage?: string;     // HeyGen Speed exact output_language enum value
   // Image-specific (undefined for video/avatar/upscale generations)
   imageAspectRatio?: string;  // e.g. "1:1" | "4:3" | "3:4" | "16:9" | "9:16"
