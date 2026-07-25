@@ -19,7 +19,7 @@ import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 const OUT = `${process.env.HOME}/Downloads/spike-teacher-wanflash`;
 const STILL = `${process.env.HOME}/Downloads/spike-teacher-ab/still-A-side-by-side.png`;
 // Retry round: fresh Voice A clone clip — short teacher line, slow/calm style (3.12s, fits 5s slot).
-const AUDIO = `${OUT}/voiceA-teacher-short.wav`;
+const AUDIO = process.argv.includes('--armB3') ? `${OUT}/voiceA-teacher-slow08.wav` : `${OUT}/voiceA-teacher-short.wav`;
 const MODEL = 'wan-video/wan2.6-i2v-flash';
 
 const SPOKEN = 'Hola. Today\'s word is manzana. Manzana means apple. Repeat after me: manzana.';
@@ -52,7 +52,7 @@ async function audioUrl(path: string): Promise<string> {
     },
   });
   const Bucket = process.env.R2_BUCKET_NAME!;
-  const Key = `spikes/wanflash/voiceA-teacher-short.wav`;
+  const Key = `spikes/wanflash/${process.argv.includes('--armB3') ? 'voiceA-teacher-slow08' : 'voiceA-teacher-short'}.wav`;
   await s3.send(new PutObjectCommand({
     Bucket, Key, Body: readFileSync(path), ContentType: 'audio/wav',
   }));
@@ -86,7 +86,20 @@ async function main(): Promise<void> {
 
   // Sequential — Replicate account was near the 429 burst throttle on 7/24 eve.
   // armA already succeeded (armA_native_audio.mp4 in OUT) — re-run armB only.
-  if (process.argv.includes('--retry')) {
+  if (process.argv.includes('--armB3')) {
+    // Andrew's hypothesis: the lip-sync struggles because the audio is TOO FAST. Same Voice A
+    // clip time-stretched 0.8× (atempo, no pitch shift) → 3.89s, still in the 5s slot.
+    await run('armB3_voiceA_slow08', {
+      image,
+      audio,
+      prompt: PROMPT_B + BGLOCK,
+      negative_prompt: NEGATIVE,
+      duration: 5,
+      resolution: '720p',
+      audio_enabled: true,
+      enable_prompt_expansion: false,
+    });
+  } else if (process.argv.includes('--retry')) {
     // Retry round: both arms at 5s with the background-lock bit + negative prompt.
     await run('armA2_native_bglock', {
       image,
@@ -118,7 +131,7 @@ async function main(): Promise<void> {
     });
   }
 
-  if (!process.argv.includes('--retry')) {
+  if (!process.argv.includes('--retry') && !process.argv.includes('--armB3')) {
     await run('armB_voiceA_lipsync', {
       image,
       audio,
