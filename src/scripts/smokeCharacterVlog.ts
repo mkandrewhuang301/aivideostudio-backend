@@ -52,6 +52,7 @@ async function go(beat: string, durationSeconds: number, withVoice: boolean): Pr
   const resolvedPrompt = buildClipPrompt(config, expansion);
   console.log('\n=== EXPANSION ===');
   console.log(`spoken_line (${expansion.linePinnedByUser ? 'user-pinned verbatim' : 'LLM-written'}): "${expansion.spokenLine}"`);
+  console.log(`delivery: "${expansion.delivery || '(none — base voice direction only)'}"`);
   console.log(`resolved_prompt:\n${resolvedPrompt}`);
 
   // Voice stage (mirrors the worker): per-beat qwen clone → R2 → presigned reference_audios.
@@ -63,7 +64,10 @@ async function go(beat: string, durationSeconds: number, withVoice: boolean): Pr
       mode: 'voice_clone',
       referenceAudioUrl: await presign(config.voice_reference_r2_key),
       referenceText: config.voice_reference_text,
-      styleInstruction: config.default_voice_direction,
+      // Mirrors the worker: base timbre + per-beat acting direction.
+      styleInstruction: expansion.delivery
+        ? `${config.default_voice_direction}; ${expansion.delivery}`
+        : config.default_voice_direction,
     });
     const voiceKey = `smoke-vlog/oneshot-voice-${stamp}.wav`;
     await uploadBufferToR2(wav, voiceKey, 'audio/wav');

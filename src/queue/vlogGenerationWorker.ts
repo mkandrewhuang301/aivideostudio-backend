@@ -56,6 +56,10 @@ export interface VlogTakeUnit {
   duration_seconds: number;
   /** '' = silent beat (no TTS was run, Mini got no reference_audios). */
   spoken_line: string;
+  /** Per-beat performance direction from the expansion pass — appended to the character's
+   *  base voice direction for the qwen clone. Optional: takes persisted before 2026-07-25
+   *  don't have it; the clone then gets the base direction only. */
+  delivery?: string;
   /** The exact Mini prompt — user-visible on the take screen. */
   resolved_prompt: string;
   /** Per-beat qwen clone WAV (this take's spoken line in the character's voice). Reused on
@@ -95,7 +99,10 @@ async function recordVoice(
     mode: 'voice_clone',
     referenceAudioUrl: await presignKey(character.voice_reference_r2_key),
     referenceText: character.voice_reference_text,
-    styleInstruction: character.default_voice_direction,
+    // Base timbre (per character) + per-beat acting direction (from the expansion pass).
+    styleInstruction: take.delivery
+      ? `${character.default_voice_direction}; ${take.delivery}`
+      : character.default_voice_direction,
   });
   const key = `generations/${generationId}/take_${take.index}_voice_a${attempt}.wav`;
   await uploadBufferToR2(wav, key, 'audio/wav');
@@ -164,6 +171,7 @@ async function processCreateJob(data: Extract<VlogGenerationJob, { mode: 'create
       status: 'filming',
       duration_seconds: data.durationSeconds,
       spoken_line: expansion.spokenLine,
+      delivery: expansion.delivery || undefined,
       resolved_prompt: buildClipPrompt(character.vlog, expansion),
       voice_r2_key: null,
       clip_r2_key: null,
