@@ -37,7 +37,9 @@ export interface CharacterVlogConfig {
   /** SERVER-ONLY. Transcript of the voice reference clip (qwen reference_text — raw clones
    *  look worse without it). */
   voice_reference_text?: string;
-  /** qwen style_instruction + Mini-prompt delivery note (pace/energy), character-consistent. */
+  /** Base timbre for the qwen clone (character-consistent). The expansion pass's per-beat
+   *  `delivery` is appended to this for the style_instruction, and replaces it as the
+   *  delivery note in the Mini clip prompt when present. */
   default_voice_direction: string;
 }
 
