@@ -9,6 +9,7 @@
 // harvard.wav — reference_audios cap is 15s TOTAL per the live schema, O-2 resolved 7/25).
 // Output: ~/Downloads/smoke-vlog/oneshot.mp4 + the expansion JSON printed for review.
 
+import 'dotenv/config';
 import { readFileSync } from 'node:fs';
 import { execSync } from 'node:child_process';
 import { GetObjectCommand } from '@aws-sdk/client-s3';
@@ -80,7 +81,7 @@ async function go(beat: string, durationSeconds: number, withVoice: boolean): Pr
       referenceImages: [await presign(SHEET_KEY)],
       referenceAudios: voiceUrl ? [voiceUrl] : undefined,
     },
-    `smoke-vlog/oneshot-${stamp}`,
+    `smoke-vlog/oneshot-${stamp}.mp4`,
   );
   const local = `${OUT_DIR}/oneshot.mp4`;
   execSync(`curl -sS -o ${local} "${await presign(clipKey)}"`);
