@@ -52,7 +52,8 @@ function countWords(line: string): number {
   return line.trim() ? line.trim().split(/\s+/).length : 0;
 }
 
-function buildSystemPrompt(character: CharacterVlogConfig, durationSeconds: number): string {
+/** Exported for the model bake-off script — production callers go through expandVlogBeat. */
+export function buildExpansionSystemPrompt(character: CharacterVlogConfig, durationSeconds: number): string {
   return `You are the director for a fictional character vlogger's one-shot vlog clip.
 Persona: ${character.persona_prompt}
 Framing (every clip starts from this): ${character.vlog_framing_prefix}
@@ -115,7 +116,7 @@ export async function expandVlogBeat(args: {
 }): Promise<VlogExpansion> {
   const pinnedLine = extractQuotedLine(args.beat);
   const raw = await generateClaudeText(config.vlogExpansionModel, {
-    systemPrompt: buildSystemPrompt(args.character, args.durationSeconds),
+    systemPrompt: buildExpansionSystemPrompt(args.character, args.durationSeconds),
     prompt: `Beat: ${args.beat}${pinnedLine
       ? '\n\nThe user quoted their exact dialogue in the beat — it will be used VERBATIM as the spoken line. Write only enhanced_prompt; set spoken_line to "".'
       : ''}`,
