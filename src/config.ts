@@ -83,6 +83,10 @@ export const config = {
   falTtsFallbackModel: process.env.FAL_TTS_FALLBACK_MODEL ?? 'fal-ai/gemini-3.1-flash-tts',
   falLyriaFallbackModel: process.env.FAL_LYRIA_FALLBACK_MODEL ?? 'fal-ai/lyria2',
   videoSummaryModel: process.env.VIDEO_SUMMARY_MODEL ?? 'gemini-3.5-flash',
+  // Continuation guide (POST /api/prompt/from-video, 2026-07-25): Gemini is the only model in
+  // the stack that takes actual VIDEO input (gpt-5-mini/nano are text+image only). Short clips
+  // go inline after a 480p downscale — whole clip is 3-8s, no trimming needed.
+  videoGuideModel: process.env.VIDEO_GUIDE_MODEL ?? 'gemini-3.5-flash',
   // Bounded text-only narration audit. Flash-Lite is intentionally separate from the full-video
   // planner so the additional reliability pass costs substantially less than another video pass.
   videoSummaryTextModel: process.env.VIDEO_SUMMARY_TEXT_MODEL ?? 'gemini-3.5-flash-lite',

@@ -32,6 +32,17 @@ jest.mock('../../services/promptIntelligenceService', () => {
   return { ...actual, enhancePrompt: jest.fn(), promptFromImage: jest.fn() };
 });
 
+// Same trick for the continuation guide: real VideoGuideError identity, mocked entry point.
+jest.mock('../../services/videoGuideService', () => {
+  const actual = jest.requireActual('../../services/videoGuideService');
+  return { ...actual, continuationGuideFromVideo: jest.fn() };
+});
+
+// redis/client constructs a connection at module load — mock it away.
+jest.mock('../../redis/client', () => ({
+  redis: { get: jest.fn().mockResolvedValue(null), set: jest.fn().mockResolvedValue('OK') },
+}));
+
 jest.mock('../../middleware/promptModeration', () => ({
   promptModerationMiddleware: jest.fn((_req: unknown, _res: unknown, next: () => void) => next()),
   isPromptFlagged: jest.fn().mockResolvedValue(false),
@@ -43,6 +54,8 @@ import { promptRouter } from '../../routes/prompt';
 import { db } from '../../db/client';
 import { getGenerationPresignedUrl, getUploadPresignedUrl } from '../../services/archivalService';
 import { enhancePrompt, promptFromImage, PromptIntelligenceError } from '../../services/promptIntelligenceService';
+import { continuationGuideFromVideo, VideoGuideError } from '../../services/videoGuideService';
+import { redis } from '../../redis/client';
 import { isPromptFlagged } from '../../middleware/promptModeration';
 import { SERVER_PRESETS } from '../../config/presets';
 
@@ -52,6 +65,8 @@ const fromImageMock = promptFromImage as jest.Mock;
 const flaggedMock = isPromptFlagged as jest.Mock;
 const genPresignMock = getGenerationPresignedUrl as jest.Mock;
 const uploadPresignMock = getUploadPresignedUrl as jest.Mock;
+const guideMock = continuationGuideFromVideo as jest.Mock;
+const redisMock = redis as unknown as { get: jest.Mock; set: jest.Mock };
 
 const app = express();
 app.use(express.json());
@@ -92,6 +107,8 @@ beforeEach(() => {
   flaggedMock.mockResolvedValue(false);
   genPresignMock.mockResolvedValue('https://r2.example.com/generations/signed.jpg');
   uploadPresignMock.mockResolvedValue('https://r2.example.com/uploads/signed.jpg');
+  redisMock.get.mockResolvedValue(null);
+  redisMock.set.mockResolvedValue('OK');
 });
 
 describe('POST /api/prompt/enhance', () => {
@@ -264,5 +281,155 @@ describe('POST /api/prompt/from-image', () => {
     const res = await request(app).post('/api/prompt/from-image').send({ generation_id: GEN_ID });
     expect(res.status).toBe(502);
     expect(res.body.code).toBe('llm_unavailable');
+  });
+});
+
+// ─── POST /api/prompt/from-video (continuation guide, 2026-07-25) ─────────────
+const completedVideoGen = {
+  id: GEN_ID,
+  user_id: 'test-db-user-id',
+  status: 'completed',
+  media_type: 'video',
+  r2_key: 'generations/test/clip.mp4',
+};
+
+const videoUpload = {
+  id: UPLOAD_ID,
+  user_id: 'test-db-user-id',
+  mime_type: 'video/mp4',
+  r2_key: 'uploads/test/clip.mp4',
+};
+
+describe('POST /api/prompt/from-video', () => {
+  it('401s without an authenticated user', async () => {
+    const res = await request(unauthApp).post('/api/prompt/from-video').send({ generation_id: GEN_ID });
+    expect(res.status).toBe(401);
+  });
+
+  it('400s when both or neither id is provided', async () => {
+    const both = await request(app).post('/api/prompt/from-video').send({ generation_id: GEN_ID, upload_id: UPLOAD_ID });
+    expect(both.status).toBe(400);
+    expect(both.body.code).toBe('INVALID_INPUT');
+
+    const neither = await request(app).post('/api/prompt/from-video').send({});
+    expect(neither.status).toBe(400);
+    expect(neither.body.code).toBe('INVALID_INPUT');
+  });
+
+  it('404s on a malformed generation uuid (guard before Postgres)', async () => {
+    const res = await request(app).post('/api/prompt/from-video').send({ generation_id: 'not-a-uuid' });
+    expect(res.status).toBe(404);
+  });
+
+  it('404s when the generation belongs to another user (IDOR)', async () => {
+    dbMock.select.mockReturnValueOnce(makeSelectChain([]));
+    const res = await request(app).post('/api/prompt/from-video').send({ generation_id: GEN_ID });
+    expect(res.status).toBe(404);
+    expect(guideMock).not.toHaveBeenCalled();
+  });
+
+  it('409s when the generation is not a completed result', async () => {
+    dbMock.select.mockReturnValueOnce(makeSelectChain([{ ...completedVideoGen, status: 'processing' }]));
+    const res = await request(app).post('/api/prompt/from-video').send({ generation_id: GEN_ID });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('NOT_READY');
+  });
+
+  it('400s NOT_A_VIDEO on an image generation', async () => {
+    dbMock.select.mockReturnValueOnce(makeSelectChain([completedImageGen]));
+    const res = await request(app).post('/api/prompt/from-video').send({ generation_id: GEN_ID });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('NOT_A_VIDEO');
+  });
+
+  it('400s NOT_A_VIDEO on an image upload', async () => {
+    dbMock.select.mockReturnValueOnce(makeSelectChain([{ ...videoUpload, mime_type: 'image/jpeg' }]));
+    const res = await request(app).post('/api/prompt/from-video').send({ upload_id: UPLOAD_ID });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('NOT_A_VIDEO');
+  });
+
+  it('400s when the hint is flagged by moderation', async () => {
+    flaggedMock.mockResolvedValueOnce(true);
+    const res = await request(app).post('/api/prompt/from-video').send({ generation_id: GEN_ID, hint: 'bad hint' });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('content_policy_violation');
+    expect(guideMock).not.toHaveBeenCalled();
+  });
+
+  it('returns the guide for a video generation and caches it', async () => {
+    dbMock.select.mockReturnValueOnce(makeSelectChain([completedVideoGen]));
+    genPresignMock.mockResolvedValueOnce('https://r2.example.com/generations/signed.mp4');
+    guideMock.mockResolvedValueOnce('Continue the clip: the gorilla charges the camera.');
+
+    const res = await request(app).post('/api/prompt/from-video').send({ generation_id: GEN_ID });
+
+    expect(res.status).toBe(200);
+    expect(res.body.prompt).toBe('Continue the clip: the gorilla charges the camera.');
+    expect(genPresignMock).toHaveBeenCalledWith('generations/test/clip.mp4');
+    expect(guideMock).toHaveBeenCalledWith({
+      videoUrl: 'https://r2.example.com/generations/signed.mp4',
+      hint: undefined,
+    });
+    expect(redisMock.set).toHaveBeenCalledWith(
+      `videoguide:v1:gen:${GEN_ID}:nohint`,
+      'Continue the clip: the gorilla charges the camera.',
+      'EX',
+      1800,
+    );
+  });
+
+  it('serves a cache hit without calling Gemini', async () => {
+    dbMock.select.mockReturnValueOnce(makeSelectChain([completedVideoGen]));
+    redisMock.get.mockResolvedValueOnce('CACHED GUIDE');
+
+    const res = await request(app).post('/api/prompt/from-video').send({ generation_id: GEN_ID });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ prompt: 'CACHED GUIDE', cached: true });
+    expect(guideMock).not.toHaveBeenCalled();
+  });
+
+  it('passes the moderated hint through and keys the cache by hint', async () => {
+    dbMock.select.mockReturnValueOnce(makeSelectChain([videoUpload]));
+    guideMock.mockResolvedValueOnce('He turns around.');
+
+    const res = await request(app)
+      .post('/api/prompt/from-video')
+      .send({ upload_id: UPLOAD_ID, hint: 'he turns around' });
+
+    expect(res.status).toBe(200);
+    expect(flaggedMock).toHaveBeenCalledWith('he turns around');
+    expect(guideMock).toHaveBeenCalledWith({
+      videoUrl: 'https://r2.example.com/uploads/signed.jpg',
+      hint: 'he turns around',
+    });
+    expect(redisMock.set).toHaveBeenCalledWith(
+      expect.stringMatching(new RegExp(`^videoguide:v1:upl:${UPLOAD_ID}:[0-9a-f]{12}$`)),
+      'He turns around.',
+      'EX',
+      1800,
+    );
+  });
+
+  it('502s llm_unavailable on VideoGuideError (fail-loud)', async () => {
+    dbMock.select.mockReturnValueOnce(makeSelectChain([completedVideoGen]));
+    guideMock.mockRejectedValueOnce(new VideoGuideError('Gemini returned 500'));
+
+    const res = await request(app).post('/api/prompt/from-video').send({ generation_id: GEN_ID });
+
+    expect(res.status).toBe(502);
+    expect(res.body.code).toBe('llm_unavailable');
+  });
+
+  it('still returns the guide when the cache write fails (non-fatal)', async () => {
+    dbMock.select.mockReturnValueOnce(makeSelectChain([completedVideoGen]));
+    guideMock.mockResolvedValueOnce('GUIDE');
+    redisMock.set.mockRejectedValueOnce(new Error('redis down'));
+
+    const res = await request(app).post('/api/prompt/from-video').send({ generation_id: GEN_ID });
+
+    expect(res.status).toBe(200);
+    expect(res.body.prompt).toBe('GUIDE');
   });
 });
