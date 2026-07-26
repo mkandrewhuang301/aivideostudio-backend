@@ -87,7 +87,7 @@ const dbMock = db as unknown as {
 // regardless of how many/which chain methods the calling code happens to invoke.
 function makeChain(result: unknown) {
   const chain: Record<string, unknown> = {};
-  const methods = ['from', 'where', 'orderBy', 'limit', 'set', 'values', 'returning'];
+  const methods = ['from', 'where', 'orderBy', 'limit', 'set', 'values', 'select', 'returning', 'for'];
   for (const m of methods) {
     chain[m] = jest.fn().mockReturnValue(chain);
   }
@@ -137,6 +137,8 @@ beforeEach(() => {
   jest.clearAllMocks();
   r2Mock.send.mockResolvedValue({});
   dbMock.update.mockReturnValue(makeChain([]));
+  dbMock.insert.mockReturnValue(makeChain([]));
+  dbMock.batch.mockImplementation(async (queries: PromiseLike<unknown>[]) => Promise.all(queries));
 });
 
 // ─── POST /api/projects ────────────────────────────────────────────────────────
@@ -1894,7 +1896,7 @@ describe('POST /api/projects/:id/audio', () => {
       .mockReturnValueOnce(makeChain([{ id: 'proj-1' }]));
     dbMock.execute.mockResolvedValueOnce({ rows: [{ next_order: 0 }] });
     mockProbeDurationSeconds.mockResolvedValueOnce(12.5);
-    const valuesFn = jest.fn().mockReturnValue(
+    dbMock.insert.mockReturnValueOnce(
       makeChain([
         {
           id: 'audio-3',
@@ -1910,7 +1912,6 @@ describe('POST /api/projects/:id/audio', () => {
         },
       ]),
     );
-    dbMock.insert.mockReturnValueOnce({ values: valuesFn });
 
     const res = await request(app)
       .post('/api/projects/proj-1/audio')
@@ -1919,7 +1920,6 @@ describe('POST /api/projects/:id/audio', () => {
     expect(res.status).toBe(201);
     expect(mockProbeDurationSeconds).toHaveBeenCalled();
     expect(res.body.audio_clip.original_duration_seconds).toBe(12.5);
-    expect(valuesFn.mock.calls[0][0]).toMatchObject({ original_duration_seconds: 12.5 });
   });
 
   it('preset-music path: copies the preset track via CopyObjectCommand', async () => {

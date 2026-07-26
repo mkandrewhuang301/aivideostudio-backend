@@ -15,6 +15,7 @@ import {
   SoundtrackNotFoundError,
   SoundtrackValidationError,
 } from '../services/soundtrackService';
+import { ProjectAudioCapacityError } from '../services/projectService';
 
 export const aiMusicRouter = Router();
 
@@ -102,13 +103,18 @@ aiMusicRouter.get('/projects/:projectId/ai-soundtracks/:soundtrackId', async (re
 
 aiMusicRouter.post('/projects/:projectId/ai-soundtracks/:soundtrackId/attach', async (req, res) => {
   const uid = userId(req, res); if (!uid) return;
-  const clip = await attachSoundtrack(
-    req.params.projectId as string,
-    req.params.soundtrackId as string,
-    uid,
-  );
-  if (!clip) { res.status(404).json({ error: 'Soundtrack not found' }); return; }
-  res.status(200).json({ audio_clip: clip });
+  try {
+    const clip = await attachSoundtrack(
+      req.params.projectId as string,
+      req.params.soundtrackId as string,
+      uid,
+    );
+    if (!clip) { res.status(404).json({ error: 'Soundtrack not found' }); return; }
+    res.status(200).json({ audio_clip: clip });
+  } catch (error) {
+    if (error instanceof ProjectAudioCapacityError) { res.status(400).json({ error: error.message }); return; }
+    res.status(500).json({ error: 'Failed to attach soundtrack' });
+  }
 });
 
 aiMusicRouter.get('/ai-music', async (req, res) => {
@@ -141,11 +147,16 @@ aiMusicRouter.delete('/ai-music/:soundtrackId', async (req, res) => {
 
 aiMusicRouter.post('/projects/:projectId/audio/from-ai/:soundtrackId', async (req, res) => {
   const uid = userId(req, res); if (!uid) return;
-  const clip = await attachSoundtrack(
-    req.params.projectId as string,
-    req.params.soundtrackId as string,
-    uid,
-  );
-  if (!clip) { res.status(404).json({ error: 'Soundtrack or project not found' }); return; }
-  res.status(201).json({ audio_clip: clip });
+  try {
+    const clip = await attachSoundtrack(
+      req.params.projectId as string,
+      req.params.soundtrackId as string,
+      uid,
+    );
+    if (!clip) { res.status(404).json({ error: 'Soundtrack or project not found' }); return; }
+    res.status(201).json({ audio_clip: clip });
+  } catch (error) {
+    if (error instanceof ProjectAudioCapacityError) { res.status(400).json({ error: error.message }); return; }
+    res.status(500).json({ error: 'Failed to attach soundtrack' });
+  }
 });

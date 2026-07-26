@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { CopyObjectCommand } from '@aws-sdk/client-s3';
+import { CopyObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
 import { and, desc, eq, isNull, sql } from 'drizzle-orm';
 import { config } from '../config';
 import { db } from '../db/client';
@@ -12,6 +12,7 @@ import {
 } from '../db/schema';
 import { getUploadPresignedUrl } from './archivalService';
 import { r2, R2_BUCKET } from '../storage/r2';
+import { insertProjectAudioClipWithCapacity } from './projectService';
 
 export type SoundMode = 'instrumental' | 'vocals';
 
@@ -365,23 +366,30 @@ export async function attachSoundtrack(targetProjectId: string, soundtrackId: st
     CopySource: `${R2_BUCKET}/${soundtrack.final_r2_key}`,
     Key: destination,
   }));
-  const orderResult = await db.execute(sql`
-    SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_order
-    FROM project_audio_clips WHERE project_id = ${targetProjectId}::uuid AND deleted_at IS NULL
-  `);
-  const sortOrder = Number(orderResult.rows?.[0]?.next_order ?? 0);
-  const [clip] = await db.insert(projectAudioClips).values({
-    project_id: targetProjectId,
-    r2_key: destination,
-    source_type: 'ai',
-    display_name: soundtrack.display_name,
-    source_soundtrack_id: soundtrack.id,
-    start_offset_seconds: 0,
-    trim_start_seconds: 0,
-    trim_end_seconds: soundtrack.project_duration_seconds,
-    original_duration_seconds: soundtrack.project_duration_seconds,
-    sort_order: sortOrder,
-  }).returning();
+  let clip;
+  try {
+    clip = await insertProjectAudioClipWithCapacity(targetProjectId, userId, {
+      r2Key: destination,
+      sourceType: 'ai',
+      displayName: soundtrack.display_name,
+      sourceSoundtrackId: soundtrack.id,
+      startOffsetSeconds: 0,
+      trimStartSeconds: 0,
+      trimEndSeconds: soundtrack.project_duration_seconds,
+      originalDurationSeconds: soundtrack.project_duration_seconds,
+    });
+  } catch (error) {
+    try {
+      await r2.send(new DeleteObjectCommand({ Bucket: R2_BUCKET, Key: destination }));
+    } catch (cleanupError) {
+      console.error('[soundtrackService] Failed to compensate copied soundtrack object:', cleanupError);
+    }
+    throw error;
+  }
+  if (!clip) {
+    await r2.send(new DeleteObjectCommand({ Bucket: R2_BUCKET, Key: destination })).catch(() => {});
+    return null;
+  }
   if (soundtrack.project_id === targetProjectId) {
     await db.update(projectSoundtrackGenerations)
       .set({ attached_audio_clip_id: clip.id })

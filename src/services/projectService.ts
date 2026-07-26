@@ -43,6 +43,16 @@ export const MAX_AUDIO_CLIPS_PER_PROJECT = 10;
 export const MAX_CAPTION_CUES_PER_PROJECT = 200;
 export const MAX_WORDS_PER_CUE = 40;
 
+export const PROJECT_AUDIO_CAPACITY_ERROR =
+  `Project already has the maximum of ${MAX_AUDIO_CLIPS_PER_PROJECT} audio clips`;
+
+export class ProjectAudioCapacityError extends Error {
+  constructor() {
+    super(PROJECT_AUDIO_CAPACITY_ERROR);
+    this.name = 'ProjectAudioCapacityError';
+  }
+}
+
 // Thrown by importClipByCopy when the source generation doesn't exist, isn't owned by the
 // requesting user, or isn't completed yet — the route maps this to a 404, never a 500.
 export class ImportSourceNotFoundError extends Error {}
@@ -819,7 +829,9 @@ export async function deleteTextOverlay(projectId: string, userId: string, textI
 
 export interface AddAudioClipInput {
   r2Key: string;
-  sourceType: 'upload' | 'preset';
+  sourceType: 'upload' | 'preset' | 'narration' | 'ai';
+  displayName?: string | null;
+  sourceSoundtrackId?: string | null;
   startOffsetSeconds?: number;
   trimStartSeconds?: number;
   trimEndSeconds?: number;
@@ -832,33 +844,88 @@ export interface UpdateAudioClipInput {
   sortOrder?: number;
 }
 
+/**
+ * First statement in every project-audio insertion transaction.
+ *
+ * neon-http cannot run an interactive transaction callback, so callers place this locking query
+ * and the conditional insert query in one `db.batch`. Neon executes that batch sequentially in
+ * one PostgreSQL transaction: the second statement receives a fresh READ COMMITTED snapshot after
+ * any competing project-row lock is released.
+ */
+export function assertProjectAudioCapacity(
+  tx: Pick<typeof db, 'select'>,
+  projectId: string,
+  userId: string,
+) {
+  return tx
+    .select({ id: projects.id })
+    .from(projects)
+    .where(and(eq(projects.id, projectId), eq(projects.user_id, userId)))
+    .for('update');
+}
+
+/**
+ * Ownership-scoped, race-safe insertion shared by uploads, AI Music, and future voiceover attach.
+ * Returns null only when the project is absent/not owned; capacity exhaustion throws the shared
+ * ProjectAudioCapacityError so every route can return the same 400 contract.
+ */
+export async function insertProjectAudioClipWithCapacity(
+  projectId: string,
+  userId: string,
+  input: AddAudioClipInput,
+): Promise<ProjectAudioClip | null> {
+  const lockQuery = assertProjectAudioCapacity(db, projectId, userId);
+  const insertQuery = db
+    .insert(projectAudioClips)
+    .select(
+      db
+        .select({
+          id: sql<string>`gen_random_uuid()`.as('id'),
+          project_id: projects.id,
+          r2_key: sql<string>`${input.r2Key}`.as('r2_key'),
+          source_type: sql<string>`${input.sourceType}`.as('source_type'),
+          display_name: sql<string | null>`${input.displayName ?? null}`.as('display_name'),
+          source_soundtrack_id: sql<string | null>`${input.sourceSoundtrackId ?? null}::uuid`.as('source_soundtrack_id'),
+          start_offset_seconds: sql<number>`${input.startOffsetSeconds ?? 0}`.as('start_offset_seconds'),
+          trim_start_seconds: sql<number>`${input.trimStartSeconds ?? 0}`.as('trim_start_seconds'),
+          trim_end_seconds: sql<number | null>`${input.trimEndSeconds ?? null}`.as('trim_end_seconds'),
+          original_duration_seconds: sql<number | null>`${input.originalDurationSeconds ?? null}`.as('original_duration_seconds'),
+          sort_order: sql<number>`(
+            SELECT COALESCE(MAX(sort_order), -1) + 1
+            FROM project_audio_clips
+            WHERE project_id = ${projectId}::uuid AND deleted_at IS NULL
+          )`.as('sort_order'),
+          deleted_at: sql<Date | null>`null`.as('deleted_at'),
+          created_at: sql<Date>`now()`.as('created_at'),
+        })
+        .from(projects)
+        .where(
+          and(
+            eq(projects.id, projectId),
+            eq(projects.user_id, userId),
+            sql`(
+              SELECT count(*)
+              FROM project_audio_clips
+              WHERE project_id = ${projectId}::uuid AND deleted_at IS NULL
+            ) < ${MAX_AUDIO_CLIPS_PER_PROJECT}`,
+          ),
+        ),
+    )
+    .returning();
+
+  const [ownedProjects, insertedRows] = await db.batch([lockQuery, insertQuery] as const);
+  if (!ownedProjects[0]) return null;
+  const inserted = insertedRows[0];
+  if (!inserted) throw new ProjectAudioCapacityError();
+  return inserted;
+}
+
 export async function addAudioClip(
   projectId: string,
   userId: string,
   input: AddAudioClipInput,
 ): Promise<ProjectAudioClip | null> {
-  if (!(await isProjectOwned(projectId, userId))) return null;
-
-  const nextOrderResult = await db.execute(sql`
-    SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_order FROM project_audio_clips
-    WHERE project_id = ${projectId}::uuid AND deleted_at IS NULL
-  `);
-  const nextSortOrder = Number((nextOrderResult.rows?.[0] as { next_order?: number } | undefined)?.next_order ?? 0);
-
-  const [row] = await db
-    .insert(projectAudioClips)
-    .values({
-      project_id: projectId,
-      r2_key: input.r2Key,
-      source_type: input.sourceType,
-      start_offset_seconds: input.startOffsetSeconds ?? 0,
-      trim_start_seconds: input.trimStartSeconds ?? 0,
-      trim_end_seconds: input.trimEndSeconds ?? null,
-      original_duration_seconds: input.originalDurationSeconds ?? null,
-      sort_order: nextSortOrder,
-    })
-    .returning();
-  return row;
+  return insertProjectAudioClipWithCapacity(projectId, userId, input);
 }
 
 export async function updateAudioClip(

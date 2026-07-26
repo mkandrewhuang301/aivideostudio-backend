@@ -19,10 +19,19 @@ jest.mock('../../storage/r2', () => ({
   R2_BUCKET: 'test',
 }));
 jest.mock('../../services/archivalService', () => ({ getUploadPresignedUrl: jest.fn() }));
+jest.mock('../../queue/soundtrackGenerationQueue', () => ({
+  soundtrackGenerationQueue: { add: jest.fn() },
+}));
+jest.mock('../../services/musicSuggestionService', () => ({
+  suggestionsForProject: jest.fn(),
+}));
 
+import express, { NextFunction, Request } from 'express';
+import request from 'supertest';
 import { DeleteObjectCommand } from '@aws-sdk/client-s3';
 import { db } from '../../db/client';
 import { r2 } from '../../storage/r2';
+import { aiMusicRouter } from '../../routes/aiMusic';
 import {
   attachSoundtrack,
   fingerprintSnapshot,
@@ -39,9 +48,17 @@ const dbMock = db as unknown as {
 };
 const r2Mock = r2 as unknown as { send: jest.Mock };
 
+const app = express();
+app.use(express.json());
+app.use((req: Request, _res, next: NextFunction) => {
+  req.user = { dbUserId: 'user-1', uid: 'firebase-user-1', email: 'user@example.com' };
+  next();
+});
+app.use('/api', aiMusicRouter);
+
 function makeChain(result: unknown) {
   const chain: Record<string, unknown> = {};
-  for (const method of ['from', 'where', 'orderBy', 'set', 'values', 'returning']) {
+  for (const method of ['from', 'where', 'orderBy', 'set', 'values', 'select', 'returning', 'for']) {
     chain[method] = jest.fn().mockReturnValue(chain);
   }
   (chain as { then: PromiseLike<unknown>['then'] }).then = (resolve, reject) =>
@@ -71,6 +88,8 @@ const attachedClip = {
 beforeEach(() => {
   jest.clearAllMocks();
   r2Mock.send.mockResolvedValue({});
+  dbMock.insert.mockReturnValue(makeChain([]));
+  dbMock.batch.mockImplementation(async (queries: PromiseLike<unknown>[]) => Promise.all(queries));
 });
 
 describe('AI Music quote and fingerprint', () => {
@@ -111,10 +130,41 @@ describe('AI Music quote and fingerprint', () => {
 });
 
 describe('AI Music project attachment capacity', () => {
+  it('maps the shared capacity error to the same 400 response as direct upload', async () => {
+    dbMock.select
+      .mockReturnValueOnce(makeChain([{ id: 'target-project' }]))
+      .mockReturnValueOnce(makeChain([soundtrack]))
+      .mockReturnValueOnce(makeChain([]))
+      .mockReturnValueOnce(makeChain([{ id: 'target-project' }]))
+      .mockReturnValueOnce(makeChain([]));
+    dbMock.insert.mockReturnValueOnce(makeChain([]));
+    dbMock.batch.mockResolvedValueOnce([[{ id: 'target-project' }], []]);
+
+    const response = await request(app)
+      .post(`/api/projects/target-project/audio/from-ai/${soundtrack.id}`);
+
+    expect(response.status).toBe(400);
+    expect(response.body).toEqual({
+      error: 'Project already has the maximum of 10 audio clips',
+    });
+  });
+
+  it('returns 404 for a cross-user target project without copying an object', async () => {
+    dbMock.select.mockReturnValueOnce(makeChain([]));
+
+    const response = await request(app)
+      .post(`/api/projects/not-owned/audio/from-ai/${soundtrack.id}`);
+
+    expect(response.status).toBe(404);
+    expect(r2Mock.send).not.toHaveBeenCalled();
+  });
+
   it('rejects an eleventh clip with the shared capacity error and deletes the copied object', async () => {
     dbMock.select
       .mockReturnValueOnce(makeChain([{ id: 'target-project' }]))
       .mockReturnValueOnce(makeChain([soundtrack]))
+      .mockReturnValueOnce(makeChain([]))
+      .mockReturnValueOnce(makeChain([{ id: 'target-project' }]))
       .mockReturnValueOnce(makeChain([]));
     // These keep the pre-20-02 implementation green far enough for the RED assertion to prove
     // it currently accepts an eleventh clip.
@@ -136,6 +186,10 @@ describe('AI Music project attachment capacity', () => {
       .mockReturnValueOnce(makeChain([soundtrack]))
       .mockReturnValueOnce(makeChain([soundtrack]))
       .mockReturnValueOnce(makeChain([]))
+      .mockReturnValueOnce(makeChain([]))
+      .mockReturnValueOnce(makeChain([{ id: 'target-project' }]))
+      .mockReturnValueOnce(makeChain([]))
+      .mockReturnValueOnce(makeChain([{ id: 'target-project' }]))
       .mockReturnValueOnce(makeChain([]));
     dbMock.execute
       .mockResolvedValueOnce({ rows: [{ next_order: 9 }] })
