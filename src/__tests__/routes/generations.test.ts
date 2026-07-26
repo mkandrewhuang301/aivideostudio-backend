@@ -103,6 +103,14 @@ jest.mock('../../services/generationService', () => ({
   classifyFailureReason: jest.requireActual('../../services/generationService').classifyFailureReason,
 }));
 
+// LLM prompt interceptor (2026-07-25): mocked so route tests never touch the network.
+// Default null = fail-open (raw prompt dispatches); the interceptor describe below overrides
+// per-test. enhanceForDispatch's own fail-open contract is unit-tested in
+// services/promptIntelligenceService.test.ts.
+jest.mock('../../services/promptIntelligenceService', () => ({
+  enhanceForDispatch: jest.fn().mockResolvedValue(null),
+}));
+
 jest.mock('../../services/archivalService', () => ({
   archiveToR2: jest.fn(),
   getGenerationPresignedUrl: jest.fn().mockResolvedValue('https://r2.example.com/presigned'),
@@ -239,6 +247,7 @@ import {
   markFailed,
 } from '../../services/generationService';
 import { getGenerationPresignedUrl, getUploadPresignedUrl } from '../../services/archivalService';
+import { enhanceForDispatch } from '../../services/promptIntelligenceService';
 import { generateImageWithOpenAI, generateImageEditWithMask, generateFaceswap } from '../../services/openaiImageService';
 import { openaiGenerationQueue } from '../../queue/openaiGenerationQueue';
 import { falImageToolQueue } from '../../queue/falImageToolQueue';
@@ -355,6 +364,76 @@ describe('POST /api/generations — video', () => {
     expect(res.body.code).toBe('INVALID_DURATION');
     expect(deductCredits).not.toHaveBeenCalled();
     expect(dispatchMock).not.toHaveBeenCalled();
+  });
+});
+
+// ─── POST /api/generations — LLM prompt interceptor (2026-07-25) ─────────────
+// Freeform video prompts are rewritten server-side before provider dispatch. The provider gets
+// the rewrite; the row keeps the raw prompt (UI/remix) and records the rewrite on
+// params.enhanced_prompt (debugging + Grok fallback). Fail-open: null → raw prompt, no stamp.
+describe('POST /api/generations — LLM prompt interceptor', () => {
+  it('dispatches the enhanced prompt and stamps params.enhanced_prompt', async () => {
+    (resolveDurationSeconds as jest.Mock).mockReturnValue(8);
+    (computeCostCredits as jest.Mock).mockReturnValue(60);
+    (deductCredits as jest.Mock).mockResolvedValue(true);
+    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-enh' });
+    dispatchMock.mockResolvedValue({ providerPredictionId: 'pred-enh' });
+    (attachPredictionId as jest.Mock).mockResolvedValue(undefined);
+    (enhanceForDispatch as jest.Mock).mockResolvedValueOnce('ENHANCED: neon-soaked aerial pull-back over a rainy city at night');
+
+    const res = await request(app).post('/api/generations').send(VALID_BODY);
+
+    expect(res.status).toBe(200);
+    expect(enhanceForDispatch).toHaveBeenCalledWith({
+      prompt: VALID_BODY.prompt,
+      hasReferenceVideos: false,
+      hasReferenceImages: false,
+    });
+    // Provider receives the rewrite...
+    expect(dispatchMock.mock.calls[0][0].prompt).toBe(
+      'ENHANCED: neon-soaked aerial pull-back over a rainy city at night',
+    );
+    // ...the row keeps the raw prompt and records the rewrite on params.
+    const createArg = (createGeneration as jest.Mock).mock.calls[0][0];
+    expect(createArg.prompt).toBe(VALID_BODY.prompt);
+    expect(createArg.params.enhanced_prompt).toBe(
+      'ENHANCED: neon-soaked aerial pull-back over a rainy city at night',
+    );
+  });
+
+  it('fails open: raw prompt dispatches and nothing is stamped when the interceptor returns null', async () => {
+    (resolveDurationSeconds as jest.Mock).mockReturnValue(8);
+    (computeCostCredits as jest.Mock).mockReturnValue(60);
+    (deductCredits as jest.Mock).mockResolvedValue(true);
+    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-raw' });
+    dispatchMock.mockResolvedValue({ providerPredictionId: 'pred-raw' });
+    (attachPredictionId as jest.Mock).mockResolvedValue(undefined);
+    // default mock resolves null
+
+    const res = await request(app).post('/api/generations').send(VALID_BODY);
+
+    expect(res.status).toBe(200);
+    expect(dispatchMock.mock.calls[0][0].prompt).toBe(VALID_BODY.prompt);
+    const createArg = (createGeneration as jest.Mock).mock.calls[0][0];
+    expect(createArg.params.enhanced_prompt).toBeUndefined();
+  });
+
+  it('flags reference videos/images to the interceptor for instruction selection', async () => {
+    (resolveDurationSeconds as jest.Mock).mockReturnValue(8);
+    (computeCostCredits as jest.Mock).mockReturnValue(60);
+    (deductCredits as jest.Mock).mockResolvedValue(true);
+    (createGeneration as jest.Mock).mockResolvedValue({ id: 'gen-refs' });
+    dispatchMock.mockResolvedValue({ providerPredictionId: 'pred-refs' });
+    (attachPredictionId as jest.Mock).mockResolvedValue(undefined);
+
+    const res = await request(app)
+      .post('/api/generations')
+      .send({ ...VALID_BODY, reference_videos: ['https://example.com/v.mp4'], reference_images: ['https://example.com/i.jpg'] });
+
+    expect(res.status).toBe(200);
+    expect(enhanceForDispatch).toHaveBeenCalledWith(
+      expect.objectContaining({ hasReferenceVideos: true, hasReferenceImages: true }),
+    );
   });
 });
 

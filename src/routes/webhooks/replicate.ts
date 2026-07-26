@@ -80,7 +80,9 @@ async function buildRetryInput(generation: GenerationByPredictionRow): Promise<G
   }
 
   return {
-    prompt: generation.prompt ?? '',
+    // Prefer the interceptor's enhanced prompt (2026-07-25) — that's what the original dispatch
+    // used; falling back to Grok with the raw prompt would silently change the creative input.
+    prompt: (params.enhanced_prompt as string | undefined) ?? generation.prompt ?? '',
     model: generation.model,
     mediaType: 'video',
     durationSeconds: params.duration as number,

@@ -63,7 +63,19 @@ interface OpenAIChatCompletionResponse {
   choices?: Array<{ message?: { content?: string } }>;
 }
 
-async function chatCompletion(messages: ChatMessage[]): Promise<string> {
+interface ChatCallOptions {
+  model?: string;
+  maxCompletionTokens?: number;
+  reasoningEffort?: string;
+  /** Wall-clock cap via AbortController — the in-pipeline interceptor needs a bounded fail-open. */
+  timeoutMs?: number;
+}
+
+async function chatCompletion(messages: ChatMessage[], opts: ChatCallOptions = {}): Promise<string> {
+  const controller = opts.timeoutMs !== undefined ? new AbortController() : undefined;
+  const timer = opts.timeoutMs !== undefined && controller
+    ? setTimeout(() => controller.abort(), opts.timeoutMs)
+    : undefined;
   let response: Response;
   try {
     response = await fetch(OPENAI_CHAT_COMPLETIONS_URL, {
@@ -73,15 +85,18 @@ async function chatCompletion(messages: ChatMessage[]): Promise<string> {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: MODEL,
+        model: opts.model ?? MODEL,
         messages,
-        max_completion_tokens: MAX_COMPLETION_TOKENS,
-        reasoning_effort: REASONING_EFFORT,
+        max_completion_tokens: opts.maxCompletionTokens ?? MAX_COMPLETION_TOKENS,
+        reasoning_effort: opts.reasoningEffort ?? REASONING_EFFORT,
       }),
+      signal: controller?.signal,
     });
   } catch (err) {
     console.error('[promptIntelligence] OpenAI API unreachable:', err);
     throw new PromptIntelligenceError('LLM unreachable');
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 
   if (!response.ok) {
@@ -141,4 +156,75 @@ export async function promptFromImage(args: {
     { role: 'system', content: args.instruction ?? DEFAULT_FROM_IMAGE_INSTRUCTION },
     { role: 'user', content: userParts },
   ]);
+}
+
+// ─── In-pipeline dispatch interceptor (2026-07-25) ──────────────────────────────
+// enhanceForDispatch backs the POST /api/generations interceptor: it rewrites the user's raw
+// prompt into the prompt the video provider actually receives. Unlike the suggest endpoints
+// above (explicit user action, fail-loud 502), this FAILS OPEN — a slow/down LLM must never
+// block a paid dispatch, so any error/timeout/empty completion returns null and the route
+// dispatches the raw prompt. gpt-5-mini at 'minimal' effort: 2026-07-25 live A/B vs 'low' on
+// the continuation instruction came out equal in quality at the same ~5s latency ('low' stays
+// on the suggest endpoints where the extra polish is worth it).
+
+const INTERCEPTOR_MODEL = 'gpt-5-mini';
+const INTERCEPTOR_MAX_COMPLETION_TOKENS = 800;
+const INTERCEPTOR_REASONING_EFFORT = 'minimal';
+const INTERCEPTOR_TIMEOUT_MS = 10_000;
+
+/** Reference video present → the generation continues an existing clip. The structured
+ *  continuity directive is the whole point: seamless resume, no cut, preserve everything. */
+export const DISPATCH_CONTINUATION_INSTRUCTION =
+  'You rewrite prompts for an AI video generation model. The user is continuing an existing ' +
+  'video referenced by [videoN] tokens. Rewrite the request into a prompt that continues the ' +
+  'referenced video directly from its final moment: NO cut, NO transition, NO new establishing ' +
+  'shot — the action resumes seamlessly. Explicitly preserve the subject\'s identity and ' +
+  'position, direction and speed of motion, camera direction and movement, lighting, and audio ' +
+  'ambience from the referenced video, then describe the new action. Keep every [token] exactly ' +
+  'as written. One paragraph. Output only the rewritten prompt, no preamble.';
+
+/** Reference image(s) only → image-to-video: hold the still's content, write the motion. */
+export const DISPATCH_I2V_INSTRUCTION =
+  'You rewrite prompts for an AI video generation model. The user supplied reference image(s) ' +
+  '([imageN] tokens) to animate. Rewrite the request into an image-to-video prompt: keep the ' +
+  'reference image content exactly as-is (subject, composition, style, lighting) and describe ' +
+  'the motion that fulfills the request — subject action, camera movement, ambient/background ' +
+  'motion. Keep every [token] exactly as written. One paragraph. Output only the rewritten ' +
+  'prompt, no preamble.';
+
+/**
+ * Rewrites a freeform video prompt for provider dispatch. Shape-aware: continuation when a
+ * reference video is present, i2v when only reference images, plain cinematic rewrite otherwise
+ * (the shared DEFAULT_ENHANCE_PROMPT_INSTRUCTION). NEVER throws — returns null on any failure.
+ */
+export async function enhanceForDispatch(args: {
+  prompt: string;
+  hasReferenceVideos: boolean;
+  hasReferenceImages: boolean;
+}): Promise<string | null> {
+  const instruction = args.hasReferenceVideos
+    ? DISPATCH_CONTINUATION_INSTRUCTION
+    : args.hasReferenceImages
+    ? DISPATCH_I2V_INSTRUCTION
+    : DEFAULT_ENHANCE_PROMPT_INSTRUCTION;
+  try {
+    return await chatCompletion(
+      [
+        { role: 'system', content: instruction },
+        { role: 'user', content: args.prompt },
+      ],
+      {
+        model: INTERCEPTOR_MODEL,
+        maxCompletionTokens: INTERCEPTOR_MAX_COMPLETION_TOKENS,
+        reasoningEffort: INTERCEPTOR_REASONING_EFFORT,
+        timeoutMs: INTERCEPTOR_TIMEOUT_MS,
+      },
+    );
+  } catch (err) {
+    console.warn(
+      '[promptIntelligence] dispatch enhancement failed, falling back to raw prompt:',
+      err instanceof Error ? err.message : err,
+    );
+    return null;
+  }
 }

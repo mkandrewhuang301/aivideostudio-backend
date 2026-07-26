@@ -61,6 +61,7 @@ import {
 import { refundCredits, deductCredits } from '../services/creditService';
 import { classifyFailureReason, markFailed } from '../services/generationService';
 import { getGenerationPresignedUrl, getUploadPresignedUrl } from '../services/archivalService';
+import { enhanceForDispatch } from '../services/promptIntelligenceService';
 import { openaiGenerationQueue } from '../queue/openaiGenerationQueue';
 import { chainGenerationQueue } from '../queue/chainGenerationQueue';
 import { explainerGenerationQueue } from '../queue/explainerGenerationQueue';
@@ -87,6 +88,10 @@ const VALID_VIDEO_ASPECT_RATIOS = ['16:9', '9:16', '1:1', '4:3', '3:4'];
 
 interface ResolvedGenerationRequest {
   prompt: string;
+  // Server-side LLM interceptor output (2026-07-25): the enhanced freeform-video prompt the
+  // provider dispatch uses INSTEAD of `prompt` when set. Written by the POST handler
+  // (enhanceForDispatch), never by the client. Raw `prompt` stays canonical for UI/remix.
+  enhancedPrompt?: string;
   model: string;
   mediaType: 'video' | 'image' | 'avatar' | 'upscale' | 'character_replace' | 'faceswap' | 'chain' | 'format';
   // Video-only
@@ -876,6 +881,21 @@ generationsRouter.post('/', promptModerationMiddleware, presetResolver, formatRe
       );
     }
 
+    // LLM prompt interceptor (2026-07-25): freeform video ONLY — presets/formats carry their own
+    // prompt machinery (preset prompt_intelligence, script LLMs) and other media types take
+    // different prompt styles. Rewrites the raw prompt for the provider — continuation-aware when
+    // a reference video is present ("continue [video1] from its final moment: no cut/transition,
+    // preserve subject position/motion/camera/lighting/audio ambience"). FAIL-OPEN: any LLM
+    // failure or the 10s timeout leaves enhancedPrompt undefined and the raw prompt dispatches.
+    if (resolved.mediaType === 'video' && !req._preset && resolved.prompt) {
+      const enhanced = await enhanceForDispatch({
+        prompt: resolved.prompt,
+        hasReferenceVideos: (resolved.referenceVideos?.length ?? 0) > 0,
+        hasReferenceImages: (resolved.referenceImages?.length ?? 0) > 0,
+      });
+      if (enhanced) resolved.enhancedPrompt = enhanced;
+    }
+
     const params =
       resolved.mediaType === 'format'
         ? {
@@ -942,7 +962,17 @@ generationsRouter.post('/', promptModerationMiddleware, presetResolver, formatRe
     const modelExplicitlyPicked = req._preset
       ? false
       : Boolean(req.body?.model_explicitly_picked);
-    const rowParams = { ...params, ...presetParams, model_explicitly_picked: modelExplicitlyPicked };
+    const rowParams = {
+      ...params,
+      ...presetParams,
+      model_explicitly_picked: modelExplicitlyPicked,
+      // Interceptor output rides on params (jsonb, no migration) — buildRetryInput's Grok
+      // content-policy fallback re-dispatches with it, and it's the debugging record when a
+      // render doesn't match what the user typed. Client-visible on freeform rows (harmless:
+      // the user's own idea rewritten, zero infra); preset rows get fully stripped by
+      // presetSafeSerialization anyway.
+      ...(resolved.enhancedPrompt ? { enhanced_prompt: resolved.enhancedPrompt } : {}),
+    };
     const hasRealFaceInput = isRealFaceGenerationPath(req._preset?.preset_id, resolved.mediaType);
 
     const { id: generationId } = await createGeneration({
@@ -1147,7 +1177,8 @@ generationsRouter.post('/', promptModerationMiddleware, presetResolver, formatRe
     const dispatchProvider = usesFal ? falProvider : replicateProvider;
     console.log(`[generations] webhookUrl="${webhookUrl}"`);
     const input: GenerationInput = {
-      prompt: resolved.prompt,
+      // The interceptor's rewrite goes to the provider; the raw prompt stays on the row.
+      prompt: resolved.enhancedPrompt ?? resolved.prompt,
       model: resolved.model,
       mediaType: resolved.mediaType,
       // Video-only
