@@ -115,6 +115,15 @@ export const config = {
   aiMusicRequestsPerMinute: Number(process.env.AI_MUSIC_REQUESTS_PER_MINUTE ?? '8'),
   aiMusicAnalysisModel: process.env.AI_MUSIC_ANALYSIS_MODEL ?? 'gemini-3.1-flash-lite',
   aiMusicAnalysisFrameCount: Number(process.env.AI_MUSIC_ANALYSIS_FRAME_COUNT ?? '5'),
+  // Phase 20.1 (Audio Separation) — Meta SAM Audio via fal.ai, behind AudioSeparationProvider.
+  // audioSepCreditsPerSecond is PROVISIONAL (~1 credit / 6s per DECISIONS §2); a later plan
+  // finalizes it after a real fal price-confirmation test call.
+  audioSepEnabled: process.env.AUDIO_SEP_ENABLED === 'true',
+  audioSepModel: process.env.AUDIO_SEP_MODEL ?? 'fal-ai/sam-audio/separate',
+  audioSepCreditsPerSecond: Number(process.env.AUDIO_SEP_CREDITS_PER_SECOND ?? '0.167'),
+  audioSepWorkerConcurrency: Number(process.env.AUDIO_SEP_WORKER_CONCURRENCY ?? '2'),
+  audioSepRequestsPerMinute: Number(process.env.AUDIO_SEP_REQUESTS_PER_MINUTE ?? '8'),
+  audioSepDailyRateLimitPerUser: Number(process.env.AUDIO_SEP_DAILY_RATE_LIMIT_PER_USER ?? '50'),
   // Celebrity-likeness check (AWS Rekognition RecognizeCelebrities) for the upload-driven
   // motion-transfer / ai-influencer presets — blocks animating a real celebrity's face.
   // Defaults OFF (opt-in) since it needs real AWS IAM creds provisioned; this stays dark until

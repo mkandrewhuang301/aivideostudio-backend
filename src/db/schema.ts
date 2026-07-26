@@ -51,6 +51,14 @@ export const soundtrackGenerationStatusEnum = pgEnum('soundtrack_generation_stat
   'refunded',
 ]);
 
+export const audioSeparationStatusEnum = pgEnum('audio_separation_status', [
+  'pending',
+  'processing',
+  'completed',
+  'failed',
+  'refunded',
+]);
+
 // ─── users ────────────────────────────────────────────────────────────────────
 // Per D-12: id (UUID), firebase_uid (unique), email, credits_balance (integer default 0),
 //           created_at, updated_at
@@ -456,6 +464,15 @@ export const projectAudioClips = pgTable(
     // back to it when the pill has never been explicitly trimmed. Self-heals nulls like clips do.
     original_duration_seconds: doublePrecision('original_duration_seconds'), // nullable
     sort_order: integer('sort_order').notNull().default(0),
+    // Phase 20.1 (Audio Separation): DAW mix fields. Mix model = sum of ENABLED rows at gain.
+    // enabled/gain drive playback+export mixing; label/prompt are stem display metadata
+    // (e.g. "Everything else" / "<prompt>"); source_clip_id links a stem back to the
+    // project_clips row it was separated from (source_type = 'separation').
+    enabled: boolean('enabled').notNull().default(true),
+    gain: doublePrecision('gain').notNull().default(1),
+    label: text('label'),
+    prompt: text('prompt'),
+    source_clip_id: uuid('source_clip_id').references(() => projectClips.id),
     // Soft-delete (Plan 13-21 B1) — see project_clips.deleted_at for the contract.
     deleted_at: timestamp('deleted_at', { withTimezone: true }), // nullable
     created_at: timestamp('created_at', { withTimezone: true })
@@ -464,6 +481,49 @@ export const projectAudioClips = pgTable(
   },
   (table) => ({
     projectIdIdx: index('project_audio_clips_project_id_idx').on(table.project_id),
+  }),
+);
+
+// ─── audio_separation_jobs (Phase 20.1: Audio Separation) ─────────────────────
+// Job-tracking table mirroring project_soundtrack_generations's atomic
+// deduct/refund/status lifecycle. source_prior_volume captures the source clip's
+// project_clips.volume value immediately BEFORE separation mutes it to 0, so undo
+// can restore the exact prior volume (not a hardcoded default).
+
+export const audioSeparationJobs = pgTable(
+  'audio_separation_jobs',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    user_id: uuid('user_id').notNull().references(() => users.id),
+    project_id: uuid('project_id').notNull().references(() => projects.id),
+    source_clip_id: uuid('source_clip_id').notNull().references(() => projectClips.id),
+    idempotency_key: text('idempotency_key').notNull(),
+    status: audioSeparationStatusEnum('status').notNull().default('pending'),
+    provider: text('provider').notNull(),
+    model: text('model').notNull(),
+    prompt: text('prompt').notNull(),
+    duration_seconds: doublePrecision('duration_seconds').notNull(),
+    cost_credits: integer('cost_credits').notNull(),
+    provider_request_id: text('provider_request_id'),
+    target_r2_key: text('target_r2_key'),
+    residual_r2_key: text('residual_r2_key'),
+    target_audio_clip_id: uuid('target_audio_clip_id'),
+    residual_audio_clip_id: uuid('residual_audio_clip_id'),
+    source_prior_volume: doublePrecision('source_prior_volume'),
+    failure_code: text('failure_code'),
+    failure_reason: text('failure_reason'),
+    retry_count: integer('retry_count').notNull().default(0),
+    created_at: timestamp('created_at', { withTimezone: true }).notNull().default(sql`now()`),
+    started_at: timestamp('started_at', { withTimezone: true }),
+    completed_at: timestamp('completed_at', { withTimezone: true }),
+    failed_at: timestamp('failed_at', { withTimezone: true }),
+  },
+  (table) => ({
+    userIdempotencyIdx: uniqueIndex('audio_sep_user_idempotency_unique_idx').on(
+      table.user_id,
+      table.idempotency_key,
+    ),
+    statusCreatedIdx: index('audio_sep_status_created_idx').on(table.status, table.created_at),
   }),
 );
 
@@ -541,3 +601,6 @@ export type ProjectCaptionCue = typeof projectCaptionCues.$inferSelect;
 export type NewProjectCaptionCue = typeof projectCaptionCues.$inferInsert;
 export type ProjectCaptionWord = typeof projectCaptionWords.$inferSelect;
 export type NewProjectCaptionWord = typeof projectCaptionWords.$inferInsert;
+export type AudioSeparationJob = typeof audioSeparationJobs.$inferSelect;
+export type NewAudioSeparationJob = typeof audioSeparationJobs.$inferInsert;
+export type AudioSeparationStatus = (typeof audioSeparationStatusEnum.enumValues)[number];
