@@ -116,8 +116,21 @@ export const config = {
   aiMusicAnalysisModel: process.env.AI_MUSIC_ANALYSIS_MODEL ?? 'gemini-3.1-flash-lite',
   aiMusicAnalysisFrameCount: Number(process.env.AI_MUSIC_ANALYSIS_FRAME_COUNT ?? '5'),
   // Phase 20.1 (Audio Separation) — Meta SAM Audio via fal.ai, behind AudioSeparationProvider.
-  // audioSepCreditsPerSecond is PROVISIONAL (~1 credit / 6s per DECISIONS §2); a later plan
-  // finalizes it after a real fal price-confirmation test call.
+  // audioSepCreditsPerSecond is CONFIRMED (Plan 20.1-02 Task 3, 2026-07-26): two real
+  // fal-ai/sam-audio/separate calls (10.0s + 26.64s clips, requests 019f9f84-689c-7432-
+  // 9b72-8a00dbbaec47 / 019f9f84-8767-7fc1-89cc-3e0927116350) confirmed reranking_candidates:1 +
+  // output_format:'mp3' are accepted and the endpoint returns exactly ONE `duration` field per
+  // call matching the input clip length (10.0 / 26.64) with `billable_units: 1.0` identical on
+  // both calls — supporting single-billing-per-clip, not per-stem. fal's REST billing ledger
+  // (`cost`/`cost_estimate_nano_usd` on GET https://rest.alpha.fal.ai/requests/{id}) stayed
+  // `PENDING`/`null` after ~3.5 minutes of live polling (async billing reconciliation lag on
+  // fal's side, not independently observable from this shell without dashboard/browser access) —
+  // the exact prorated $ delta was NOT numerically re-derived in this session. The rate below is
+  // kept at the previously-published fal price ($0.05/30s prorated, 1 reranking candidate =
+  // 0.00167 $/s => 0.167 credits/s) per DECISIONS.md §2, now backed by a real, successful,
+  // correctly-pinned/single-billed API call rather than the documentation alone. See
+  // 20.1-02-SUMMARY.md for full detail; re-verify the exact cents figure on the fal dashboard
+  // (Usage/Billing page) if a materially different actual charge is ever observed.
   audioSepEnabled: process.env.AUDIO_SEP_ENABLED === 'true',
   audioSepModel: process.env.AUDIO_SEP_MODEL ?? 'fal-ai/sam-audio/separate',
   audioSepCreditsPerSecond: Number(process.env.AUDIO_SEP_CREDITS_PER_SECOND ?? '0.167'),
