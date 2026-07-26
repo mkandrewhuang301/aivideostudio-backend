@@ -1,17 +1,20 @@
 import { randomUUID } from 'node:crypto';
+import { CopyObjectCommand, DeleteObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
 import { and, desc, eq, or, sql } from 'drizzle-orm';
 import { db } from '../db/client';
 import {
+  projectAudioClips,
   projectVoiceoverGenerations,
   projects,
+  type ProjectAudioClip,
   type ProjectVoiceoverGeneration,
 } from '../db/schema';
 import { getAudioVoiceById } from '../config/audioVoices';
 import { quoteVoiceover, VoiceoverQuoteError } from '../config/voiceoverPricing';
 import { isPromptFlagged } from '../middleware/promptModeration';
 import { getUploadPresignedUrl } from './archivalService';
-import { GetObjectCommand } from '@aws-sdk/client-s3';
 import { r2, R2_BUCKET } from '../storage/r2';
+import { MAX_AUDIO_CLIPS_PER_PROJECT, ProjectAudioCapacityError } from './projectService';
 
 export class VoiceoverNotFoundError extends Error {}
 export class VoiceoverValidationError extends Error {}
@@ -286,6 +289,168 @@ export async function readVoiceoverRaw(key: string): Promise<Buffer> {
   const object = await r2.send(new GetObjectCommand({ Bucket: R2_BUCKET, Key: key }));
   if (!object.Body) throw new Error('Voiceover raw source is unavailable');
   return Buffer.from(await object.Body.transformToByteArray());
+}
+
+async function publicAudioClip(clip: ProjectAudioClip): Promise<Record<string, unknown>> {
+  const url = await getUploadPresignedUrl(clip.r2_key);
+  return {
+    audio_clip_id: clip.id,
+    project_id: clip.project_id,
+    source_type: clip.source_type,
+    display_name: clip.display_name,
+    start_offset_seconds: clip.start_offset_seconds,
+    trim_start_seconds: clip.trim_start_seconds,
+    trim_end_seconds: clip.trim_end_seconds,
+    original_duration_seconds: clip.original_duration_seconds,
+    sort_order: clip.sort_order,
+    url,
+    created_at: clip.created_at,
+  };
+}
+
+/**
+ * Attaches a completed voiceover to its owning project at the requested playhead offset.
+ * Idempotent: repeated calls return the same project_audio_clips row. Uses one SQL transaction
+ * that locks the voiceover row first, then the project row, then conditionally inserts the clip
+ * and updates attached_audio_clip_id. The archived M4A is copied to project-owned R2 before the
+ * transaction; on any failure the copied object is removed best-effort.
+ */
+export async function attachVoiceoverToProject(input: {
+  projectId: string;
+  voiceoverId: string;
+  userId: string;
+  startOffsetSeconds: number;
+}): Promise<Record<string, unknown> | null> {
+  if (!Number.isFinite(input.startOffsetSeconds) || input.startOffsetSeconds < 0) {
+    throw new VoiceoverValidationError('start_offset_seconds must be a non-negative finite number');
+  }
+
+  const [voiceover] = await db
+    .select({
+      id: projectVoiceoverGenerations.id,
+      final_r2_key: projectVoiceoverGenerations.final_r2_key,
+      attached_audio_clip_id: projectVoiceoverGenerations.attached_audio_clip_id,
+      duration_seconds: projectVoiceoverGenerations.duration_seconds,
+    })
+    .from(projectVoiceoverGenerations)
+    .where(and(
+      eq(projectVoiceoverGenerations.id, input.voiceoverId),
+      eq(projectVoiceoverGenerations.project_id, input.projectId),
+      eq(projectVoiceoverGenerations.user_id, input.userId),
+      eq(projectVoiceoverGenerations.status, 'succeeded'),
+    ));
+
+  if (!voiceover?.final_r2_key) return null;
+
+  if (voiceover.attached_audio_clip_id) {
+    const [existing] = await db
+      .select()
+      .from(projectAudioClips)
+      .where(eq(projectAudioClips.id, voiceover.attached_audio_clip_id));
+    return existing ? publicAudioClip(existing) : null;
+  }
+
+  const destinationKey = `projects/${input.projectId}/audio/${randomUUID()}.m4a`;
+  try {
+    await r2.send(new CopyObjectCommand({
+      Bucket: R2_BUCKET,
+      CopySource: `${R2_BUCKET}/${voiceover.final_r2_key}`,
+      Key: destinationKey,
+      ContentType: 'audio/mp4',
+    }));
+  } catch (error) {
+    console.error('[voiceoverService] Failed to copy voiceover to project audio:', error);
+    throw new Error('Failed to copy voiceover audio');
+  }
+
+  const result = await db.execute(sql`
+    WITH voiceover_lock AS (
+      SELECT id, attached_audio_clip_id, duration_seconds
+      FROM project_voiceover_generations
+      WHERE id = ${input.voiceoverId}::uuid
+        AND project_id = ${input.projectId}::uuid
+        AND user_id = ${input.userId}::uuid
+        AND status = 'succeeded'::voiceover_generation_status
+        AND final_r2_key IS NOT NULL
+      FOR UPDATE
+    ),
+    project_lock AS (
+      SELECT id FROM projects
+      WHERE id = ${input.projectId}::uuid AND user_id = ${input.userId}::uuid
+      FOR UPDATE
+    ),
+    clip_count AS (
+      SELECT count(*)::int AS cnt
+      FROM project_audio_clips
+      WHERE project_id = ${input.projectId}::uuid AND deleted_at IS NULL
+    ),
+    inserted AS (
+      INSERT INTO project_audio_clips (
+        id, project_id, r2_key, source_type, display_name,
+        start_offset_seconds, trim_start_seconds, trim_end_seconds,
+        original_duration_seconds, sort_order, deleted_at, created_at
+      )
+      SELECT
+        gen_random_uuid(),
+        ${input.projectId}::uuid,
+        ${destinationKey},
+        'narration',
+        'AI Voiceover',
+        ${input.startOffsetSeconds},
+        0,
+        voiceover_lock.duration_seconds,
+        voiceover_lock.duration_seconds,
+        (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM project_audio_clips WHERE project_id = ${input.projectId}::uuid AND deleted_at IS NULL),
+        null,
+        now()
+      FROM voiceover_lock, project_lock, clip_count
+      WHERE voiceover_lock.attached_audio_clip_id IS NULL
+        AND clip_count.cnt < ${MAX_AUDIO_CLIPS_PER_PROJECT}
+      RETURNING id
+    ),
+    updated AS (
+      UPDATE project_voiceover_generations
+      SET attached_audio_clip_id = inserted.id
+      FROM inserted
+      WHERE project_voiceover_generations.id = ${input.voiceoverId}::uuid
+      RETURNING inserted.id AS audio_clip_id
+    )
+    SELECT
+      (SELECT attached_audio_clip_id FROM voiceover_lock) AS existing_clip_id,
+      (SELECT id FROM inserted) AS inserted_clip_id,
+      (SELECT audio_clip_id FROM updated) AS updated_clip_id
+  `);
+
+  const row = result.rows?.[0] as unknown as {
+    existing_clip_id?: string | null;
+    inserted_clip_id?: string | null;
+    updated_clip_id?: string | null;
+  } | undefined;
+
+  if (!row) {
+    await r2.send(new DeleteObjectCommand({ Bucket: R2_BUCKET, Key: destinationKey })).catch(() => {});
+    return null;
+  }
+
+  if (row.existing_clip_id) {
+    await r2.send(new DeleteObjectCommand({ Bucket: R2_BUCKET, Key: destinationKey })).catch(() => {});
+    const [existing] = await db
+      .select()
+      .from(projectAudioClips)
+      .where(eq(projectAudioClips.id, row.existing_clip_id));
+    return existing ? publicAudioClip(existing) : null;
+  }
+
+  if (row.inserted_clip_id && row.updated_clip_id) {
+    const [clip] = await db
+      .select()
+      .from(projectAudioClips)
+      .where(eq(projectAudioClips.id, row.inserted_clip_id));
+    return clip ? publicAudioClip(clip) : null;
+  }
+
+  await r2.send(new DeleteObjectCommand({ Bucket: R2_BUCKET, Key: destinationKey })).catch(() => {});
+  throw new ProjectAudioCapacityError();
 }
 
 async function publicVoiceover(row: ProjectVoiceoverGeneration): Promise<Record<string, unknown>> {

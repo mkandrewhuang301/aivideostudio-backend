@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { voiceoverGenerationQueue } from '../queue/voiceoverGenerationQueue';
 import {
+  attachVoiceoverToProject,
   createVoiceoverGeneration,
   getVoiceover,
   getVoiceoverQuote,
@@ -9,6 +10,7 @@ import {
   VoiceoverNotFoundError,
   VoiceoverValidationError,
 } from '../services/voiceoverService';
+import { ProjectAudioCapacityError } from '../services/projectService';
 
 export const audioVoiceoversRouter = Router();
 
@@ -83,4 +85,26 @@ audioVoiceoversRouter.get('/projects/:projectId/voiceovers/:voiceoverId', async 
   );
   if (!value) { res.status(404).json({ error: 'Voiceover not found' }); return; }
   res.status(200).json(value);
+});
+
+audioVoiceoversRouter.post('/projects/:projectId/voiceovers/:voiceoverId/attach', async (req, res) => {
+  const uid = userId(req, res); if (!uid) return;
+  const offset = Number(req.body?.start_offset_seconds);
+  if (!Number.isFinite(offset) || offset < 0) {
+    res.status(400).json({ error: 'start_offset_seconds must be a non-negative finite number' }); return;
+  }
+  try {
+    const clip = await attachVoiceoverToProject({
+      projectId: req.params.projectId as string,
+      voiceoverId: req.params.voiceoverId as string,
+      userId: uid,
+      startOffsetSeconds: offset,
+    });
+    if (!clip) { res.status(404).json({ error: 'Voiceover not found' }); return; }
+    res.status(200).json(clip);
+  } catch (error) {
+    if (error instanceof ProjectAudioCapacityError) { res.status(400).json({ error: error.message }); return; }
+    if (error instanceof VoiceoverValidationError) { res.status(422).json({ error: error.message }); return; }
+    res.status(500).json({ error: 'Failed to attach voiceover' });
+  }
 });
