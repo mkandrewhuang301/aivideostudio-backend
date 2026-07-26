@@ -57,7 +57,7 @@ const VOICEOVER_ID = 'voiceover-1';
 beforeEach(() => {
   jest.clearAllMocks();
   moderationMock.mockResolvedValue(false);
-  presignedMock.mockImplementation((key: string) => Promise.resolve(`https://signed.example/${key}`));
+  presignedMock.mockImplementation(() => Promise.resolve('https://signed.example/audio.wav'));
   dbMock.insert.mockReturnValue(makeChain([]));
   dbMock.batch.mockImplementation(async (queries: PromiseLike<unknown>[]) => Promise.all(queries));
 });
