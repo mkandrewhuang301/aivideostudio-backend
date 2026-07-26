@@ -5,7 +5,7 @@
 
 import { db } from '../db/client';
 import { generations } from '../db/schema';
-import { sql, desc, lt, eq, and, ne, notInArray, or } from 'drizzle-orm';
+import { sql, desc, lt, eq, and, ne, notInArray, or, SQL } from 'drizzle-orm';
 import type { GenerationStatus, NewGeneration } from '../db/schema';
 import type { PresetDef } from '../config/presets';
 
@@ -642,30 +642,36 @@ const HIDDEN_STATUSES: GenerationStatus[] = ['quarantined', 'deleted'];
 
 // Cursor pagination: cursor is { createdAt, id } of the last visible item (oldest in current page)
 // Uses lt(created_at) + DESC order — newest items first. RESEARCH.md Pitfall 3: use lt NOT gt.
+// includeStudio (default false) preserves the original feed behavior; true surfaces completed
+// Studio compose rows for editor audio extraction while still hiding quarantined/deleted rows.
 export async function listGenerations(
   userId: string,
   cursor?: { createdAt: Date; id: string },
   limit = 20,
+  includeStudio = false,
 ) {
+  const conditions: (SQL | undefined)[] = [
+    eq(generations.user_id, userId),
+    notInArray(generations.status, HIDDEN_STATUSES),
+  ];
+  if (!includeStudio) {
+    conditions.push(ne(generations.model, STUDIO_COMPOSE_MODEL));
+  }
+  if (cursor) {
+    conditions.push(
+      or(
+        lt(generations.created_at, cursor.createdAt),
+        and(
+          eq(generations.created_at, cursor.createdAt),
+          lt(generations.id, cursor.id),
+        ),
+      ),
+    );
+  }
   return db
     .select()
     .from(generations)
-    .where(
-      and(
-        eq(generations.user_id, userId),
-        ne(generations.model, STUDIO_COMPOSE_MODEL),
-        notInArray(generations.status, HIDDEN_STATUSES),
-        cursor
-          ? or(
-              lt(generations.created_at, cursor.createdAt),
-              and(
-                eq(generations.created_at, cursor.createdAt),
-                lt(generations.id, cursor.id),
-              ),
-            )
-          : undefined,
-      ),
-    )
+    .where(and(...conditions))
     .orderBy(desc(generations.created_at), desc(generations.id))
     .limit(limit);
 }

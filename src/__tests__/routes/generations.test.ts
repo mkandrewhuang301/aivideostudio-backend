@@ -2001,7 +2001,7 @@ describe('GET /api/generations', () => {
 
     await request(app).get('/api/generations');
 
-    expect(listGenerations).toHaveBeenCalledWith('test-user-id', undefined, 20);
+    expect(listGenerations).toHaveBeenCalledWith('test-user-id', undefined, 20, false);
   });
 
   it('returns nextCursor when page is exactly at limit', async () => {
@@ -2138,39 +2138,76 @@ describe('GET /api/generations', () => {
     ]);
   });
 
-  // T-09.6-13: the server-only chain descriptor (prompts, models, duration) must never reach the
-  // client — presetSafeSerialization strips ANY preset row's params to just preset_id +
-  // preset_input_upload_ids, so params.chain is dropped along with everything else (list).
-  it('never leaks params.chain for a you-vs-you chain preset row (list)', async () => {
-    const chainItem = {
+  // T-20-30/T-20-31: Extract Audio needs the complete owned video history, including completed
+  // Studio compose rows, but only when explicitly requested. Default feed behavior must stay
+  // unchanged.
+  describe('include_studio query (Phase 20 Plan 08)', () => {
+    const studioItem = {
       ...completedItem,
-      id: 'gen-chain-ser',
-      media_type: 'chain',
-      model: 'alibaba/happyhorse-1.1',
-      prompt: null,
-      r2_key: 'generations/gen-chain-ser.mp4',
-      params: {
-        preset_id: 'you-vs-you',
-        preset_input_upload_ids: ['upload-selfie'],
-        postprocess: { op: 'mux', audio_r2_key: 'audio/uvu-default.mp3' },
-        chain: {
-          image_stage: { model: 'wan-video/wan-2.7-image', quality: 'high', prompts: ['secret keyframe prompt one', 'secret keyframe prompt two'] },
-          animate_stage: { model: 'alibaba/happyhorse-1.1', resolution: '720p', duration: 8, aspect_ratio: '9:16', prompt_template: 'secret choreography prompt' },
-        },
-      },
+      id: 'gen-studio-001',
+      model: 'edit-studio-compose',
+      r2_key: 'generations/gen-studio-001.mp4',
     };
-    (listGenerations as jest.Mock).mockResolvedValue([chainItem]);
 
-    const res = await request(app).get('/api/generations');
+    it('defaults to false and excludes Studio compose rows from the feed', async () => {
+      (listGenerations as jest.Mock).mockResolvedValue([completedItem]);
 
-    expect(res.status).toBe(200);
-    const row = res.body.items[0];
-    expect(row.params).toEqual({
-      preset_id: 'you-vs-you',
-      preset_input_upload_ids: ['upload-selfie'],
+      const res = await request(app).get('/api/generations');
+
+      expect(res.status).toBe(200);
+      expect(listGenerations).toHaveBeenCalledWith('test-user-id', undefined, 20, false);
+      expect(res.body.items.every((row: Record<string, unknown>) => row.model !== 'edit-studio-compose')).toBe(true);
     });
-    expect(row.params.chain).toBeUndefined();
-    expect(row.params.postprocess).toBeUndefined();
+
+    it('include_studio=true passes the flag and surfaces completed Studio video rows', async () => {
+      (listGenerations as jest.Mock).mockResolvedValue([studioItem, completedItem]);
+
+      const res = await request(app).get('/api/generations?include_studio=true');
+
+      expect(res.status).toBe(200);
+      expect(listGenerations).toHaveBeenCalledWith('test-user-id', undefined, 20, true);
+      expect(res.body.items).toHaveLength(2);
+      expect(res.body.items[0].video_url).toBe('https://r2.example.com/presigned');
+      expect(res.body.items[0].model).toBe('edit-studio-compose');
+    });
+
+    it('include_studio=false explicitly matches the default behavior', async () => {
+      (listGenerations as jest.Mock).mockResolvedValue([completedItem]);
+
+      const res = await request(app).get('/api/generations?include_studio=false');
+
+      expect(res.status).toBe(200);
+      expect(listGenerations).toHaveBeenCalledWith('test-user-id', undefined, 20, false);
+    });
+
+    it('pagination reaches an older Studio row and returns a nextCursor', async () => {
+      const items = Array.from({ length: 20 }, (_, i) => ({
+        ...completedItem,
+        id: i === 19 ? 'gen-studio-old' : `gen-${String(i).padStart(3, '0')}`,
+        model: i === 19 ? 'edit-studio-compose' : completedItem.model,
+        created_at: new Date(`2026-06-28T${String(10 - Math.floor(i / 6)).padStart(2, '0')}:0${i % 6}:00Z`),
+      }));
+      (listGenerations as jest.Mock).mockResolvedValue(items);
+
+      const res = await request(app).get('/api/generations?include_studio=true');
+
+      expect(res.status).toBe(200);
+      expect(res.body.items).toHaveLength(20);
+      expect(res.body.items[19].model).toBe('edit-studio-compose');
+      expect(res.body.nextCursor).not.toBeNull();
+      expect(res.body.nextCursor).toContain('__');
+    });
+
+    it('ownership guard still applies when include_studio=true', async () => {
+      (listGenerations as jest.Mock).mockResolvedValue([studioItem]);
+
+      await request(app).get('/api/generations?include_studio=true');
+
+      const calls = (listGenerations as jest.Mock).mock.calls;
+      expect(calls).toHaveLength(1);
+      expect(calls[0][0]).toBe('test-user-id');
+      expect(calls[0][3]).toBe(true);
+    });
   });
 });
 

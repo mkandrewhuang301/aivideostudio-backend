@@ -1320,7 +1320,8 @@ generationsRouter.get('/', async (req: Request, res: Response) => {
       if (createdAtStr && id) cursor = { createdAt: new Date(createdAtStr), id };
     }
     const limit = Math.min(Number(limitStr) || 20, 50);
-    const items = await listGenerations(req.user.dbUserId, cursor, limit);
+    const includeStudio = req.query.include_studio === 'true';
+    const items = await listGenerations(req.user.dbUserId, cursor, limit, includeStudio);
 
     // Pre-fetch both freeform references and exact preset inputs in one query. Preset inputs are
     // returned directly below because GET /uploads intentionally exposes only the newest 50;
