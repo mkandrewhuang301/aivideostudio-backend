@@ -34,8 +34,9 @@ export const DEFAULT_ENHANCE_PROMPT_INSTRUCTION =
   'You improve rough prompts for an AI video generation model. Rewrite the user\'s prompt into ' +
   'a vivid, production-ready video prompt: concrete subject and action, setting, camera framing ' +
   'and movement, lighting, and mood. Keep the user\'s core idea and any names/tokens in square ' +
-  'brackets (e.g. [my dog]) exactly as written. One paragraph. Output only the improved prompt, ' +
-  'no preamble or explanation.';
+  'brackets (e.g. [my dog]) exactly as written — and NEVER introduce new square-bracket tokens ' +
+  'the user did not write. One paragraph. Output only the improved prompt, no preamble or ' +
+  'explanation.';
 
 export const DEFAULT_ENHANCE_SCRIPT_INSTRUCTION =
   'You turn a rough idea into a short, shootable video script for an AI video generation model. ' +
@@ -180,8 +181,13 @@ export const DISPATCH_CONTINUATION_INSTRUCTION =
   'referenced video directly from its final moment: NO cut, NO transition, NO new establishing ' +
   'shot — the action resumes seamlessly. Explicitly preserve the subject\'s identity and ' +
   'position, direction and speed of motion, camera direction and movement, lighting, and audio ' +
-  'ambience from the referenced video, then describe the new action. Keep every [token] exactly ' +
-  'as written. One paragraph. Output only the rewritten prompt, no preamble.';
+  'ambience from the referenced video, then describe the new action. You CANNOT see the ' +
+  'referenced video, so never invent specifics of its content (clothing, setting, objects, ' +
+  'sounds) — refer to its subject and scene generically ("the same subject", "the current ' +
+  'framing", "the established lighting", "the existing ambient sound"); concrete detail belongs ' +
+  'only to the NEW action the user asked for. Keep every [token] exactly as written, and never ' +
+  'introduce new square-bracket tokens. One paragraph. Output only the rewritten prompt, no ' +
+  'preamble.';
 
 /** Reference image(s) only → image-to-video: hold the still's content, write the motion. */
 export const DISPATCH_I2V_INSTRUCTION =
@@ -189,8 +195,8 @@ export const DISPATCH_I2V_INSTRUCTION =
   '([imageN] tokens) to animate. Rewrite the request into an image-to-video prompt: keep the ' +
   'reference image content exactly as-is (subject, composition, style, lighting) and describe ' +
   'the motion that fulfills the request — subject action, camera movement, ambient/background ' +
-  'motion. Keep every [token] exactly as written. One paragraph. Output only the rewritten ' +
-  'prompt, no preamble.';
+  'motion. Keep every [token] exactly as written, and never introduce new square-bracket ' +
+  'tokens. One paragraph. Output only the rewritten prompt, no preamble.';
 
 /**
  * Rewrites a freeform video prompt for provider dispatch. Shape-aware: continuation when a
