@@ -2,23 +2,34 @@
 // LLM prompt-intelligence endpoints (mounted at /api/prompt behind auth + banCheck):
 //   POST /enhance    — { prompt, mode?: 'prompt'|'script', preset_id? }        → { prompt }
 //   POST /from-image — { generation_id? | upload_id?, preset_id?, hint? }      → { prompt }
+//   POST /from-video — { generation_id? | upload_id?, hint? }                  → { prompt }
 //
-// Both are FREE (no credit deduction — gpt-5-mini costs fractions of a cent) and fail loud
-// (502 llm_unavailable) rather than echoing input back. Per-preset behavior comes from
-// PresetDef.prompt_intelligence (SERVER-ONLY registry config) keyed by the optional preset_id.
+// from-video (2026-07-25) is the CONTINUATION GUIDE: Gemini watches the reference clip and
+// writes one grounded continuation prompt (subject/position/motion/camera/lighting/ambience at
+// the final moment → the new action). It shapes what the user TYPES; the sight-unseen dispatch
+// interceptor (enhanceForDispatch) still cleans up whatever finally submits. Results are
+// Redis-cached 30min keyed by video id + hint so re-taps are instant; the endpoint is on-demand
+// only (no prefetch — cost lands exclusively on actual taps, ~$0.001/read after 480p downscale).
+//
+// All three are FREE (no credit deduction — gpt-5-mini/gemini-flash cost fractions of a cent)
+// and fail loud (502 llm_unavailable) rather than echoing input back. Per-preset behavior comes
+// from PresetDef.prompt_intelligence (SERVER-ONLY registry config) keyed by the optional
+// preset_id.
 //
 // SECURITY:
-// - from-image NEVER accepts a client-supplied URL — only a generation_id/upload_id, resolved
-//   to a presigned R2 URL server-side with an ownership (IDOR) guard. Accepting raw URLs would
-//   be an SSRF hole.
+// - from-image/from-video NEVER accept a client-supplied URL — only a generation_id/upload_id,
+//   resolved to a presigned R2 URL server-side with an ownership (IDOR) guard. Accepting raw
+//   URLs would be an SSRF hole.
 // - /enhance input runs through the same two-layer prompt moderation as POST /api/generations;
-//   from-image's `hint` runs through isPromptFlagged directly.
+//   from-image/from-video `hint` runs through isPromptFlagged directly.
 // - Quarantined/incomplete generations are never presigned (mirrors the delivery gate posture).
 
+import { createHash } from 'node:crypto';
 import { Router, Request, Response } from 'express';
 import { and, eq } from 'drizzle-orm';
 import { db } from '../db/client';
 import { generations, referenceUploads } from '../db/schema';
+import { redis } from '../redis/client';
 import { getGenerationPresignedUrl, getUploadPresignedUrl } from '../services/archivalService';
 import { isPromptFlagged, promptModerationMiddleware } from '../middleware/promptModeration';
 import {
@@ -27,6 +38,7 @@ import {
   PromptIntelligenceError,
   type EnhanceMode,
 } from '../services/promptIntelligenceService';
+import { continuationGuideFromVideo, VideoGuideError } from '../services/videoGuideService';
 import { SERVER_PRESETS, type PresetDef } from '../config/presets';
 
 export const promptRouter = Router();
@@ -192,6 +204,131 @@ promptRouter.post('/from-image', async (req: Request, res: Response) => {
       return;
     }
     console.error('[prompt/from-image] unexpected error:', err);
+    res.status(500).json({ error: 'Internal error' });
+  }
+});
+
+// ─── POST /api/prompt/from-video ──────────────────────────────────────────────
+const VIDEO_GUIDE_CACHE_TTL_SECONDS = 1800; // 30min — re-taps/remix-reopens are instant
+
+function videoGuideCacheKey(kind: 'gen' | 'upl', id: string, hint: string | undefined): string {
+  const hintHash = hint ? createHash('sha1').update(hint).digest('hex').slice(0, 12) : 'nohint';
+  return `videoguide:v1:${kind}:${id}:${hintHash}`;
+}
+
+promptRouter.post('/from-video', async (req: Request, res: Response) => {
+  const userId = req.user?.dbUserId;
+  if (!userId) {
+    res.status(401).json({ error: 'Unauthorized' });
+    return;
+  }
+
+  const generationId = req.body?.generation_id;
+  const uploadId = req.body?.upload_id;
+  const hasGeneration = typeof generationId === 'string' && generationId.length > 0;
+  const hasUpload = typeof uploadId === 'string' && uploadId.length > 0;
+  if (hasGeneration === hasUpload) {
+    res.status(400).json({
+      error: 'Provide exactly one of generation_id or upload_id',
+      code: 'INVALID_INPUT',
+    });
+    return;
+  }
+
+  const hint = req.body?.hint;
+  if (hint !== undefined) {
+    if (typeof hint !== 'string' || hint.length > MAX_HINT_LENGTH) {
+      res.status(400).json({ error: `hint must be a string of ${MAX_HINT_LENGTH} characters or fewer`, code: 'INVALID_INPUT' });
+      return;
+    }
+  }
+
+  try {
+    if (hint) {
+      const flagged = await isPromptFlagged(hint);
+      if (flagged) {
+        res.status(400).json({ error: 'This prompt violates our content policy', code: 'content_policy_violation' });
+        return;
+      }
+    }
+
+    let videoUrl: string;
+    let cacheKey: string;
+    if (hasGeneration) {
+      if (!UUID_RE.test(generationId)) {
+        res.status(404).json({ error: 'Generation not found', code: 'NOT_FOUND' });
+        return;
+      }
+      const rows = await db
+        .select()
+        .from(generations)
+        .where(and(eq(generations.id, generationId), eq(generations.user_id, userId)))
+        .limit(1);
+      const gen = rows[0];
+      if (!gen) {
+        res.status(404).json({ error: 'Generation not found', code: 'NOT_FOUND' });
+        return;
+      }
+      if (gen.status !== 'completed' || !gen.r2_key) {
+        res.status(409).json({ error: 'Generation is not a completed result', code: 'NOT_READY' });
+        return;
+      }
+      if (gen.media_type !== 'video') {
+        res.status(400).json({ error: 'from-video requires a video generation', code: 'NOT_A_VIDEO' });
+        return;
+      }
+      videoUrl = await getGenerationPresignedUrl(gen.r2_key);
+      cacheKey = videoGuideCacheKey('gen', generationId, hint || undefined);
+    } else {
+      if (!UUID_RE.test(uploadId)) {
+        res.status(404).json({ error: 'Upload not found', code: 'NOT_FOUND' });
+        return;
+      }
+      const rows = await db
+        .select()
+        .from(referenceUploads)
+        .where(and(eq(referenceUploads.id, uploadId), eq(referenceUploads.user_id, userId)))
+        .limit(1);
+      const upload = rows[0];
+      if (!upload) {
+        res.status(404).json({ error: 'Upload not found', code: 'NOT_FOUND' });
+        return;
+      }
+      if (!upload.mime_type.startsWith('video/')) {
+        res.status(400).json({ error: 'from-video requires a video upload', code: 'NOT_A_VIDEO' });
+        return;
+      }
+      videoUrl = await getUploadPresignedUrl(upload.r2_key);
+      cacheKey = videoGuideCacheKey('upl', uploadId, hint || undefined);
+    }
+
+    // Cache-aside: a re-tap (or a second device) never pays for the same read twice. Cache
+    // failures are non-fatal — a guide call is cheap enough to just redo.
+    try {
+      const cached = await redis.get(cacheKey);
+      if (cached) {
+        res.json({ prompt: cached, cached: true });
+        return;
+      }
+    } catch (cacheErr) {
+      console.warn('[prompt/from-video] cache read failed, continuing uncached:', cacheErr);
+    }
+
+    const guide = await continuationGuideFromVideo({ videoUrl, hint: hint || undefined });
+
+    try {
+      await redis.set(cacheKey, guide, 'EX', VIDEO_GUIDE_CACHE_TTL_SECONDS);
+    } catch (cacheErr) {
+      console.warn('[prompt/from-video] cache write failed:', cacheErr);
+    }
+
+    res.json({ prompt: guide });
+  } catch (err) {
+    if (err instanceof VideoGuideError) {
+      res.status(502).json({ error: 'Continuation guide is temporarily unavailable', code: 'llm_unavailable' });
+      return;
+    }
+    console.error('[prompt/from-video] unexpected error:', err);
     res.status(500).json({ error: 'Internal error' });
   }
 });
