@@ -38,6 +38,7 @@ jest.mock('../../db/client', () => ({
     update: jest.fn(),
     delete: jest.fn(),
     execute: jest.fn(),
+    batch: jest.fn(),
   },
 }));
 
@@ -78,6 +79,7 @@ const dbMock = db as unknown as {
   update: jest.Mock;
   delete: jest.Mock;
   execute: jest.Mock;
+  batch: jest.Mock;
 };
 
 // A thenable drizzle-style chain builder: every chaining method returns the SAME chain object
@@ -1803,6 +1805,56 @@ describe('DELETE /api/projects/:id/text/:textId', () => {
 // ─── POST /api/projects/:id/audio ──────────────────────────────────────────────
 
 describe('POST /api/projects/:id/audio', () => {
+  it('allows exactly one concurrent request to claim the tenth audio slot', async () => {
+    const clip = {
+      id: 'audio-10',
+      project_id: 'proj-1',
+      r2_key: 'projects/proj-1/audio/tenth.mp3',
+      source_type: 'upload',
+      start_offset_seconds: 0,
+      trim_start_seconds: 0,
+      trim_end_seconds: null,
+      sort_order: 9,
+      created_at: NOW,
+    };
+    dbMock.select
+      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }]))
+      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }]))
+      // The pre-20-02 route performs these separate count and ownership reads. They deliberately
+      // let both requests observe nine clips so RED proves the race exists.
+      .mockReturnValueOnce(makeChain([{ count: 9 }]))
+      .mockReturnValueOnce(makeChain([{ count: 9 }]))
+      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }]))
+      .mockReturnValueOnce(makeChain([{ id: 'proj-1' }]));
+    dbMock.execute
+      .mockResolvedValueOnce({ rows: [{ next_order: 9 }] })
+      .mockResolvedValueOnce({ rows: [{ next_order: 9 }] });
+    dbMock.insert
+      .mockReturnValueOnce(makeChain([clip]))
+      .mockReturnValueOnce(makeChain([{ ...clip, id: 'audio-11' }]));
+    dbMock.batch
+      .mockResolvedValueOnce([[{ id: 'proj-1' }], [clip]])
+      .mockResolvedValueOnce([[{ id: 'proj-1' }], []]);
+
+    const [first, second] = await Promise.all([
+      request(app)
+        .post('/api/projects/proj-1/audio')
+        .attach('file', Buffer.from('first-mp3'), { filename: 'first.mp3', contentType: 'audio/mpeg' }),
+      request(app)
+        .post('/api/projects/proj-1/audio')
+        .attach('file', Buffer.from('second-mp3'), { filename: 'second.mp3', contentType: 'audio/mpeg' }),
+    ]);
+
+    expect([first.status, second.status].sort()).toEqual([201, 400]);
+    const capacityResponse = [first, second].find((response) => response.status === 400);
+    expect(capacityResponse?.body).toEqual({
+      error: 'Project already has the maximum of 10 audio clips',
+    });
+    expect(dbMock.batch).toHaveBeenCalledTimes(2);
+    const deletes = r2Mock.send.mock.calls.filter((call) => call[0] instanceof DeleteObjectCommand);
+    expect(deletes).toHaveLength(1);
+  });
+
   it('upload path: writes to R2 via PutObjectCommand and inserts an audio clip row', async () => {
     dbMock.select
       .mockReturnValueOnce(makeChain([{ id: 'proj-1' }])) // owned
@@ -1927,6 +1979,9 @@ describe('POST /api/projects/:id/audio', () => {
       .send({ source_type: 'preset', preset_music_id: 'carefree' });
 
     expect(res.status).toBe(400);
+    expect(res.body).toEqual({
+      error: 'Project already has the maximum of 10 audio clips',
+    });
   });
 
   it('returns 404 when the project is not owned by the requester (IDOR)', async () => {
