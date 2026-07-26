@@ -594,6 +594,31 @@ describe('replicateWebhookRouter', () => {
       expect(refundCredits).not.toHaveBeenCalled();
     });
 
+    it('redispatches with params.enhanced_prompt (not the raw column) when the interceptor rewrote the prompt (2026-07-25)', async () => {
+      (validateWebhook as jest.Mock).mockResolvedValue(true);
+      (getGenerationByPredictionId as jest.Mock).mockResolvedValue({
+        ...autoModelGeneration,
+        id: 'gen-fallback-enh',
+        params: {
+          ...autoModelGeneration.params,
+          enhanced_prompt: 'ENHANCED: a fictional gorilla vlogs its day, selfie-cam, golden hour',
+        },
+      });
+      dispatchMock.mockResolvedValue({ providerPredictionId: 'pred_grok_fallback_enh' });
+
+      const res = await post({
+        id: 'pred_content_policy_enh',
+        status: 'failed',
+        error: 'ModelError: The input or output was flagged as sensitive ... (E005)',
+      });
+
+      expect(res.status).toBe(200);
+      expect(dispatchMock.mock.calls[0][0]).toMatchObject({
+        model: 'xai/grok-imagine-video-1.5',
+        prompt: 'ENHANCED: a fictional gorilla vlogs its day, selfie-cam, golden hour',
+      });
+    });
+
     it('does NOT fall back to Grok when the user explicitly picked the model — normal fail+refund path (regression guard)', async () => {
       (validateWebhook as jest.Mock).mockResolvedValue(true);
       (getGenerationByPredictionId as jest.Mock).mockResolvedValue({

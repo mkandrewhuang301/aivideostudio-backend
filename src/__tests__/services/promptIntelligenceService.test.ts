@@ -13,6 +13,9 @@ import {
   DEFAULT_ENHANCE_PROMPT_INSTRUCTION,
   DEFAULT_ENHANCE_SCRIPT_INSTRUCTION,
   DEFAULT_FROM_IMAGE_INSTRUCTION,
+  enhanceForDispatch,
+  DISPATCH_CONTINUATION_INSTRUCTION,
+  DISPATCH_I2V_INSTRUCTION,
 } from '../../services/promptIntelligenceService';
 
 const fetchMock = jest.fn();
@@ -108,5 +111,73 @@ describe('promptFromImage', () => {
     await expect(
       promptFromImage({ imageUrl: 'https://r2.example.com/signed.jpg' }),
     ).rejects.toBeInstanceOf(PromptIntelligenceError);
+  });
+});
+
+// ─── enhanceForDispatch (in-pipeline interceptor, 2026-07-25) ──────────────────
+// Fail-OPEN contract (the mirror image of the suggest endpoints): any LLM failure, empty
+// completion, or timeout must resolve null — never throw, never block a paid dispatch.
+describe('enhanceForDispatch', () => {
+  it('returns the trimmed completion on success', async () => {
+    fetchMock.mockResolvedValue(okCompletion('  Enhanced prompt.  '));
+    await expect(
+      enhanceForDispatch({ prompt: 'a dog', hasReferenceVideos: false, hasReferenceImages: false }),
+    ).resolves.toBe('Enhanced prompt.');
+  });
+
+  it('picks the continuation instruction when a reference video is present', async () => {
+    fetchMock.mockResolvedValue(okCompletion('x'));
+    await enhanceForDispatch({ prompt: 'keep going', hasReferenceVideos: true, hasReferenceImages: false });
+    expect(sentBody().messages[0]).toEqual({ role: 'system', content: DISPATCH_CONTINUATION_INSTRUCTION });
+  });
+
+  it('picks the i2v instruction when only reference images are present', async () => {
+    fetchMock.mockResolvedValue(okCompletion('x'));
+    await enhanceForDispatch({ prompt: 'make it move', hasReferenceVideos: false, hasReferenceImages: true });
+    expect(sentBody().messages[0]).toEqual({ role: 'system', content: DISPATCH_I2V_INSTRUCTION });
+  });
+
+  it('prefers continuation over i2v when both reference kinds are present', async () => {
+    fetchMock.mockResolvedValue(okCompletion('x'));
+    await enhanceForDispatch({ prompt: 'keep going', hasReferenceVideos: true, hasReferenceImages: true });
+    expect(sentBody().messages[0]).toEqual({ role: 'system', content: DISPATCH_CONTINUATION_INSTRUCTION });
+  });
+
+  it('falls back to the generic cinematic instruction for plain t2v', async () => {
+    fetchMock.mockResolvedValue(okCompletion('x'));
+    await enhanceForDispatch({ prompt: 'a dog', hasReferenceVideos: false, hasReferenceImages: false });
+    expect(sentBody().messages[0]).toEqual({ role: 'system', content: DEFAULT_ENHANCE_PROMPT_INSTRUCTION });
+  });
+
+  it('sends the interceptor request shape (gpt-5-mini, minimal effort, capped tokens)', async () => {
+    fetchMock.mockResolvedValue(okCompletion('x'));
+    await enhanceForDispatch({ prompt: 'a dog', hasReferenceVideos: false, hasReferenceImages: false });
+    const body = sentBody() as unknown as Record<string, unknown>;
+    expect(body.model).toBe('gpt-5-mini');
+    expect(body.reasoning_effort).toBe('minimal');
+    expect(body.max_completion_tokens).toBeGreaterThan(0);
+    expect(body.temperature).toBeUndefined();
+    expect(body.max_tokens).toBeUndefined();
+  });
+
+  it('resolves null (never throws) on non-OK response', async () => {
+    fetchMock.mockResolvedValue({ ok: false, status: 500 });
+    await expect(
+      enhanceForDispatch({ prompt: 'a dog', hasReferenceVideos: false, hasReferenceImages: false }),
+    ).resolves.toBeNull();
+  });
+
+  it('resolves null (never throws) on network error', async () => {
+    fetchMock.mockRejectedValue(new Error('socket hangup'));
+    await expect(
+      enhanceForDispatch({ prompt: 'a dog', hasReferenceVideos: false, hasReferenceImages: false }),
+    ).resolves.toBeNull();
+  });
+
+  it('resolves null on empty completion', async () => {
+    fetchMock.mockResolvedValue(okCompletion('   '));
+    await expect(
+      enhanceForDispatch({ prompt: 'a dog', hasReferenceVideos: false, hasReferenceImages: false }),
+    ).resolves.toBeNull();
   });
 });
