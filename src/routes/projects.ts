@@ -10,7 +10,7 @@ import { randomUUID } from 'crypto';
 import { writeFile, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { PutObjectCommand, CopyObjectCommand } from '@aws-sdk/client-s3';
+import { PutObjectCommand, CopyObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
 import { r2, R2_BUCKET } from '../storage/r2';
 import { probeDurationSeconds, probeVideoMeta } from '../services/mediaProbe';
 import { db } from '../db/client';
@@ -46,6 +46,7 @@ import {
   updateAudioClip,
   deleteAudioClip,
   MAX_AUDIO_CLIPS_PER_PROJECT,
+  ProjectAudioCapacityError,
   addCaptionCue,
   updateCaptionCue,
   deleteCaptionCue,
@@ -1082,6 +1083,7 @@ projectsRouter.post('/:id/audio', audioUpload.single('file'), async (req: Reques
     return;
   }
   const projectId = req.params.id as string;
+  let createdR2Key: string | undefined;
   try {
     const [ownedProject] = await db
       .select({ id: projects.id })
@@ -1089,15 +1091,6 @@ projectsRouter.post('/:id/audio', audioUpload.single('file'), async (req: Reques
       .where(and(eq(projects.id, projectId), eq(projects.user_id, req.user.dbUserId)));
     if (!ownedProject) {
       res.status(404).json({ error: 'Project not found' });
-      return;
-    }
-
-    const [{ count }] = await db
-      .select({ count: sql<number>`count(*)` })
-      .from(projectAudioClips)
-      .where(and(eq(projectAudioClips.project_id, projectId), isNull(projectAudioClips.deleted_at)));
-    if (Number(count) >= MAX_AUDIO_CLIPS_PER_PROJECT) {
-      res.status(400).json({ error: `Project already has the maximum of ${MAX_AUDIO_CLIPS_PER_PROJECT} audio clips` });
       return;
     }
 
@@ -1127,6 +1120,7 @@ projectsRouter.post('/:id/audio', audioUpload.single('file'), async (req: Reques
           ContentType: req.file.mimetype,
         }),
       );
+      createdR2Key = r2Key;
       sourceType = 'upload';
 
       const tempPath = path.join(tmpdir(), `audio-probe-${randomUUID()}.${ext}`);
@@ -1150,6 +1144,7 @@ projectsRouter.post('/:id/audio', audioUpload.single('file'), async (req: Reques
           Key: r2Key,
         }),
       );
+      createdR2Key = r2Key;
       sourceType = 'preset';
 
       const presignedUrl = await getUploadPresignedUrl(r2Key);
@@ -1168,11 +1163,25 @@ projectsRouter.post('/:id/audio', audioUpload.single('file'), async (req: Reques
       originalDurationSeconds,
     });
     if (!audioClip) {
+      if (createdR2Key) {
+        await r2.send(new DeleteObjectCommand({ Bucket: R2_BUCKET, Key: createdR2Key })).catch(() => {});
+      }
       res.status(404).json({ error: 'Project not found' });
       return;
     }
     res.status(201).json({ audio_clip: audioClip });
   } catch (err) {
+    if (createdR2Key) {
+      try {
+        await r2.send(new DeleteObjectCommand({ Bucket: R2_BUCKET, Key: createdR2Key }));
+      } catch (cleanupError) {
+        console.error('[projects] Failed to compensate audio object after DB failure:', cleanupError);
+      }
+    }
+    if (err instanceof ProjectAudioCapacityError) {
+      res.status(400).json({ error: err.message });
+      return;
+    }
     console.error('[projects] Error adding audio clip:', err);
     res.status(500).json({ error: 'Failed to add audio clip' });
   }

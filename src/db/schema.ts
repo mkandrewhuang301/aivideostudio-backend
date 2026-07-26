@@ -59,6 +59,14 @@ export const audioSeparationStatusEnum = pgEnum('audio_separation_status', [
   'refunded',
 ]);
 
+export const voiceoverGenerationStatusEnum = pgEnum('voiceover_generation_status', [
+  'pending',
+  'processing',
+  'succeeded',
+  'failed',
+  'refunded',
+]);
+
 // ─── users ────────────────────────────────────────────────────────────────────
 // Per D-12: id (UUID), firebase_uid (unique), email, credits_balance (integer default 0),
 //           created_at, updated_at
@@ -418,6 +426,65 @@ export const projectSoundtrackGenerations = pgTable(
   }),
 );
 
+// Standalone AI Voiceover generations. Persisted independently from timeline audio clips so a
+// generated narration can be previewed in the library before insertion into a project.
+export const projectVoiceoverGenerations = pgTable(
+  'project_voiceover_generations',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    user_id: uuid('user_id').notNull().references(() => users.id),
+    project_id: uuid('project_id').notNull().references(() => projects.id),
+    idempotency_key: text('idempotency_key').notNull(),
+    status: voiceoverGenerationStatusEnum('status').notNull().default('pending'),
+    // Client-submitted voice id; provider/model resolved server-side.
+    voice_id: text('voice_id').notNull(),
+    provider: text('provider').notNull(),
+    model: text('model').notNull(),
+    speaker: text('speaker'),
+    // Full script stored for retry/audit; bounded 1..5000 characters.
+    script: text('script').notNull(),
+    // Server-authoritative pricing snapshot so later quote changes don't retroactively bill.
+    pricing_version: text('pricing_version').notNull(),
+    estimated_provider_cents: doublePrecision('estimated_provider_cents').notNull(),
+    cost_credits: integer('cost_credits').notNull(),
+    // Provider checkpoint fields.
+    provider_request_id: text('provider_request_id'),
+    raw_r2_key: text('raw_r2_key'),
+    // Final deliverable.
+    final_r2_key: text('final_r2_key'),
+    mime_type: text('mime_type'),
+    duration_seconds: doublePrecision('duration_seconds'),
+    // Failure/refund audit.
+    failure_code: text('failure_code'),
+    failure_reason: text('failure_reason'),
+    retry_count: integer('retry_count').notNull().default(0),
+    // Link to the timeline audio clip once inserted into a project.
+    attached_audio_clip_id: uuid('attached_audio_clip_id').references(() => projectAudioClips.id),
+    // Short-lived processing lease so a single worker owns the row.
+    processing_token: text('processing_token'),
+    processing_expires_at: timestamp('processing_expires_at', { withTimezone: true }),
+    created_at: timestamp('created_at', { withTimezone: true }).notNull().default(sql`now()`),
+    started_at: timestamp('started_at', { withTimezone: true }),
+    completed_at: timestamp('completed_at', { withTimezone: true }),
+    failed_at: timestamp('failed_at', { withTimezone: true }),
+  },
+  (table) => ({
+    userIdempotencyIdx: uniqueIndex('voiceovers_user_idempotency_unique_idx').on(
+      table.user_id,
+      table.idempotency_key,
+    ),
+    projectCreatedIdx: index('voiceovers_project_created_idx').on(
+      table.project_id,
+      desc(table.created_at),
+    ),
+    statusCreatedIdx: index('voiceovers_status_created_idx').on(table.status, table.created_at),
+    userCreatedIdx: index('voiceovers_user_created_idx').on(
+      table.user_id,
+      desc(table.created_at),
+    ),
+  }),
+);
+
 // One inexpensive video-analysis call returns three editable directions. The result is durable
 // for the exact project fingerprint, so cycling suggestions never triggers another provider call.
 export const projectMusicSuggestionCache = pgTable(
@@ -597,6 +664,9 @@ export type NewProjectSoundtrackGeneration = typeof projectSoundtrackGenerations
 export type SoundtrackGenerationStatus = (typeof soundtrackGenerationStatusEnum.enumValues)[number];
 export type ProjectAudioClip = typeof projectAudioClips.$inferSelect;
 export type NewProjectAudioClip = typeof projectAudioClips.$inferInsert;
+export type ProjectVoiceoverGeneration = typeof projectVoiceoverGenerations.$inferSelect;
+export type NewProjectVoiceoverGeneration = typeof projectVoiceoverGenerations.$inferInsert;
+export type VoiceoverGenerationStatus = (typeof voiceoverGenerationStatusEnum.enumValues)[number];
 export type ProjectCaptionCue = typeof projectCaptionCues.$inferSelect;
 export type NewProjectCaptionCue = typeof projectCaptionCues.$inferInsert;
 export type ProjectCaptionWord = typeof projectCaptionWords.$inferSelect;
