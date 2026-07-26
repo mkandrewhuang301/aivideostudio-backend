@@ -29,6 +29,7 @@ import { reportsRouter } from './routes/reports';
 import { uploadsRouter } from './routes/uploads';
 import { projectsRouter } from './routes/projects';
 import { aiMusicRouter } from './routes/aiMusic';
+import { audioSeparationRouter } from './routes/audioSeparation';
 import { privacyRouter } from './routes/privacy';
 import { termsRouter } from './routes/terms';
 import { ratesRouter } from './routes/rates';
@@ -115,6 +116,7 @@ app.use('/api/reports', reportsRouter);
 app.use('/api/uploads', uploadsRouter);
 app.use('/api/projects', projectsRouter);
 app.use('/api', aiMusicRouter);
+app.use('/api', audioSeparationRouter);
 app.use('/api/prompt', promptRouter);
 
 app.use('/privacy', privacyRouter);
