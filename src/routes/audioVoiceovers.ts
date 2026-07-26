@@ -52,7 +52,7 @@ audioVoiceoversRouter.post('/projects/:projectId/voiceovers', async (req, res) =
     });
     if (created.created) {
       try {
-        await voiceoverGenerationQueue.add('generate', { voiceoverId: created.row.id }, { jobId: created.row.id });
+        await voiceoverGenerationQueue.add('generate', { voiceoverId: created.row.id }, { jobId: `voiceover:${created.row.id}` });
       } catch {
         await refundVoiceover(created.row.id, 'queue_unavailable', 'Voiceover generation could not start');
         res.status(503).json({ error: 'Voiceover generation is temporarily unavailable' }); return;

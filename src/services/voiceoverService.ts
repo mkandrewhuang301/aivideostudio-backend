@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { and, desc, eq, sql } from 'drizzle-orm';
+import { and, desc, eq, or, sql } from 'drizzle-orm';
 import { db } from '../db/client';
 import {
   projectVoiceoverGenerations,
@@ -10,6 +10,8 @@ import { getAudioVoiceById } from '../config/audioVoices';
 import { quoteVoiceover, VoiceoverQuoteError } from '../config/voiceoverPricing';
 import { isPromptFlagged } from '../middleware/promptModeration';
 import { getUploadPresignedUrl } from './archivalService';
+import { GetObjectCommand } from '@aws-sdk/client-s3';
+import { r2, R2_BUCKET } from '../storage/r2';
 
 export class VoiceoverNotFoundError extends Error {}
 export class VoiceoverValidationError extends Error {}
@@ -165,7 +167,8 @@ export async function refundVoiceover(id: string, code: string, reason: string):
     WITH transitioned AS (
       UPDATE project_voiceover_generations
       SET status = 'refunded'::voiceover_generation_status,
-          failure_code = ${code}, failure_reason = ${reason}, failed_at = now()
+          failure_code = ${code}, failure_reason = ${reason}, failed_at = now(),
+          processing_token = null, processing_expires_at = null
       WHERE id = ${id}::uuid AND status IN ('pending', 'processing', 'failed')
       RETURNING user_id, cost_credits
     ), restored AS (
@@ -179,6 +182,110 @@ export async function refundVoiceover(id: string, code: string, reason: string):
     RETURNING user_id
   `);
   return Boolean(result.rows?.length);
+}
+
+export async function getVoiceoverGenerationRow(id: string): Promise<ProjectVoiceoverGeneration | null> {
+  const [row] = await db.select().from(projectVoiceoverGenerations).where(eq(projectVoiceoverGenerations.id, id));
+  return row ?? null;
+}
+
+/**
+ * Compare-and-set processing lease. Only `pending` or an expired `processing` lease may transition
+ * to the supplied token. Returns the row when the lease is acquired; null otherwise.
+ */
+export async function markVoiceoverProcessing(
+  id: string,
+  token: string,
+  expiresAt: Date,
+): Promise<ProjectVoiceoverGeneration | null> {
+  const [row] = await db.update(projectVoiceoverGenerations)
+    .set({
+      status: 'processing',
+      processing_token: token,
+      processing_expires_at: expiresAt,
+      started_at: new Date(),
+    })
+    .where(and(
+      eq(projectVoiceoverGenerations.id, id),
+      or(
+        eq(projectVoiceoverGenerations.status, 'pending'),
+        and(
+          eq(projectVoiceoverGenerations.status, 'processing'),
+          sql`${projectVoiceoverGenerations.processing_expires_at} < now()`,
+        ),
+      ),
+    ))
+    .returning();
+  return row ?? null;
+}
+
+export async function saveVoiceoverRaw(
+  id: string,
+  rawR2Key: string,
+  providerRequestId?: string,
+): Promise<void> {
+  await db.update(projectVoiceoverGenerations).set({
+    raw_r2_key: rawR2Key,
+    provider_request_id: providerRequestId ?? null,
+  }).where(eq(projectVoiceoverGenerations.id, id));
+}
+
+/**
+ * On a retryable failure, atomically clear the current lease and return the row to pending so the
+ * next BullMQ attempt can reacquire it. Increments retry_count so the reaper can eventually give up.
+ */
+export async function clearVoiceoverLease(id: string, token: string): Promise<void> {
+  await db.update(projectVoiceoverGenerations)
+    .set({
+      status: 'pending',
+      processing_token: null,
+      processing_expires_at: null,
+      retry_count: sql`${projectVoiceoverGenerations.retry_count} + 1`,
+    })
+    .where(and(
+      eq(projectVoiceoverGenerations.id, id),
+      eq(projectVoiceoverGenerations.processing_token, token),
+    ));
+}
+
+/**
+ * Completes a voiceover only if the lease token still matches. Returns true when the row was
+ * updated, false if the lease was stolen or the row left processing.
+ */
+export async function completeVoiceover(input: {
+  id: string;
+  token: string;
+  rawR2Key: string;
+  finalR2Key: string;
+  providerRequestId?: string;
+  durationSeconds: number;
+  mimeType: string;
+}): Promise<boolean> {
+  const result = await db.update(projectVoiceoverGenerations)
+    .set({
+      status: 'succeeded',
+      raw_r2_key: input.rawR2Key,
+      final_r2_key: input.finalR2Key,
+      provider_request_id: input.providerRequestId ?? null,
+      duration_seconds: input.durationSeconds,
+      mime_type: input.mimeType,
+      completed_at: new Date(),
+      processing_token: null,
+      processing_expires_at: null,
+    })
+    .where(and(
+      eq(projectVoiceoverGenerations.id, input.id),
+      eq(projectVoiceoverGenerations.status, 'processing'),
+      eq(projectVoiceoverGenerations.processing_token, input.token),
+    ))
+    .returning({ id: projectVoiceoverGenerations.id });
+  return Boolean(result.length);
+}
+
+export async function readVoiceoverRaw(key: string): Promise<Buffer> {
+  const object = await r2.send(new GetObjectCommand({ Bucket: R2_BUCKET, Key: key }));
+  if (!object.Body) throw new Error('Voiceover raw source is unavailable');
+  return Buffer.from(await object.Body.transformToByteArray());
 }
 
 async function publicVoiceover(row: ProjectVoiceoverGeneration): Promise<Record<string, unknown>> {

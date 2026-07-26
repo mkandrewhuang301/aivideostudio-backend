@@ -14,6 +14,8 @@ import { scheduleReaper } from './queue/reaperWorker';
 import { scheduleUploadReaper } from './queue/uploadReaperWorker';
 import { scheduleYearlyGrant } from './queue/yearlyGrantWorker';
 import { scheduleSoundtrackReaper } from './queue/soundtrackReaperWorker';
+import './queue/voiceoverGenerationWorker';
+import { scheduleVoiceoverReaper } from './queue/voiceoverGenerationWorker';
 import './queue/hiveScanWorker';
 import './queue/ncmecReportWorker';
 import './queue/openaiGenerationWorker';
@@ -52,6 +54,7 @@ scheduleReaper().catch((err) => console.error('[server] Failed to schedule reape
 scheduleUploadReaper().catch((err) => console.error('[server] Failed to schedule upload reaper:', err));
 scheduleYearlyGrant().catch((err) => console.error('[server] Failed to schedule yearly grant:', err));
 scheduleSoundtrackReaper().catch((err) => console.error('[server] Failed to schedule soundtrack reaper:', err));
+scheduleVoiceoverReaper().catch((err) => console.error('[server] Failed to schedule voiceover reaper:', err));
 
 // Policy v2: this switch can only activate output scanning for persisted real-face paths.
 console.log(`[server] Hive real-face-path output scanning: ${config.hiveScanRealFacePaths ? 'ENABLED' : 'DISABLED'}`);
