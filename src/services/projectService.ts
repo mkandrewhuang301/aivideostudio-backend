@@ -1526,7 +1526,10 @@ export async function buildComposeSnapshot(projectId: string, userId: string): P
     };
   });
 
-  const audioClips = audioRows.map((a) => {
+  // Phase 20.1: DAW mix model = sum of ENABLED rows at gain. Exclude disabled rows (muted
+  // originals + inactive stems) from export — enabling all of {original, target, residual} would
+  // double-count, since stems are a partition of the original, not an addition to it.
+  const audioClips = audioRows.filter((a) => a.enabled).map((a) => {
     if (a.trim_end_seconds == null) {
       throw new ExportValidationError(
         `Audio clip ${a.id} has no trim_end_seconds set — set trim points on every audio clip before exporting`,
@@ -1537,6 +1540,7 @@ export async function buildComposeSnapshot(projectId: string, userId: string): P
       startOffsetSeconds: a.start_offset_seconds,
       trimStartSeconds: a.trim_start_seconds,
       trimEndSeconds: a.trim_end_seconds,
+      gain: a.gain,
     };
   });
 

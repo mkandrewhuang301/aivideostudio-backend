@@ -156,8 +156,11 @@ export function buildComposeArgs(input: BuildComposeArgsInput): string[] {
     args.push('-i', audioPaths[j]);
     const inputIndex = audioInputBase + j;
     const delayMs = Math.max(0, Math.round(audioClip.startOffsetSeconds * 1000));
+    // Phase 20.1: per-clip DAW gain (defaults to 1 = original level) — lets a disabled-then-
+    // re-enabled stem mix at < full volume; muted originals are already excluded upstream by the
+    // enabled filter, so this never double-counts.
     filterParts.push(
-      `[${inputIndex}:a]atrim=start=${audioClip.trimStartSeconds}:end=${audioClip.trimEndSeconds},asetpts=PTS-STARTPTS,adelay=${delayMs}:all=1[aud${j}]`,
+      `[${inputIndex}:a]atrim=start=${audioClip.trimStartSeconds}:end=${audioClip.trimEndSeconds},asetpts=PTS-STARTPTS,adelay=${delayMs}:all=1,volume=${audioClip.gain ?? 1}[aud${j}]`,
     );
   });
 

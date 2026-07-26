@@ -72,6 +72,8 @@ export interface ComposeAudioSpec {
   startOffsetSeconds: number;
   trimStartSeconds: number;
   trimEndSeconds: number;
+  /** Phase 20.1 DAW mix gain (0..2, default 1) — applied as a volume filter at export time. */
+  gain?: number;
 }
 
 export interface ComposeCaptionCue {
