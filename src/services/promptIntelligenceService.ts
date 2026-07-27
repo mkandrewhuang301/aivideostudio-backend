@@ -186,9 +186,10 @@ export const DISPATCH_CONTINUATION_INSTRUCTION =
   'make it concrete: subject action, camera movement, lighting and mood, ambience. Follow the ' +
   'user\'s lead on how the referenced video is used (seamless continuation, next shot, source ' +
   'material) — never impose one and never reverse their choice. You CANNOT see the referenced ' +
-  'video, so never invent specifics of its content (clothing, setting, objects, sounds) — ' +
-  'refer to its subject and scene generically ("the same subject", "the established setting"); ' +
-  'concrete detail belongs only to what the user actually asked for. Keep every [token] ' +
+  'video, so never invent specifics of its content. But every concrete detail the user ' +
+  'themselves wrote (subject appearance, clothing, setting, props, mood) is a continuity ' +
+  'anchor — carry it through the rewrite, and never compress the user\'s specifics into ' +
+  'generic references like "the same subject" or "the established setting". Keep every [token] ' +
   'exactly as written, and never introduce new square-bracket tokens. One paragraph. Output ' +
   'only the rewritten prompt, no preamble.';
 

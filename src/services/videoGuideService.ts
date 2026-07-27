@@ -40,11 +40,14 @@ const BASE_INSTRUCTION =
   'the clip, especially its FINAL moments. Write ONE prompt for an AI video generation model ' +
   'that creates the next shot after this clip: a natural CUT to fresh framing — never ask for ' +
   'a seamless resume from the final frame (the generation model glitches visibly at the seam). ' +
-  'Carry the story forward: keep the same subject and world grounded in what you actually see ' +
-  'and hear at the end of the clip — the subject\'s identity, the environment, the lighting ' +
-  'style, the audio ambience — but pick framing and camera that suit the NEW action. If the ' +
-  'clip has no clear subject, describe the scene and camera instead. One paragraph. Output ' +
-  'only the prompt text, no preamble or explanation.';
+  'Carry the story forward: keep the subject and world grounded in what you actually see ' +
+  'and hear at the end of the clip — describe the subject\'s visible appearance (build, ' +
+  'outfit, colors), the environment, the lighting style, the audio ambience — but pick ' +
+  'framing and camera that suit the NEW action. NEVER name a recognizable character, ' +
+  'celebrity, or real person — describe appearance generically instead ("the red-capped ' +
+  'plumber", never the character\'s name). If the clip has no clear subject, describe the ' +
+  'scene and camera instead. Keep it tight: one short paragraph, under ~60 words — concrete ' +
+  'anchors only, no filler. Output only the prompt text, no preamble or explanation.';
 
 const HINT_INSTRUCTION_SUFFIX =
   ' The user\'s intended direction for the next shot is given after the clip — realize THEIR ' +

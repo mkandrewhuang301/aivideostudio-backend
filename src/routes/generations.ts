@@ -881,12 +881,13 @@ generationsRouter.post('/', promptModerationMiddleware, presetResolver, formatRe
       );
     }
 
-    // LLM prompt interceptor (2026-07-25): freeform video ONLY — presets/formats carry their own
-    // prompt machinery (preset prompt_intelligence, script LLMs) and other media types take
-    // different prompt styles. Rewrites the raw prompt for the provider — continuation-aware when
-    // a reference video is present ("continue [video1] from its final moment: no cut/transition,
-    // preserve subject position/motion/camera/lighting/audio ambience"). FAIL-OPEN: any LLM
-    // failure or the 10s timeout leaves enhancedPrompt undefined and the raw prompt dispatches.
+    // LLM prompt interceptor (2026-07-25; shape-neutral flip 2026-07-27): freeform video ONLY —
+    // presets/formats carry their own prompt machinery (preset prompt_intelligence, script LLMs)
+    // and other media types take different prompt styles. Rewrites the raw prompt for the
+    // provider, following the user's lead on how a reference video is used (continuation, next
+    // shot, or anything else — never imposed or reversed) and preserving their concrete detail
+    // as continuity anchors. FAIL-OPEN: any LLM failure or the 10s timeout leaves
+    // enhancedPrompt undefined and the raw prompt dispatches.
     if (resolved.mediaType === 'video' && !req._preset && resolved.prompt) {
       const enhanced = await enhanceForDispatch({
         prompt: resolved.prompt,

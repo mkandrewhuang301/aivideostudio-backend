@@ -63,7 +63,8 @@ describe('continuationGuideFromVideo', () => {
     expect(parts[0]).toEqual({
       inlineData: { data: Buffer.from('DOWNSCALED').toString('base64'), mimeType: 'video/mp4' },
     });
-    expect(String(parts[1].text)).toContain('continues this clip directly from its final frame');
+    expect(String(parts[1].text)).toContain('creates the next shot after this clip');
+    expect(String(parts[1].text)).toContain('NEVER name a recognizable character');
     expect(String(parts[1].text)).not.toContain('User direction:');
   });
 
