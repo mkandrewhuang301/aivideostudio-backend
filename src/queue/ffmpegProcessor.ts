@@ -110,6 +110,29 @@ export interface BuildComposeArgsInput {
 }
 
 /**
+ * How far the project's audio runs past its last video frame, in seconds — 0 whenever the video is
+ * the longest thing in the project (the common case).
+ *
+ * Mirrors iOS `EditorState.videoEndSeconds` / `audioEndSeconds` exactly, and must keep mirroring
+ * them: the editor's preview and this export are independent renderers of the same project, and
+ * the 20.1 mix bug was preview-only precisely because of that independence. Deliberately counts
+ * every audio clip, including muted ones, for the same reason the client does — muting must not
+ * change the project's length.
+ */
+export function audioTailSeconds(spec: ComposeSpec): number {
+  const videoEnd = spec.clips.reduce(
+    (sum, clip) => sum + Math.max(0, clip.trimEndSeconds - clip.trimStartSeconds),
+    0,
+  );
+  const audioEnd = spec.audioClips.reduce(
+    (latest, audio) =>
+      Math.max(latest, audio.startOffsetSeconds + Math.max(0, audio.trimEndSeconds - audio.trimStartSeconds)),
+    0,
+  );
+  return Math.max(0, audioEnd - videoEnd);
+}
+
+/**
  * Pure function: assembles the FULL ffmpeg argv array for the compose op (RESEARCH.md Pattern 1/2)
  * — never a shell string (T-13-11). Concatenates mixed-resolution/mixed-media clips via a single
  * filter_complex scale+pad+concat graph (NEVER the `-f concat` demuxer — Pitfall 2), chains a
@@ -183,13 +206,31 @@ export function buildComposeArgs(input: BuildComposeArgsInput): string[] {
   }
 
   // Mix independently-timed audio clips over the concatenated clip audio.
+  //
+  // 2026-07-27 (~/.planning/notes/2026-07-27-audio-outlives-video.md): `duration=longest`, not
+  // `duration=first`. `first` is `[aconcat]` — the CLIPS' own audio — so any audio clip outliving
+  // the video was silently truncated to the video's length, which is exactly the compression the
+  // rule forbids. When nothing outlives the video the two are equivalent ([aconcat] IS the
+  // longest), so this only changes the case it's meant to.
   let audioLabel = 'aconcat';
   if (spec.audioClips.length > 0) {
     const amixInputs = ['[aconcat]', ...spec.audioClips.map((_, j) => `[aud${j}]`)].join('');
     filterParts.push(
-      `${amixInputs}amix=inputs=${spec.audioClips.length + 1}:duration=first:dropout_transition=0[amixed]`,
+      `${amixInputs}amix=inputs=${spec.audioClips.length + 1}:duration=longest:dropout_transition=0[amixed]`,
     );
     audioLabel = 'amixed';
+  }
+
+  // Pad the VIDEO with black to match, or the mix above would run past the last frame and ffmpeg
+  // would end the file at the video's length anyway — preview and export have to agree that the
+  // project got longer. Applied AFTER the ass burns so overlay/caption timings are untouched:
+  // they're timed against the real video and have nothing to say about the tail.
+  const tailSeconds = audioTailSeconds(spec);
+  if (tailSeconds > 0) {
+    filterParts.push(
+      `[${videoLabel}]tpad=stop_mode=add:stop_duration=${tailSeconds.toFixed(3)}:color=black[vpad]`,
+    );
+    videoLabel = 'vpad';
   }
 
   // The ENTIRE filter graph is one argv element — never interpolated into a shell command (T-13-11).

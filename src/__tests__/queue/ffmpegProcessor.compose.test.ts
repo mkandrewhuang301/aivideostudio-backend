@@ -309,4 +309,95 @@ describe('buildComposeArgs', () => {
     expect(args.slice(-5)).toEqual(['-c:v', 'libx264', '-c:a', 'aac', '/tmp/final.mp4']);
     expect(args).toContain('-map');
   });
+
+  // 2026-07-27 (~/.planning/notes/2026-07-27-audio-outlives-video.md): audio is never shortened to
+  // fit the video. When it outlives the video the EXPORT has to grow too — the preview already
+  // does — so the mix runs to the longest input and the video is padded with black to match.
+  describe('audio outliving the video', () => {
+    // baseSpec's two clips are 4s + 5s = 9s of video.
+    const audioPastTheEnd = {
+      r2Key: 'projects/p1/audio/long.m4a',
+      startOffsetSeconds: 6,
+      trimStartSeconds: 0,
+      trimEndSeconds: 8, // ends at 14s — 5s past the last video frame
+    };
+
+    it('pads the video with black for exactly the overhang and mixes to the longest input', () => {
+      const args = buildComposeArgs({
+        spec: baseSpec({ audioClips: [audioPastTheEnd] }),
+        clipPaths: ['/tmp/clip0.mp4', '/tmp/clip1.mp4'],
+        audioPaths: ['/tmp/audio0.m4a'],
+        assPath: null,
+        textOverlayAssPath: null,
+        fontsDir: '/app/assets/fonts',
+        outPath: '/tmp/out.mp4',
+      });
+      const graph = filterComplexOf(args);
+
+      expect(graph).toContain('tpad=stop_mode=add:stop_duration=5.000:color=black');
+      expect(graph).toContain('duration=longest');
+      // The padded stream, not the raw concat, must be what gets mapped to the output.
+      expect(graph).toContain('[vpad]');
+      expect(args).toContain('[vpad]');
+    });
+
+    it('measures the overhang from the LATEST-ending clip, not the last one in the array', () => {
+      const args = buildComposeArgs({
+        spec: baseSpec({
+          audioClips: [
+            audioPastTheEnd, // ends at 14s
+            { r2Key: 'projects/p1/audio/short.m4a', startOffsetSeconds: 0, trimStartSeconds: 0, trimEndSeconds: 2 },
+          ],
+        }),
+        clipPaths: ['/tmp/clip0.mp4', '/tmp/clip1.mp4'],
+        audioPaths: ['/tmp/audio0.m4a', '/tmp/audio1.m4a'],
+        assPath: null,
+        textOverlayAssPath: null,
+        fontsDir: '/app/assets/fonts',
+        outPath: '/tmp/out.mp4',
+      });
+
+      expect(filterComplexOf(args)).toContain('stop_duration=5.000');
+    });
+
+    it('adds no padding at all when the video is the longest thing in the project', () => {
+      const args = buildComposeArgs({
+        spec: baseSpec({
+          audioClips: [
+            { r2Key: 'projects/p1/audio/x.m4a', startOffsetSeconds: 0, trimStartSeconds: 0, trimEndSeconds: 3 },
+          ],
+        }),
+        clipPaths: ['/tmp/clip0.mp4', '/tmp/clip1.mp4'],
+        audioPaths: ['/tmp/audio0.m4a'],
+        assPath: null,
+        textOverlayAssPath: null,
+        fontsDir: '/app/assets/fonts',
+        outPath: '/tmp/out.mp4',
+      });
+      const graph = filterComplexOf(args);
+
+      expect(graph).not.toContain('tpad');
+      expect(graph).not.toContain('[vpad]');
+    });
+
+    it('pads past burned captions and text overlays rather than retiming them', () => {
+      const args = buildComposeArgs({
+        spec: baseSpec({
+          audioClips: [audioPastTheEnd],
+          textOverlays: [{ text: 'hi', xNorm: 0.5, yNorm: 0.5, startSeconds: 0, endSeconds: 2 }],
+          captionCues: [{ startSeconds: 0, endSeconds: 2, words: [{ text: 'hi', startSeconds: 0, endSeconds: 2 }] }],
+        }),
+        clipPaths: ['/tmp/clip0.mp4', '/tmp/clip1.mp4'],
+        audioPaths: ['/tmp/audio0.m4a'],
+        assPath: '/tmp/captions.ass',
+        textOverlayAssPath: '/tmp/text.ass',
+        fontsDir: '/app/assets/fonts',
+        outPath: '/tmp/out.mp4',
+      });
+      const graph = filterComplexOf(args);
+
+      // The tpad must consume the FINAL burned label, so both ass passes land on real video.
+      expect(graph).toContain('[vout]tpad=');
+    });
+  });
 });
