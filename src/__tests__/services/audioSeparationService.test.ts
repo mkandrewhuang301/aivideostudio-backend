@@ -15,6 +15,7 @@ jest.mock('../../db/client', () => ({
     execute: jest.fn(),
     insert: jest.fn(),
     select: jest.fn(),
+    batch: jest.fn(),
   },
 }));
 jest.mock('../../redis/client', () => ({ redis: { incr: jest.fn(), expire: jest.fn() } }));
@@ -336,50 +337,39 @@ describe('attachSeparationStems', () => {
     duration_seconds: 10,
   } as unknown as AudioSeparationJob;
 
+  // WP1 Task 1.2: attachSeparationStems now batches all five steps through a single db.batch([...])
+  // call (neon-http has no interactive db.transaction — see the function's own doc comment) instead
+  // of sequential db.execute/db.insert calls, so the mock wires db.execute/db.insert to build query
+  // descriptors (asserted on for shape) and db.batch to supply the five positional results.
   function wireHappyPath(priorVolume: number) {
-    const callOrder: string[] = [];
+    (mockDb.execute as jest.Mock).mockImplementation((query: unknown) => ({ __sql: extractSql(query) }));
 
-    (mockDb.execute as jest.Mock).mockImplementation((query: unknown) => {
-      const text = extractSql(query);
-      if (text.includes('source_prior_volume = (SELECT')) {
-        callOrder.push('capture');
-        return Promise.resolve({ rows: [{ source_prior_volume: priorVolume }] });
-      }
-      if (text.includes('SET volume = 0')) {
-        callOrder.push('mute');
-        return Promise.resolve({ rows: [{ id: 'clip-1' }] });
-      }
-      callOrder.push('other');
-      return Promise.resolve({ rows: [] });
-    });
-
-    const residualValues = jest.fn().mockReturnValue({
-      returning: jest.fn().mockImplementation(() => {
-        callOrder.push('insert-residual');
-        return Promise.resolve([{ id: 'residual-clip-id' }]);
-      }),
-    });
-    const targetValues = jest.fn().mockReturnValue({
-      returning: jest.fn().mockImplementation(() => {
-        callOrder.push('insert-target');
-        return Promise.resolve([{ id: 'target-clip-id' }]);
-      }),
-    });
+    const residualValues = jest.fn().mockReturnValue({ returning: jest.fn().mockReturnValue({ __insert: 'residual' }) });
+    const targetValues = jest.fn().mockReturnValue({ returning: jest.fn().mockReturnValue({ __insert: 'target' }) });
     (mockDb.insert as jest.Mock)
       .mockReturnValueOnce({ values: residualValues })
       .mockReturnValueOnce({ values: targetValues });
 
-    return { callOrder, residualValues, targetValues };
+    (mockDb.batch as jest.Mock).mockImplementation(async () => [
+      { rows: [{ source_prior_volume: priorVolume }] }, // 1. capture
+      { rows: [] },                                     // 2. soft-delete prior live stems
+      [{ id: 'residual-clip-id' }],                      // 3. insert residual .returning()
+      [{ id: 'target-clip-id' }],                        // 4. insert target .returning()
+      { rows: [{ id: 'clip-1' }] },                       // 5. mute source
+    ]);
+
+    return { residualValues, targetValues };
   }
 
-  it('captures the source clip prior volume BEFORE muting it (ordering: capture -> insert x2 -> mute)', async () => {
-    const { callOrder } = wireHappyPath(0.7);
+  it('batches all five steps atomically through a single db.batch call (capture, soft-delete-prior, insert x2, mute)', async () => {
+    wireHappyPath(0.7);
 
     const result = await attachSeparationStems({
       job: JOB, targetR2Key: 'k-target', residualR2Key: 'k-residual', residualLabel: 'Everything else', targetLabel: 'background music',
     });
 
-    expect(callOrder).toEqual(['capture', 'insert-residual', 'insert-target', 'mute']);
+    expect(mockDb.batch).toHaveBeenCalledTimes(1);
+    expect((mockDb.batch as jest.Mock).mock.calls[0][0]).toHaveLength(5);
     expect(result.sourcePriorVolume).toBe(0.7);
   });
 
@@ -392,15 +382,47 @@ describe('attachSeparationStems', () => {
     expect(result.sourcePriorVolume).not.toBe(1); // not the hardcoded default
   });
 
-  it('inserts a correct partition: residual enabled=true, target(isolated) enabled=false', async () => {
+  it('inserts a correct partition: residual enabled=true sort_order=0, target(isolated) enabled=false sort_order=1, both tagged with job identity', async () => {
     const { residualValues, targetValues } = wireHappyPath(1);
 
     await attachSeparationStems({
       job: JOB, targetR2Key: 'k-target', residualR2Key: 'k-residual', residualLabel: 'Everything else', targetLabel: 'background music',
     });
 
-    expect(residualValues.mock.calls[0][0]).toMatchObject({ enabled: true, source_type: 'separation', source_clip_id: 'clip-1' });
-    expect(targetValues.mock.calls[0][0]).toMatchObject({ enabled: false, source_type: 'separation', source_clip_id: 'clip-1' });
+    expect(residualValues.mock.calls[0][0]).toMatchObject({
+      enabled: true, source_type: 'separation', source_clip_id: 'clip-1',
+      separation_job_id: 'job-1', separation_role: 'residual', sort_order: 0,
+    });
+    expect(targetValues.mock.calls[0][0]).toMatchObject({
+      enabled: false, source_type: 'separation', source_clip_id: 'clip-1',
+      separation_job_id: 'job-1', separation_role: 'target', sort_order: 1,
+    });
+  });
+
+  it('soft-deletes (never hard-deletes) any prior live stems for the same source clip before inserting the new pair', async () => {
+    wireHappyPath(1);
+    await attachSeparationStems({
+      job: JOB, targetR2Key: 'k-target', residualR2Key: 'k-residual', residualLabel: 'Everything else', targetLabel: 'background music',
+    });
+    const softDeleteCall = (mockDb.execute as jest.Mock).mock.calls.find((call) => extractSql(call[0]).includes('SET deleted_at = now()'));
+    expect(softDeleteCall).toBeDefined();
+    const sqlText = extractSql(softDeleteCall![0]);
+    expect(sqlText).toMatch(/UPDATE project_audio_clips/);
+    expect(sqlText).toMatch(/source_type = 'separation'/);
+    expect(sqlText).not.toMatch(/DELETE FROM/); // never a hard delete
+  });
+
+  it('carries the prior volume forward from the OLDEST live stem\'s job (COALESCE), never re-reading the already-muted project_clips.volume', async () => {
+    wireHappyPath(0.7);
+    await attachSeparationStems({
+      job: JOB, targetR2Key: 'k-target', residualR2Key: 'k-residual', residualLabel: 'Everything else', targetLabel: 'background music',
+    });
+    const captureCall = (mockDb.execute as jest.Mock).mock.calls.find((call) => extractSql(call[0]).includes('source_prior_volume = COALESCE'));
+    expect(captureCall).toBeDefined();
+    const sqlText = extractSql(captureCall![0]);
+    expect(sqlText).toMatch(/ORDER BY j2\.created_at ASC/);
+    expect(sqlText).toMatch(/a2\.deleted_at IS NULL/);
+    expect(sqlText).toMatch(/SELECT volume FROM project_clips/); // fallback only when no live stems exist
   });
 
   it('mutes the source clip via project_clips.volume = 0 (not an audio-clip enabled flag)', async () => {

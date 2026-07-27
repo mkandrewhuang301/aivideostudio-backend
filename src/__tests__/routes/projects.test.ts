@@ -2021,6 +2021,40 @@ describe('PATCH /api/projects/:id/audio/:audioId', () => {
 
     expect(res.status).toBe(404);
   });
+
+  // WP1 Task 1.4: enabled/gain — unblocks the WP2 stem mute/unmute UI.
+  it('accepts enabled: false and gain: 1.5, returning 200', async () => {
+    dbMock.select.mockReturnValueOnce(makeChain([{ id: 'proj-1' }])); // isProjectOwned
+    dbMock.update.mockReturnValueOnce(
+      makeChain([{ id: 'audio-1', project_id: 'proj-1', enabled: false, gain: 1.5 }]),
+    );
+
+    const res = await request(app)
+      .patch('/api/projects/proj-1/audio/audio-1')
+      .send({ enabled: false, gain: 1.5 });
+
+    expect(res.status).toBe(200);
+    expect(res.body.audio_clip.enabled).toBe(false);
+    expect(res.body.audio_clip.gain).toBe(1.5);
+  });
+
+  it('rejects gain outside 0..2 with 400 (matches project_audio_clips_gain_range CHECK)', async () => {
+    const res = await request(app)
+      .patch('/api/projects/proj-1/audio/audio-1')
+      .send({ gain: 3 });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/gain/);
+  });
+
+  it('rejects a non-boolean enabled with 400', async () => {
+    const res = await request(app)
+      .patch('/api/projects/proj-1/audio/audio-1')
+      .send({ enabled: 'yes' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/enabled/);
+  });
 });
 
 // ─── DELETE /api/projects/:id/audio/:audioId ───────────────────────────────────
