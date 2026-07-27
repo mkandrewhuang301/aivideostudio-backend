@@ -29,7 +29,7 @@ import type {
   ProjectCaptionCue,
   ProjectCaptionWord,
 } from '../db/schema';
-import { eq, and, desc, lt, or, sql, inArray, isNull, isNotNull } from 'drizzle-orm';
+import { eq, and, asc, desc, lt, or, sql, inArray, isNull, isNotNull } from 'drizzle-orm';
 import { getUploadPresignedUrl } from './archivalService';
 import { extractVideoFrame } from './frameExtractor';
 import { probeDurationSeconds, probeVideoMeta } from './mediaProbe';
@@ -223,7 +223,10 @@ export async function getProjectWithState(
       .select()
       .from(projectAudioClips)
       .where(and(eq(projectAudioClips.project_id, projectId), isNull(projectAudioClips.deleted_at)))
-      .orderBy(projectAudioClips.sort_order),
+      // Bugfix WP1 Task 1.3 (fixes C2): attachSeparationStems sets explicit sort_order (0/1) on
+      // new stems, but ties are still possible (legacy rows, future callers) — created_at then id
+      // break the tie deterministically so row order can never swap between requests.
+      .orderBy(asc(projectAudioClips.sort_order), asc(projectAudioClips.created_at), asc(projectAudioClips.id)),
     db
       .select()
       .from(projectCaptionCues)
@@ -842,6 +845,10 @@ export interface UpdateAudioClipInput {
   trimStartSeconds?: number;
   trimEndSeconds?: number;
   sortOrder?: number;
+  // Bugfix WP1 Task 1.4: unblocks the WP2 stem mute/unmute + gain UI — previously there was no
+  // way to toggle a separated stem's audibility short of deleting it.
+  enabled?: boolean;
+  gain?: number;
 }
 
 /**
@@ -941,6 +948,8 @@ export async function updateAudioClip(
   if (updates.trimStartSeconds !== undefined) setValues.trim_start_seconds = updates.trimStartSeconds;
   if (updates.trimEndSeconds !== undefined) setValues.trim_end_seconds = updates.trimEndSeconds;
   if (updates.sortOrder !== undefined) setValues.sort_order = updates.sortOrder;
+  if (updates.enabled !== undefined) setValues.enabled = updates.enabled;
+  if (updates.gain !== undefined) setValues.gain = updates.gain;
 
   const [row] = await db
     .update(projectAudioClips)
