@@ -15,7 +15,11 @@ export interface AudioVoicePublic {
 export interface AudioVoiceDef extends AudioVoicePublic {
   /** SERVER-ONLY. Provider family that will render this voice. */
   provider: string;
-  /** SERVER-ONLY. Provider model id, when the provider uses one. */
+  /** SERVER-ONLY. Provider model id, when the provider uses one. Must be a model the provider's
+   * render path actually implements — google presets use the native Gemini TTS id (NOT the
+   * 'chirp3-hd' family label: generateTtsWav routes any non gemini-*-tts id to fal, which has no
+   * chirp3-hd and rejects it — the 2026-07-27 kore outage). Chirp3-HD voices are still what
+   * speaks: the native path resolves the speaker through Cloud TTS first when enabled. */
   model?: string;
   /** SERVER-ONLY. Preset speaker name, for provider-specific preset routing. */
   speaker?: string;
@@ -25,7 +29,7 @@ export interface AudioVoiceDef extends AudioVoicePublic {
   referenceText?: string;
 }
 
-export const AUDIO_VOICES_VERSION = '2026-07-26a';
+export const AUDIO_VOICES_VERSION = '2026-07-27a';
 
 /**
  * R2 key + transcript for the cloned "anime narrator" voice (voice id 'voiceA').
@@ -43,7 +47,7 @@ export const AUDIO_VOICES: AudioVoiceDef[] = [
     kind: 'preset',
     previewUrl: 'voice-previews/kore.wav',
     provider: 'google',
-    model: 'chirp3-hd',
+    model: 'gemini-3.1-flash-tts-preview',
     speaker: 'Kore',
   },
   {
@@ -53,7 +57,7 @@ export const AUDIO_VOICES: AudioVoiceDef[] = [
     kind: 'preset',
     previewUrl: 'voice-previews/zephyr.wav',
     provider: 'google',
-    model: 'chirp3-hd',
+    model: 'gemini-3.1-flash-tts-preview',
     speaker: 'Zephyr',
   },
   {
@@ -63,7 +67,7 @@ export const AUDIO_VOICES: AudioVoiceDef[] = [
     kind: 'preset',
     previewUrl: 'voice-previews/aoede.wav',
     provider: 'google',
-    model: 'chirp3-hd',
+    model: 'gemini-3.1-flash-tts-preview',
     speaker: 'Aoede',
   },
   {
@@ -73,7 +77,7 @@ export const AUDIO_VOICES: AudioVoiceDef[] = [
     kind: 'preset',
     previewUrl: 'voice-previews/puck.wav',
     provider: 'google',
-    model: 'chirp3-hd',
+    model: 'gemini-3.1-flash-tts-preview',
     speaker: 'Puck',
   },
   {
@@ -83,7 +87,7 @@ export const AUDIO_VOICES: AudioVoiceDef[] = [
     kind: 'preset',
     previewUrl: 'voice-previews/charon.wav',
     provider: 'google',
-    model: 'chirp3-hd',
+    model: 'gemini-3.1-flash-tts-preview',
     speaker: 'Charon',
   },
   {
@@ -93,7 +97,7 @@ export const AUDIO_VOICES: AudioVoiceDef[] = [
     kind: 'preset',
     previewUrl: 'voice-previews/orus.wav',
     provider: 'google',
-    model: 'chirp3-hd',
+    model: 'gemini-3.1-flash-tts-preview',
     speaker: 'Orus',
   },
   {

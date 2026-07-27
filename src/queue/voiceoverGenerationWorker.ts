@@ -223,15 +223,34 @@ export const voiceoverGenerationWorker = new Worker<VoiceoverGenerationJob>(
   },
 );
 
-voiceoverGenerationWorker.on('failed', async (job, error) => {
-  if (!job || job.attemptsMade < (job.opts.attempts ?? 1)) return;
+/**
+ * Refund exactly once when a job is terminally failed. Terminal means EITHER the attempts are
+ * exhausted OR the job was discarded (non-retryable provider rejection — discard() skips the
+ * remaining retries, so attemptsMade stays below opts.attempts and a naive attempts check would
+ * never refund). The failure REASON keys off the provider error's own retryable flag, not the
+ * attempt count: a discarded job is "rejected", an exhausted one "failed after retries", and a
+ * non-VoiceoverProviderError (e.g. a raw provider SDK error) defaults to retryable semantics.
+ */
+export async function refundVoiceoverOnFailure(
+  job: Job<VoiceoverGenerationJob> | undefined,
+  error: unknown,
+): Promise<void> {
+  if (!job) return;
+  const attemptsExhausted = job.attemptsMade >= (job.opts.attempts ?? 1);
+  // `discarded` is protected in bullmq's typings but is the public runtime signal that
+  // discard() was called — a discarded job fails terminally without exhausting attempts.
+  const discarded = (job as unknown as { discarded?: boolean }).discarded === true;
+  if (!attemptsExhausted && !discarded) return;
   const providerError = error instanceof VoiceoverProviderError ? error : undefined;
+  const rejected = providerError ? !providerError.retryable : false;
   await refundVoiceover(
     job.data.voiceoverId,
     providerError?.code ?? 'generation_failed',
-    providerError?.retryable ? 'Voiceover generation failed after retries' : 'Voiceover generation was rejected',
+    rejected ? 'Voiceover generation was rejected' : 'Voiceover generation failed after retries',
   ).catch((refundError) => console.error('[voiceover] refund failed', refundError));
-});
+}
+
+voiceoverGenerationWorker.on('failed', refundVoiceoverOnFailure);
 
 // ─── Stale-lease reaper ──────────────────────────────────────────────────────
 

@@ -77,6 +77,8 @@ import { getAudioVoiceById } from '../../config/audioVoices';
 import {
   processVoiceoverGeneration,
   reapStaleVoiceovers,
+  refundVoiceoverOnFailure,
+  VoiceoverProviderError,
 } from '../../queue/voiceoverGenerationWorker';
 
 const dbMock = db as unknown as { select: jest.Mock };
@@ -332,6 +334,43 @@ describe('processVoiceoverGeneration', () => {
     expect(refundMock).toHaveBeenCalledTimes(2);
     // The real idempotency is enforced by the SQL CTE in voiceoverService; this test documents
     // that the worker routes terminal handling through the same deterministic helper.
+  });
+});
+
+describe('refundVoiceoverOnFailure', () => {
+  it('refunds a discarded (non-retryable) job immediately, before attempts are exhausted', async () => {
+    // Regression: discard() skips remaining retries, so attemptsMade (1) never reaches
+    // opts.attempts (3) — the old guard returned early and the user was never refunded.
+    const job = makeJob({ attemptsMade: 1, discarded: true } as Partial<Job<{ voiceoverId: string }>>);
+    const error = new VoiceoverProviderError('Unknown voice: nope', false, 'unknown_voice');
+
+    await refundVoiceoverOnFailure(job, error);
+
+    expect(refundMock).toHaveBeenCalledWith(VOICEOVER_ID, 'unknown_voice', 'Voiceover generation was rejected');
+  });
+
+  it('refunds an exhausted retryable failure as "failed after retries"', async () => {
+    // A raw provider SDK error (not VoiceoverProviderError) defaults to retryable semantics.
+    const job = makeJob({ attemptsMade: 3 });
+    const error = new Error('fal request failed');
+
+    await refundVoiceoverOnFailure(job, error);
+
+    expect(refundMock).toHaveBeenCalledWith(VOICEOVER_ID, 'generation_failed', 'Voiceover generation failed after retries');
+  });
+
+  it('does not refund while retries remain and the job was not discarded', async () => {
+    const job = makeJob({ attemptsMade: 1 });
+
+    await refundVoiceoverOnFailure(job, new Error('temporary 503'));
+
+    expect(refundMock).not.toHaveBeenCalled();
+  });
+
+  it('does nothing without a job', async () => {
+    await refundVoiceoverOnFailure(undefined, new Error('boom'));
+
+    expect(refundMock).not.toHaveBeenCalled();
   });
 });
 
