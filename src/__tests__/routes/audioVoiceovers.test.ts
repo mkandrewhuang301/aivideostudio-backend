@@ -180,7 +180,7 @@ describe('POST /api/projects/:projectId/voiceovers', () => {
       status: 'pending',
       cost_credits: 1,
     });
-    expect(queueMock).toHaveBeenCalledWith('generate', { voiceoverId: baseRow.id }, { jobId: `voiceover:${baseRow.id}` });
+    expect(queueMock).toHaveBeenCalledWith('generate', { voiceoverId: baseRow.id }, { jobId: `voiceover-${baseRow.id}` });
     expect(JSON.stringify(res.body)).not.toContain('provider');
     expect(JSON.stringify(res.body)).not.toContain('final_r2_key');
   });
