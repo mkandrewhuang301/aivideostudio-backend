@@ -400,4 +400,64 @@ describe('buildComposeArgs', () => {
       expect(graph).toContain('[vout]tpad=');
     });
   });
+
+  // 2026-07-27: deleting the last clip no longer collapses a project, so a clips-less spec is now
+  // reachable. It exports as an all-black mp4 for the audio's length — the same thing the editor
+  // previews there — via one synthesized lavfi segment, so `concat=n=` never sees zero.
+  describe('audio-only project (no video clips)', () => {
+    const audioOnlySpec = () =>
+      baseSpec({
+        clips: [],
+        audioClips: [
+          { r2Key: 'projects/p1/audio/song.m4a', startOffsetSeconds: 2, trimStartSeconds: 0, trimEndSeconds: 10 },
+        ],
+      });
+
+    it('synthesizes a black video segment spanning the full audio length', () => {
+      const args = buildComposeArgs({
+        spec: audioOnlySpec(),
+        clipPaths: [],
+        audioPaths: ['/tmp/audio0.m4a'],
+        assPath: null,
+        textOverlayAssPath: null,
+        fontsDir: '/app/assets/fonts',
+        outPath: '/tmp/out.mp4',
+      });
+      const graph = filterComplexOf(args);
+
+      // 9:16 canvas, audio ends at 2 + 10 = 12s.
+      expect(args).toContain('color=c=black:s=1080x1920:d=12.000');
+      expect(graph).toContain('concat=n=1:v=1:a=1');
+      // The black segment occupies input 0, so the real audio must be indexed from 1.
+      expect(graph).toContain('[1:a]atrim=');
+    });
+
+    it('does not ALSO tail-pad the synthesized segment (that would double the file length)', () => {
+      const args = buildComposeArgs({
+        spec: audioOnlySpec(),
+        clipPaths: [],
+        audioPaths: ['/tmp/audio0.m4a'],
+        assPath: null,
+        textOverlayAssPath: null,
+        fontsDir: '/app/assets/fonts',
+        outPath: '/tmp/out.mp4',
+      });
+
+      expect(filterComplexOf(args)).not.toContain('tpad');
+    });
+
+    it('throws rather than emit a zero-length file when there is no video AND no audio', () => {
+      expect(() =>
+        buildComposeArgs({
+          spec: baseSpec({ clips: [], audioClips: [] }),
+          clipPaths: [],
+          audioPaths: [],
+          assPath: null,
+          textOverlayAssPath: null,
+          fontsDir: '/app/assets/fonts',
+          outPath: '/tmp/out.mp4',
+        }),
+      ).toThrow(/nothing to export/);
+    });
+  });
 });

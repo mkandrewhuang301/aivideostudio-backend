@@ -120,16 +120,23 @@ export interface BuildComposeArgsInput {
  * change the project's length.
  */
 export function audioTailSeconds(spec: ComposeSpec): number {
+  // No clips means the synthesized black segment was already built to the full audio length —
+  // padding on top of that would double-count the tail and produce a file twice as long.
+  if (spec.clips.length === 0) return 0;
   const videoEnd = spec.clips.reduce(
     (sum, clip) => sum + Math.max(0, clip.trimEndSeconds - clip.trimStartSeconds),
     0,
   );
-  const audioEnd = spec.audioClips.reduce(
+  return Math.max(0, audioEndSeconds(spec) - videoEnd);
+}
+
+/** Latest trailing edge across every audio clip — mirrors iOS `EditorState.audioEndSeconds`. */
+export function audioEndSeconds(spec: ComposeSpec): number {
+  return spec.audioClips.reduce(
     (latest, audio) =>
       Math.max(latest, audio.startOffsetSeconds + Math.max(0, audio.trimEndSeconds - audio.trimStartSeconds)),
     0,
   );
-  return Math.max(0, audioEnd - videoEnd);
 }
 
 /**
@@ -148,6 +155,25 @@ export function buildComposeArgs(input: BuildComposeArgsInput): string[] {
 
   const args: string[] = ['-y'];
   const filterParts: string[] = [];
+
+  // 2026-07-27: a project with audio but NO video clips is valid (deleting the last clip no longer
+  // collapses the project — see the audio-outlives-video note). It exports as an mp4 that is black
+  // for its whole length, which is exactly what the editor already previews there. Synthesized as
+  // ONE lavfi black segment + a silent audio partner, so the graph below stays the ordinary
+  // n-segment concat instead of growing a second shape: `concat=n=` must never see zero.
+  const blackOnlyDuration = spec.clips.length === 0 ? audioEndSeconds(spec) : 0;
+  if (spec.clips.length === 0) {
+    if (blackOnlyDuration <= 0) {
+      // Nothing to render and nothing to hear. Fail loudly here rather than emit a zero-length
+      // file that would surface downstream as a corrupt-looking export.
+      throw new Error('compose: project has no clips and no audio — nothing to export');
+    }
+    args.push('-f', 'lavfi', '-i', `color=c=black:s=${width}x${height}:d=${blackOnlyDuration.toFixed(3)}`);
+    filterParts.push(`[0:v]setpts=PTS-STARTPTS,setsar=1[v0]`);
+    filterParts.push(
+      `anullsrc=channel_layout=stereo:sample_rate=44100:duration=${blackOnlyDuration.toFixed(3)}[a0]`,
+    );
+  }
 
   // Per-clip video/audio input args + normalize (trim/scale/pad) filter chains.
   spec.clips.forEach((clip, i) => {
@@ -173,8 +199,10 @@ export function buildComposeArgs(input: BuildComposeArgsInput): string[] {
     }
   });
 
-  // Independent audio clip inputs — indexed AFTER every clip input.
-  const audioInputBase = spec.clips.length;
+  // Independent audio clip inputs — indexed AFTER every video input, which is the synthesized
+  // black segment (input 0) when the project has no clips of its own.
+  const videoSegmentCount = spec.clips.length === 0 ? 1 : spec.clips.length;
+  const audioInputBase = videoSegmentCount;
   spec.audioClips.forEach((audioClip, j) => {
     args.push('-i', audioPaths[j]);
     const inputIndex = audioInputBase + j;
@@ -188,8 +216,8 @@ export function buildComposeArgs(input: BuildComposeArgsInput): string[] {
   });
 
   // Concat every clip's normalized video+audio pair into one base stream.
-  const concatInputs = spec.clips.map((_, i) => `[v${i}][a${i}]`).join('');
-  filterParts.push(`${concatInputs}concat=n=${spec.clips.length}:v=1:a=1[vconcat][aconcat]`);
+  const concatInputs = Array.from({ length: videoSegmentCount }, (_, i) => `[v${i}][a${i}]`).join('');
+  filterParts.push(`${concatInputs}concat=n=${videoSegmentCount}:v=1:a=1[vconcat][aconcat]`);
 
   // Burn Text overlays via the generated ASS file (G4's buildTextOverlayAss) — native rotation
   // (\frz) + scale (\fs), unlike the old drawtext loop this replaces.
