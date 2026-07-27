@@ -6,6 +6,7 @@ import { r2, R2_BUCKET } from '../storage/r2';
 import { HeadBucketCommand } from '@aws-sdk/client-s3';
 import { sql } from 'drizzle-orm';
 import { execFileSync } from 'child_process';
+import { voiceoverGenerationQueue } from '../queue/voiceoverGenerationQueue';
 
 export const healthRouter = Router();
 
@@ -59,12 +60,26 @@ healthRouter.get('/', async (_req: Request, res: Response) => {
     console.warn('[health] ffmpeg binary not found on PATH');
   }
 
+  // Voiceover generation queue check (Phase 20-10) — non-blocking: BullMQ depends on the same Redis
+  // the core Redis check already validates, but this proves the queue abstraction itself is reachable
+  // and surfaces current job-count telemetry. Kept out of `allOk` so a transient queue hiccup does
+  // not fail the deploy gate before the worker process has finished connecting.
+  let voiceoverQueue: { status: 'ok'; counts: Record<string, number> } | { status: 'error' };
+  try {
+    const counts = await voiceoverGenerationQueue.getJobCounts('waiting', 'active', 'completed', 'failed');
+    voiceoverQueue = { status: 'ok', counts };
+  } catch (error) {
+    console.warn('[health] voiceover generation queue unreachable', error);
+    voiceoverQueue = { status: 'error' };
+  }
+
   const allOk = Object.values(checks).every((v) => v === 'ok');
   // Railway injects RAILWAY_GIT_COMMIT_SHA automatically; absent in local dev.
   const version = process.env.RAILWAY_GIT_COMMIT_SHA?.slice(0, 7) ?? 'unknown';
   res.status(allOk ? 200 : 503).json({
     status: allOk ? 'ok' : 'degraded',
     checks: { ...checks, ffmpeg: ffmpegStatus, ffmpegLibassFontconfig },
+    voiceoverQueue,
     version,
   });
 });
