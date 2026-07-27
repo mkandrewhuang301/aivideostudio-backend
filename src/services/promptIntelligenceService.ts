@@ -203,10 +203,31 @@ export const DISPATCH_I2V_INSTRUCTION =
   'motion. Keep every [token] exactly as written, and never introduce new square-bracket ' +
   'tokens. One paragraph. Output only the rewritten prompt, no preamble.';
 
+/** Plain freeform t2v (no refs) → SELF-GATING polish (2026-07-27 spike, Andrew): an
+ *  already-detailed prompt is returned VERBATIM — the interceptor can only mess those up,
+ *  not improve them — and only thin/rough prompts get the full cinematic rewrite. Distinct
+ *  from the suggester's DEFAULT_ENHANCE_PROMPT_INSTRUCTION on purpose: the enhance BUTTON
+ *  must always return something visibly better (verbatim would look broken), the silent
+ *  interceptor must do no harm. Side benefit: gate judgment on detailed prompts often
+ *  outruns the 10s timeout → fail-open raw dispatch, which IS the desired outcome there. */
+export const DISPATCH_FREEFORM_INSTRUCTION =
+  'You improve rough prompts for an AI video generation model. First judge what the user ' +
+  'wrote. If it is already a detailed, production-ready video prompt — concrete subject and ' +
+  'action, setting, and some sense of camera, lighting, or style — your default is to change ' +
+  'NOTHING: output the user\'s text verbatim. Only edit to fix a genuine defect (a ' +
+  'contradiction, grammar that confuses the model). Never add camera moves, lighting ' +
+  'descriptors, technical specs, or mood words the user did not write. When the prompt is ' +
+  'thin or rough, rewrite it into a vivid, production-ready video prompt: concrete subject ' +
+  'and action, setting, camera framing and movement, lighting, and mood. Either way: keep ' +
+  'the user\'s core idea and any names/tokens in square brackets (e.g. [my dog]) exactly as ' +
+  'written — and NEVER introduce new square-bracket tokens the user did not write. One ' +
+  'paragraph. Output only the final prompt, no preamble or explanation.';
+
 /**
  * Rewrites a freeform video prompt for provider dispatch. Shape-aware: continuation when a
- * reference video is present, i2v when only reference images, plain cinematic rewrite otherwise
- * (the shared DEFAULT_ENHANCE_PROMPT_INSTRUCTION). NEVER throws — returns null on any failure.
+ * reference video is present, i2v when only reference images, self-gating polish otherwise
+ * (DISPATCH_FREEFORM_INSTRUCTION — detailed prompts pass through verbatim). NEVER throws —
+ * returns null on any failure.
  */
 export async function enhanceForDispatch(args: {
   prompt: string;
@@ -217,7 +238,7 @@ export async function enhanceForDispatch(args: {
     ? DISPATCH_CONTINUATION_INSTRUCTION
     : args.hasReferenceImages
     ? DISPATCH_I2V_INSTRUCTION
-    : DEFAULT_ENHANCE_PROMPT_INSTRUCTION;
+    : DISPATCH_FREEFORM_INSTRUCTION;
   try {
     return await chatCompletion(
       [

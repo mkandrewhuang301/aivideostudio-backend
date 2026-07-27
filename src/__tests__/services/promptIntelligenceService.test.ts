@@ -15,6 +15,7 @@ import {
   DEFAULT_FROM_IMAGE_INSTRUCTION,
   enhanceForDispatch,
   DISPATCH_CONTINUATION_INSTRUCTION,
+  DISPATCH_FREEFORM_INSTRUCTION,
   DISPATCH_I2V_INSTRUCTION,
 } from '../../services/promptIntelligenceService';
 
@@ -143,10 +144,10 @@ describe('enhanceForDispatch', () => {
     expect(sentBody().messages[0]).toEqual({ role: 'system', content: DISPATCH_CONTINUATION_INSTRUCTION });
   });
 
-  it('falls back to the generic cinematic instruction for plain t2v', async () => {
+  it('uses the self-gating polish instruction for plain t2v', async () => {
     fetchMock.mockResolvedValue(okCompletion('x'));
     await enhanceForDispatch({ prompt: 'a dog', hasReferenceVideos: false, hasReferenceImages: false });
-    expect(sentBody().messages[0]).toEqual({ role: 'system', content: DEFAULT_ENHANCE_PROMPT_INSTRUCTION });
+    expect(sentBody().messages[0]).toEqual({ role: 'system', content: DISPATCH_FREEFORM_INSTRUCTION });
   });
 
   it('sends the interceptor request shape (gpt-5-mini, minimal effort, capped tokens)', async () => {
