@@ -186,12 +186,13 @@ export const DISPATCH_CONTINUATION_INSTRUCTION =
   'make it concrete: subject action, camera movement, lighting and mood, ambience. Follow the ' +
   'user\'s lead on how the referenced video is used (seamless continuation, next shot, source ' +
   'material) — never impose one and never reverse their choice. You CANNOT see the referenced ' +
-  'video, so never invent specifics of its content. But every concrete detail the user ' +
-  'themselves wrote (subject appearance, clothing, setting, props, mood) is a continuity ' +
-  'anchor — carry it through the rewrite, and never compress the user\'s specifics into ' +
-  'generic references like "the same subject" or "the established setting". Keep every [token] ' +
-  'exactly as written, and never introduce new square-bracket tokens. One paragraph. Output ' +
-  'only the rewritten prompt, no preamble.';
+  'video, so never invent specifics of its content. Every concrete detail the user themselves ' +
+  'wrote (subject appearance, clothing, setting, props, mood) is a continuity anchor — carry ' +
+  'it through the rewrite, never compress it into generic references like "the same subject". ' +
+  'But where the user gave no detail of their own, a generic reference ("the subject", "the ' +
+  'setting") is the honest choice — never fill the gap with invented specifics. Keep every ' +
+  '[token] exactly as written, and never introduce new square-bracket tokens. One paragraph. ' +
+  'Output only the rewritten prompt, no preamble.';
 
 /** Reference image(s) only → image-to-video: hold the still's content, write the motion. */
 export const DISPATCH_I2V_INSTRUCTION =
