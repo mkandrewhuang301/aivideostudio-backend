@@ -218,10 +218,23 @@ export const DISPATCH_FREEFORM_INSTRUCTION =
   'contradiction, grammar that confuses the model). Never add camera moves, lighting ' +
   'descriptors, technical specs, or mood words the user did not write. When the prompt is ' +
   'thin or rough, rewrite it into a vivid, production-ready video prompt: concrete subject ' +
-  'and action, setting, camera framing and movement, lighting, and mood. Either way: keep ' +
-  'the user\'s core idea and any names/tokens in square brackets (e.g. [my dog]) exactly as ' +
-  'written — and NEVER introduce new square-bracket tokens the user did not write. One ' +
-  'paragraph. Output only the final prompt, no preamble or explanation.';
+  'and action, setting, lighting, and mood — but the clip is only a few seconds long and the ' +
+  'model cannot cut, so describe ONE clear camera move at most, never a sequence of shots; ' +
+  'and never use technical specs the model cannot execute (fps, timelapse/speed multipliers, ' +
+  'HDR, exposure, lens jargon). Either way: keep the user\'s core idea and any square-bracket ' +
+  'tokens exactly as written — and NEVER introduce new square-bracket tokens the user did ' +
+  'not write. One paragraph. Output only the final prompt, no preamble or explanation.';
+
+/** The LLM occasionally invents square-bracket tokens (spiked: "[a guy]", "[my dog]" — primed
+ *  by an example that used to live in the instruction). Brackets are meaningful to our
+ *  pipeline, so a stray one would reach the provider as literal junk text. Deterministic
+ *  guard: strip brackets from any token the user didn't write, keeping the inner words. */
+function stripInventedBracketTokens(enhanced: string, userPrompt: string): string {
+  const userTokens = new Set(userPrompt.match(/\[[^\]]+\]/g) ?? []);
+  return enhanced.replace(/\[([^\]]+)\]/g, (match, inner: string) =>
+    userTokens.has(match) ? match : inner,
+  );
+}
 
 /**
  * Rewrites a freeform video prompt for provider dispatch. Shape-aware: continuation when a
@@ -240,7 +253,7 @@ export async function enhanceForDispatch(args: {
     ? DISPATCH_I2V_INSTRUCTION
     : DISPATCH_FREEFORM_INSTRUCTION;
   try {
-    return await chatCompletion(
+    const enhanced = await chatCompletion(
       [
         { role: 'system', content: instruction },
         { role: 'user', content: args.prompt },
@@ -252,6 +265,7 @@ export async function enhanceForDispatch(args: {
         timeoutMs: INTERCEPTOR_TIMEOUT_MS,
       },
     );
+    return stripInventedBracketTokens(enhanced, args.prompt);
   } catch (err) {
     console.warn(
       '[promptIntelligence] dispatch enhancement failed, falling back to raw prompt:',

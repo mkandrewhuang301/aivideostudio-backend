@@ -181,4 +181,18 @@ describe('enhanceForDispatch', () => {
       enhanceForDispatch({ prompt: 'a dog', hasReferenceVideos: false, hasReferenceImages: false }),
     ).resolves.toBeNull();
   });
+
+  it('strips brackets from tokens the LLM invented, keeping the words', async () => {
+    fetchMock.mockResolvedValue(okCompletion('A low-angle close-up of [a guy] carving a wave, camera tracking.'));
+    await expect(
+      enhanceForDispatch({ prompt: 'a guy surfing', hasReferenceVideos: false, hasReferenceImages: false }),
+    ).resolves.toBe('A low-angle close-up of a guy carving a wave, camera tracking.');
+  });
+
+  it('preserves user-written bracket tokens exactly', async () => {
+    fetchMock.mockResolvedValue(okCompletion('Continue [video1] with [my dog] running alongside.'));
+    await expect(
+      enhanceForDispatch({ prompt: 'continue [video1] with [my dog]', hasReferenceVideos: true, hasReferenceImages: false }),
+    ).resolves.toBe('Continue [video1] with [my dog] running alongside.');
+  });
 });
