@@ -1195,12 +1195,14 @@ projectsRouter.patch('/:id/audio/:audioId', async (req: Request, res: Response) 
   }
   const projectId = req.params.id as string;
   const audioId = req.params.audioId as string;
-  const { start_offset_seconds, trim_start_seconds, trim_end_seconds, sort_order } = req.body ?? {};
+  const { start_offset_seconds, trim_start_seconds, trim_end_seconds, sort_order, enabled, gain } = req.body ?? {};
 
   const trimUpdates: {
     startOffsetSeconds?: number;
     trimStartSeconds?: number;
     trimEndSeconds?: number;
+    enabled?: boolean;
+    gain?: number;
   } = {};
   let requestedSortOrder: number | undefined;
   if (start_offset_seconds !== undefined) {
@@ -1230,6 +1232,23 @@ projectsRouter.patch('/:id/audio/:audioId', async (req: Request, res: Response) 
       return;
     }
     requestedSortOrder = sort_order;
+  }
+  // Bugfix WP1 Task 1.4: enabled/gain — unblocks the WP2 stem mute/unmute UI (iOS agent is
+  // coding against this exact contract in parallel). gain range matches the
+  // project_audio_clips_gain_range CHECK (0..2, see 2026-07-26-audio-separation-stems.sql).
+  if (enabled !== undefined) {
+    if (typeof enabled !== 'boolean') {
+      res.status(400).json({ error: 'enabled must be a boolean' });
+      return;
+    }
+    trimUpdates.enabled = enabled;
+  }
+  if (gain !== undefined) {
+    if (typeof gain !== 'number' || Number.isNaN(gain) || gain < 0 || gain > 2) {
+      res.status(400).json({ error: 'gain must be a number between 0 and 2' });
+      return;
+    }
+    trimUpdates.gain = gain;
   }
   if (Object.keys(trimUpdates).length === 0 && requestedSortOrder === undefined) {
     res.status(400).json({ error: 'No valid fields to update' });
