@@ -1,11 +1,17 @@
 -- Phase 20 (Editor Audio Workspace) voiceover migration.
 -- Additive + re-runnable (IF NOT EXISTS / DO-block enum guard throughout).
--- Provenance: this DDL was dumped from the DEV database, where these objects were created
--- by Plan 20-05 (see .continue-here.md — drizzle-kit push is BANNED; this file is the
--- canonical, manually-applied path to prod). Verified against dev 2026-07-27: enum labels,
--- column set/nullability/defaults, FK targets, and index definitions all match.
--- Reminder (schema-drift incident, 2026-07-25): migrations here are MANUAL to prod — creating
--- this file does NOT push it. A human must run this against prod + trigger the Railway deploy.
+-- Provenance: this DDL was dumped from the database Plan 20-05 created these objects in
+-- (drizzle-kit push is BANNED; this file is the canonical, manually-applied path).
+--
+-- STATUS 2026-07-27: APPLIED. Verified live via information_schema — the
+-- voiceover_generation_status enum (pending, processing, succeeded, failed, refunded) and
+-- project_voiceover_generations are present in the database Railway actually serves.
+--
+-- CORRECTION 2026-07-27: the provenance above originally said "dumped from the DEV database"
+-- and "verified against dev", implying a dev/prod split that did not exist. The local .env
+-- DATABASE_URL and Railway's were byte-identical (same Neon endpoint, same neondb) — Plan
+-- 20-05 created these objects directly in the live database, and the verification confirmed
+-- them there. Migrations here are still MANUAL: creating a file does NOT apply it.
 
 -- ─── PART A: voiceover_generation_status enum ───────────────────────────────
 

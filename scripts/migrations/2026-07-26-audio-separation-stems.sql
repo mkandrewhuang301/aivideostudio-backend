@@ -1,7 +1,16 @@
 -- Phase 20.1 (Audio Separation) foundation migration.
 -- Additive + re-runnable (ADD COLUMN IF NOT EXISTS / CREATE TABLE IF NOT EXISTS throughout).
--- Reminder (schema-drift incident, 2026-07-25): migrations here are MANUAL to prod — creating
--- this file does NOT push it. A human must run this against prod + trigger the Railway deploy.
+-- Migrations here are MANUAL: creating this file does NOT apply it. A human must run it and
+-- trigger the Railway deploy.
+--
+-- STATUS 2026-07-27: APPLIED. Verified live via information_schema — every column and the
+-- audio_separation_jobs table are present in the database Railway actually serves.
+--
+-- CORRECTION 2026-07-27: this file previously claimed it was applied to "dev" but still owed
+-- against prod. That was never true. The DATABASE_URL in the local .env and the one Railway
+-- injects into the aivideostudio-backend service were byte-identical (same Neon endpoint,
+-- same neondb) — so "applying to dev" applied to prod in the same statement. Any earlier note
+-- distinguishing the two environments is describing a separation that did not exist.
 
 -- ─── PART A: extend project_audio_clips with DAW mix fields + stem link ───────
 -- Stems (separation's "target"/"residual" output) are stored as ordinary
