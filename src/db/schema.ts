@@ -540,6 +540,13 @@ export const projectAudioClips = pgTable(
     label: text('label'),
     prompt: text('prompt'),
     source_clip_id: uuid('source_clip_id').references(() => projectClips.id),
+    // Bugfix WP1 (2026-07-27): stem identity — links a stem row back to the exact job that
+    // produced it (never guess by source_clip_id + positional heuristics again). separation_role
+    // is 'residual' | 'target'; both are null for non-stem rows. A partial unique index on
+    // (source_clip_id, separation_role) WHERE source_type='separation' AND deleted_at IS NULL
+    // enforces "at most one live pair per source clip" at the DB layer.
+    separation_job_id: uuid('separation_job_id').references(() => audioSeparationJobs.id),
+    separation_role: text('separation_role'), // 'residual' | 'target'
     // Soft-delete (Plan 13-21 B1) — see project_clips.deleted_at for the contract.
     deleted_at: timestamp('deleted_at', { withTimezone: true }), // nullable
     created_at: timestamp('created_at', { withTimezone: true })
