@@ -11,3 +11,7 @@ drizzle/
 # `npm run upload:preset-art`, never committed. Keep the folder convention doc tracked.
 assets/preset-art/*
 !assets/preset-art/.gitkeep
+
+# Local env backups — these hold live credentials in plaintext.
+.env.bak*
+.env.*.bak
