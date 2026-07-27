@@ -397,7 +397,31 @@ describe('buildComposeArgs', () => {
       const graph = filterComplexOf(args);
 
       // The tpad must consume the FINAL burned label, so both ass passes land on real video.
-      expect(graph).toContain('[vout]tpad=');
+      expect(graph).toContain('[vout]fps=30,tpad=');
+    });
+
+    // Regression, 2026-07-27: verified against a REAL ffmpeg run, which is the only way this is
+    // visible. Without the fps normalization the chain reaching tpad (trim -> setpts -> concat)
+    // carries no usable frame rate, tpad spaces its pad frames wrong, and the encoder drops most
+    // of them — a 4.000s tail rendered as 1.1s of video against 7.0s of audio. The container
+    // duration reads correct anyway because the AUDIO track sets it, so neither this file nor a
+    // format=duration probe can catch it; only probing the video stream can. Keep them adjacent
+    // and in this order.
+    it('normalizes the frame rate immediately before padding, or the pad frames get dropped', () => {
+      const args = buildComposeArgs({
+        spec: baseSpec({ audioClips: [audioPastTheEnd] }),
+        clipPaths: ['/tmp/clip0.mp4', '/tmp/clip1.mp4'],
+        audioPaths: ['/tmp/audio0.m4a'],
+        assPath: null,
+        textOverlayAssPath: null,
+        fontsDir: '/app/assets/fonts',
+        outPath: '/tmp/out.mp4',
+      });
+      const graph = filterComplexOf(args);
+
+      expect(graph).toContain('fps=30,tpad=');
+      // Order matters: fps AFTER tpad does not rescue the already-dropped frames.
+      expect(graph).not.toMatch(/tpad=[^;]*,fps=/);
     });
   });
 

@@ -253,10 +253,21 @@ export function buildComposeArgs(input: BuildComposeArgsInput): string[] {
   // would end the file at the video's length anyway — preview and export have to agree that the
   // project got longer. Applied AFTER the ass burns so overlay/caption timings are untouched:
   // they're timed against the real video and have nothing to say about the tail.
+  //
+  // The `fps=30` is LOAD-BEARING, not cosmetic: by this point the chain has gone through
+  // trim -> setpts=PTS-STARTPTS -> concat, which leaves the link with no usable frame-rate
+  // metadata, so tpad spaces its pad frames wrong and the encoder then DROPS most of them
+  // (observed: a 4.000s tail rendered as 1.1s — 210 frames generated, 87 dropped, video track
+  // ending at 4.1s while the audio ran the full 7.0s). The container duration still reads
+  // correct in that state because the AUDIO track sets it, which is why this is invisible to
+  // both an argv-construction test and a naive format=duration probe — it only shows up when
+  // probing the VIDEO stream. Normalizing the rate before tpad is what makes the pad survive;
+  // `fps=30` matches the summary-compose path's existing convention. Must stay BEFORE tpad
+  // (after it, the frames are already lost).
   const tailSeconds = audioTailSeconds(spec);
   if (tailSeconds > 0) {
     filterParts.push(
-      `[${videoLabel}]tpad=stop_mode=add:stop_duration=${tailSeconds.toFixed(3)}:color=black[vpad]`,
+      `[${videoLabel}]fps=30,tpad=stop_mode=add:stop_duration=${tailSeconds.toFixed(3)}:color=black[vpad]`,
     );
     videoLabel = 'vpad';
   }
