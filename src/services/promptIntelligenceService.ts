@@ -173,21 +173,24 @@ const INTERCEPTOR_MAX_COMPLETION_TOKENS = 800;
 const INTERCEPTOR_REASONING_EFFORT = 'minimal';
 const INTERCEPTOR_TIMEOUT_MS = 10_000;
 
-/** Reference video present → the generation continues an existing clip. The structured
- *  continuity directive is the whole point: seamless resume, no cut, preserve everything. */
+/** Reference video present → the request involves an existing clip. 2026-07-27 FLIP (Andrew):
+ *  no seam directive either way — the old "NO cut, resume seamlessly" rule pushed Seedance Mini
+ *  into frame-continuations that glitch visibly at the seam, and converting the pill's
+ *  next-shot suggestions back to seamless defeated the guide. The interceptor is now a pure
+ *  intent-enricher: keep the user's meaning exactly (continuation, next shot, or anything
+ *  else), just make it concrete and descriptive. */
 export const DISPATCH_CONTINUATION_INSTRUCTION =
-  'You rewrite prompts for an AI video generation model. The user is continuing an existing ' +
-  'video referenced by [videoN] tokens. Rewrite the request into a prompt that continues the ' +
-  'referenced video directly from its final moment: NO cut, NO transition, NO new establishing ' +
-  'shot — the action resumes seamlessly. Explicitly preserve the subject\'s identity and ' +
-  'position, direction and speed of motion, camera direction and movement, lighting, and audio ' +
-  'ambience from the referenced video, then describe the new action. You CANNOT see the ' +
-  'referenced video, so never invent specifics of its content (clothing, setting, objects, ' +
-  'sounds) — refer to its subject and scene generically ("the same subject", "the current ' +
-  'framing", "the established lighting", "the existing ambient sound"); concrete detail belongs ' +
-  'only to the NEW action the user asked for. Keep every [token] exactly as written, and never ' +
-  'introduce new square-bracket tokens. One paragraph. Output only the rewritten prompt, no ' +
-  'preamble.';
+  'You rewrite prompts for an AI video generation model. The user\'s request references an ' +
+  'existing video via [videoN] tokens. Rewrite the request into a clearer, more descriptive ' +
+  'prompt that faithfully realizes the user\'s intent — keep their meaning exactly and only ' +
+  'make it concrete: subject action, camera movement, lighting and mood, ambience. Follow the ' +
+  'user\'s lead on how the referenced video is used (seamless continuation, next shot, source ' +
+  'material) — never impose one and never reverse their choice. You CANNOT see the referenced ' +
+  'video, so never invent specifics of its content (clothing, setting, objects, sounds) — ' +
+  'refer to its subject and scene generically ("the same subject", "the established setting"); ' +
+  'concrete detail belongs only to what the user actually asked for. Keep every [token] ' +
+  'exactly as written, and never introduce new square-bracket tokens. One paragraph. Output ' +
+  'only the rewritten prompt, no preamble.';
 
 /** Reference image(s) only → image-to-video: hold the still's content, write the motion. */
 export const DISPATCH_I2V_INSTRUCTION =
