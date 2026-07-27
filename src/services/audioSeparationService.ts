@@ -231,32 +231,71 @@ export interface AttachSeparationStemsResult {
 }
 
 /**
- * Attaches the two stems and mutes the source, in this exact order:
- *   1. Capture the source clip's CURRENT project_clips.volume into
- *      audio_separation_jobs.source_prior_volume (atomic read+write via a subquery UPDATE — no
- *      separate SELECT-then-UPDATE race). MUST happen before step 3's mute so the pre-mute value
- *      is recorded (DECISIONS.md §3 free-undo — restore the user's exact prior level, not 1.0).
- *   2. Insert TWO project_audio_clips rows: residual (enabled=true, "Everything else") and
- *      target/isolated (enabled=false, the prompt) — a correct partition, never both audible with
- *      the (about to be muted) source (DECISIONS.md §3 DAW mix-invariant).
- *   3. MUTE the source: project_clips.volume = 0. This is the RESOLVED source-mute mechanism — see
- *      the file header for the exact client-facing reverse endpoint (iOS undo contract).
+ * Attaches the two stems and mutes the source — replace-on-attach semantics (bugfix WP1 Task 1.2):
+ * a re-separation of the SAME source clip soft-deletes the prior live stem pair and installs a
+ * new one, rather than accumulating stems under one source_clip_id (was: unbounded pairs, only
+ * ever a positional-guess UI could partially show — see bug B in the 2026-07-27 bugfix plan).
+ *
+ * neon-http has no interactive transaction (db.transaction throws "No transactions support in
+ * neon-http driver" — see NeonHttpSession#transaction); this codebase's established substitute
+ * (assertProjectAudioCapacity / insertProjectAudioClipWithCapacity in projectService.ts) is
+ * `db.batch([...])`, which Neon executes as ONE server-side Postgres transaction, statements in
+ * array order, each seeing prior statements' writes. All five steps below are batched together so
+ * a crash never leaves a partial state (e.g. old pair soft-deleted but new pair not yet inserted).
+ *
+ * Order within the batch:
+ *   1. Capture: writes this job's source_prior_volume. Carry-forward (fixes D — undo-forever-mute
+ *      bug): if a live stem pair already exists for this source clip, its OLDEST job's
+ *      source_prior_volume is the TRUE original value and is carried forward via a correlated
+ *      subquery; project_clips.volume is only read directly when no live stems exist yet (on a
+ *      second+ separation, project_clips.volume is already 0 from the first run and would
+ *      overwrite the real prior value with 0, permanently breaking undo). This subquery MUST run
+ *      before step 2 soft-deletes the old pair, which it does by array position.
+ *   2. Soft-delete (never hard — DECISIONS.md §3 recoverable model) any existing live stems for
+ *      this source clip.
+ *   3/4. Insert residual (enabled=true, "Everything else", sort_order 0) and target/isolated
+ *      (enabled=false, the prompt, sort_order 1) — explicit sort_order fixes C2 (GET ordering was
+ *      non-deterministic when both stems defaulted to 0). Both carry separation_job_id/role so
+ *      the client can group by job instead of guessing positionally (fixes C).
+ *   5. MUTE the source: project_clips.volume = 0 — the RESOLVED source-mute mechanism (file header
+ *      has the client-facing reverse endpoint / iOS undo contract).
  */
 export async function attachSeparationStems(input: AttachSeparationStemsInput): Promise<AttachSeparationStemsResult> {
-  const capture = await db.execute(sql`
+  const captureQuery = db.execute(sql`
     UPDATE audio_separation_jobs
-    SET source_prior_volume = (SELECT volume FROM project_clips WHERE id = ${input.job.source_clip_id}::uuid)
+    SET source_prior_volume = COALESCE(
+      (
+        SELECT j2.source_prior_volume
+        FROM project_audio_clips a2
+        JOIN audio_separation_jobs j2 ON j2.id = a2.separation_job_id
+        WHERE a2.source_clip_id = ${input.job.source_clip_id}::uuid
+          AND a2.source_type = 'separation'
+          AND a2.deleted_at IS NULL
+        ORDER BY j2.created_at ASC
+        LIMIT 1
+      ),
+      (SELECT volume FROM project_clips WHERE id = ${input.job.source_clip_id}::uuid)
+    )
     WHERE id = ${input.job.id}::uuid
     RETURNING source_prior_volume
   `);
-  const capturedVolume = capture.rows?.[0]?.source_prior_volume;
-  const sourcePriorVolume = capturedVolume == null ? 1 : Number(capturedVolume);
 
-  const [residualClip] = await db.insert(projectAudioClips).values({
+  const softDeletePriorStemsQuery = db.execute(sql`
+    UPDATE project_audio_clips
+    SET deleted_at = now()
+    WHERE source_clip_id = ${input.job.source_clip_id}::uuid
+      AND source_type = 'separation'
+      AND deleted_at IS NULL
+  `);
+
+  const insertResidualQuery = db.insert(projectAudioClips).values({
     project_id: input.job.project_id,
     r2_key: input.residualR2Key,
     source_type: 'separation',
     source_clip_id: input.job.source_clip_id,
+    separation_job_id: input.job.id,
+    separation_role: 'residual',
+    sort_order: 0,
     label: input.residualLabel,
     prompt: input.job.prompt,
     original_duration_seconds: input.job.duration_seconds,
@@ -265,11 +304,14 @@ export async function attachSeparationStems(input: AttachSeparationStemsInput): 
     gain: 1,
   }).returning();
 
-  const [targetClip] = await db.insert(projectAudioClips).values({
+  const insertTargetQuery = db.insert(projectAudioClips).values({
     project_id: input.job.project_id,
     r2_key: input.targetR2Key,
     source_type: 'separation',
     source_clip_id: input.job.source_clip_id,
+    separation_job_id: input.job.id,
+    separation_role: 'target',
+    sort_order: 1,
     label: input.targetLabel,
     prompt: input.job.prompt,
     original_duration_seconds: input.job.duration_seconds,
@@ -278,9 +320,22 @@ export async function attachSeparationStems(input: AttachSeparationStemsInput): 
     gain: 1,
   }).returning();
 
-  await db.execute(sql`
+  const muteSourceQuery = db.execute(sql`
     UPDATE project_clips SET volume = 0 WHERE id = ${input.job.source_clip_id}::uuid
   `);
+
+  const [captureResult, , residualRows, targetRows] = await db.batch([
+    captureQuery,
+    softDeletePriorStemsQuery,
+    insertResidualQuery,
+    insertTargetQuery,
+    muteSourceQuery,
+  ] as const);
+
+  const capturedVolume = (captureResult as unknown as { rows?: Array<{ source_prior_volume: unknown }> }).rows?.[0]?.source_prior_volume;
+  const sourcePriorVolume = capturedVolume == null ? 1 : Number(capturedVolume);
+  const residualClip = (residualRows as Array<{ id: string }>)[0];
+  const targetClip = (targetRows as Array<{ id: string }>)[0];
 
   return {
     residualClipId: residualClip.id,
