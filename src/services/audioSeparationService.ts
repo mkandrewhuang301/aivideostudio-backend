@@ -109,6 +109,12 @@ function computeSeparationCredits(durationSeconds: number): number {
 // bookkeeping: where the stems sit on the timeline, what "silence the source" means, and what
 // undo has to restore.
 
+// Separating an audio track CONSUMES it: the track is replaced by the two tracks it decomposes
+// into, so the live set stays flat at every depth and no parent/child pair is ever audible at
+// once. Separating a video clip instead mutes that clip's own audio and adds two tracks, since a
+// clip can't be consumed. parent_audio_clip_id / separation_depth are therefore provenance (for
+// undo and debugging), not structure the UI has to render.
+
 export type SeparationSourceKind = 'clip' | 'audio_clip';
 
 /**
@@ -479,15 +485,19 @@ function buildStemInsertQueries(
 }
 
 /**
- * Audio-sourced (chained) attach. Differences from the clip path:
- *   1. Capture records the source stem's prior enabled/gain (not a clip volume), with the same
- *      oldest-live-pair carry-forward so a re-separation never captures the already-disabled
- *      state and strands undo.
- *   2. Prior live stems are scoped by parent_audio_clip_id, so re-separating one stem never
- *      disturbs its sibling's own children.
- *   5. "Silence the source" means switching the source stem OFF, not muting a clip — the mix is
- *      the sum of enabled rows, so a parent and its children must never both be enabled or the
- *      audio double-counts.
+ * Audio-sourced attach: separating a TRACK replaces it with the two tracks it decomposes into.
+ *
+ * The result is a flat list, not a tree — the source is consumed, so a parent and its children
+ * never coexist. Separating one of the results again does the same thing to it, at any depth,
+ * with no special handling: there is nothing to nest and nothing to double-count.
+ *
+ * Differences from the clip path (a clip can't be consumed — it still has picture — so that path
+ * mutes the clip's audio and leaves the clip in place):
+ *   1. Capture records the source track's prior enabled/gain rather than a clip volume, so undo
+ *      restores the exact prior mix state.
+ *   2. Prior live stems are scoped by parent_audio_clip_id — a no-op in normal use (a consumed
+ *      source can't be separated twice), kept as a retry guard so re-running is idempotent.
+ *   5. The source is SOFT-DELETED rather than muted. Undo restores it and drops the two children.
  */
 async function attachStemsFromAudioClip(
   input: AttachSeparationStemsInput,
@@ -539,8 +549,15 @@ async function attachStemsFromAudioClip(
     depth: (input.sourceDepth ?? 0) + 1,
   });
 
-  const disableSourceQuery = db.execute(sql`
-    UPDATE project_audio_clips SET enabled = false WHERE id = ${sourceAudioClipId}::uuid
+  // CONSUME the source: separating a track replaces it with the two tracks that came out of it,
+  // so the source stops existing rather than lingering disabled. Soft-delete (never hard —
+  // DECISIONS.md §3) so undo can restore it and drop the two children.
+  //
+  // This is what keeps the model flat: a parent and its children never coexist, so nothing can
+  // double-count in the mix (the mix is the sum of enabled rows) and there is no tree to render.
+  const consumeSourceQuery = db.execute(sql`
+    UPDATE project_audio_clips SET deleted_at = now()
+    WHERE id = ${sourceAudioClipId}::uuid AND deleted_at IS NULL
   `);
 
   const [captureResult, , residualRows, targetRows] = await db.batch([
@@ -548,7 +565,7 @@ async function attachStemsFromAudioClip(
     softDeletePriorStemsQuery,
     insertResidualQuery,
     insertTargetQuery,
-    disableSourceQuery,
+    consumeSourceQuery,
   ] as const);
 
   const captured = (captureResult as unknown as {

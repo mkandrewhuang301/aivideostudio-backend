@@ -659,15 +659,28 @@ describe('attachSeparationStems — chained from a stem', () => {
     expect(sqlText).not.toMatch(/DELETE FROM/);
   });
 
-  it('silences the source by DISABLING the stem, never by muting the root clip', async () => {
+  it('CONSUMES the source track: soft-deletes it so parent and children never coexist', async () => {
     wireChained(true, 1);
 
     await attachSeparationStems({ ...baseInput, sourceDepth: 1 });
 
     const sqls = (mockDb.execute as jest.Mock).mock.calls.map((call) => extractSql(call[0]));
-    expect(sqls.some((s) => /UPDATE project_audio_clips SET enabled = false/.test(s))).toBe(true);
+    const consume = sqls.find((s) => /UPDATE project_audio_clips SET deleted_at = now\(\)\s*WHERE id =/.test(s));
+    expect(consume).toBeDefined();
+    // Leaving it merely disabled would let a later re-enable stack the parent on top of its own
+    // children and double-count the audio; consuming it removes that failure mode entirely.
+    expect(sqls.some((s) => /SET enabled = false/.test(s))).toBe(false);
     // Muting project_clips would silence the original video clip a level above — wrong node.
     expect(sqls.some((s) => /UPDATE project_clips SET volume = 0/.test(s))).toBe(false);
+  });
+
+  it('soft-deletes the source rather than hard-deleting it, so undo can restore the track', async () => {
+    wireChained(true, 1);
+
+    await attachSeparationStems({ ...baseInput, sourceDepth: 1 });
+
+    const sqls = (mockDb.execute as jest.Mock).mock.calls.map((call) => extractSql(call[0]));
+    expect(sqls.some((s) => /DELETE FROM/.test(s))).toBe(false);
   });
 
   it('captures the source stem\'s prior enabled/gain for undo, carrying forward from the oldest live pair', async () => {

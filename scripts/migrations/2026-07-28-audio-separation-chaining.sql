@@ -1,15 +1,22 @@
--- Phase 20.1 chaining: a separation source may be a project_clips row (root, depth 1) OR another
--- project_audio_clips row (a stem), to arbitrary depth. Either stem of a pair is separable, so the
--- shape is a tree: each audio row can own at most one live residual/target pair beneath it.
+-- Phase 20.1 chaining: a separation source may be a project_clips row OR another
+-- project_audio_clips row (a track), to arbitrary depth. Either output track is separable again.
+--
+-- The live shape is FLAT, not a tree. Separating a TRACK consumes it: the source row is
+-- soft-deleted and replaced by the two tracks it decomposes into, so a parent and its children
+-- never coexist and nothing can double-count in the mix (the mix is the sum of enabled rows).
+-- Separating a CLIP is the exception — a clip still has picture, so it can't be consumed; that
+-- path mutes the clip's own audio and adds two tracks, exactly as before.
+--
+-- parent_audio_clip_id and separation_depth are therefore PROVENANCE (undo, debugging, and the
+-- retry guard below), not structure any client has to render.
 --
 -- Additive + re-runnable (ADD COLUMN IF NOT EXISTS / DO-block guards). Existing stems backfill as
 -- depth 1 with a NULL parent, so nothing already created changes meaning.
 --
--- NOTE on provenance: source_clip_id stays populated on EVERY stem (the root clip it ultimately
--- came from) — useful for grouping and for the R2/delete sweeps. The immediate parent is
--- parent_audio_clip_id, which is NULL only at depth 1. The live-pair uniqueness index therefore
--- keys on the IMMEDIATE parent, COALESCE(parent_audio_clip_id, source_clip_id), or depth-2 stems
--- would collide with their depth-1 siblings on (source_clip_id, separation_role).
+-- NOTE: source_clip_id stays populated on EVERY stem (the clip it ultimately came from) — used by
+-- the R2/delete sweeps. The live-pair uniqueness index keys on the IMMEDIATE parent,
+-- COALESCE(parent_audio_clip_id, source_clip_id), so a depth-2 pair can't collide with the
+-- depth-1 pair that shares its root clip.
 
 -- ─── project_audio_clips: tree edges ─────────────────────────────────────────
 
