@@ -73,6 +73,21 @@ function extractSql(drizzleQuery: unknown): string {
   return String(drizzleQuery);
 }
 
+// extractSql only walks the top level, which is enough for the raw sql`...` templates this
+// service issues. Composed predicates (and(eq(...), isNull(...))) nest SQL objects inside
+// queryChunks, so flatten those recursively to inspect what a builder-style .where() was given.
+function deepSql(node: unknown): string {
+  if (node === null || node === undefined) return '';
+  if (typeof node === 'string') return node;
+  if (Array.isArray(node)) return node.map(deepSql).join('');
+  if (typeof node !== 'object') return '';
+  const obj = node as { queryChunks?: unknown[]; value?: unknown; name?: unknown };
+  if (Array.isArray(obj.queryChunks)) return obj.queryChunks.map(deepSql).join('');
+  if (obj.value !== undefined) return deepSql(obj.value);
+  if (typeof obj.name === 'string') return obj.name;
+  return '';
+}
+
 // Ownership-select chain: db.select({...}).from(projectClips).innerJoin(projects, ...).where(...)
 function makeOwnershipChain(rows: unknown[]) {
   const chain: Record<string, jest.Mock> = {};
@@ -173,16 +188,17 @@ describe('resolveSourceClipTimelineOffset', () => {
     await expect(resolveSourceClipTimelineOffset('project-1', 'clip-3')).resolves.toBe(10);
   });
 
-  it('scans in sort_order (then created_at) and excludes soft-deleted clips from the sum', async () => {
+  it('orders the scan explicitly and excludes soft-deleted clips from the sum', async () => {
     const chain = makeOrderedSelectChain([c('clip-1', 0, 3), c('clip-2', 0, 2)]);
     (mockDb.select as jest.Mock).mockReturnValueOnce(chain);
 
     await resolveSourceClipTimelineOffset('project-1', 'clip-2');
 
+    // Offsets are positional, so an unordered scan would sum an arbitrary set of "earlier" clips.
     expect(chain.orderBy).toHaveBeenCalledTimes(1);
     // A deleted_at IS NULL predicate must be part of the where — a removed clip occupies no lane.
     expect(chain.where).toHaveBeenCalledTimes(1);
-    expect(extractSql(chain.where.mock.calls[0][0])).toMatch(/is null/i);
+    expect(deepSql(chain.where.mock.calls[0][0])).toMatch(/is null/i);
   });
 
   it('rounds the accumulated offset to 3 decimals (no float drift into the DB column)', async () => {
