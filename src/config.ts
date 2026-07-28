@@ -131,7 +131,9 @@ export const config = {
   // correctly-pinned/single-billed API call rather than the documentation alone. See
   // 20.1-02-SUMMARY.md for full detail; re-verify the exact cents figure on the fal dashboard
   // (Usage/Billing page) if a materially different actual charge is ever observed.
-  audioSepEnabled: process.env.AUDIO_SEP_ENABLED === 'true',
+  // Default ON once the iOS Separate-audio tool ships — opt out with AUDIO_SEP_ENABLED=false.
+  // (Was === 'true', which left production silently 503'ing every create while the sheet showed 0 credits.)
+  audioSepEnabled: process.env.AUDIO_SEP_ENABLED !== 'false',
   audioSepModel: process.env.AUDIO_SEP_MODEL ?? 'fal-ai/sam-audio/separate',
   audioSepCreditsPerSecond: Number(process.env.AUDIO_SEP_CREDITS_PER_SECOND ?? '0.167'),
   audioSepWorkerConcurrency: Number(process.env.AUDIO_SEP_WORKER_CONCURRENCY ?? '2'),

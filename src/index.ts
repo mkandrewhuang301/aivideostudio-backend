@@ -26,6 +26,9 @@ import './queue/vlogGenerationWorker';
 import './queue/videoSummaryWorker';
 import './queue/influencerProWorker';
 import './queue/ffmpegWorker';
+// Side-effect import so the BullMQ Worker is constructed even if a future refactor stops
+// importing audioSeparationQueue through the router. Same pattern as the other workers above.
+import './queue/audioSeparationQueue';
 import { banCheckMiddleware } from './middleware/banCheck';
 import { reportsRouter } from './routes/reports';
 import { uploadsRouter } from './routes/uploads';
