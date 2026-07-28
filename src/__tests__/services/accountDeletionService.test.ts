@@ -29,6 +29,7 @@ jest.mock('../../middleware/auth', () => ({
 
 import { DeleteObjectCommand } from '@aws-sdk/client-s3';
 import {
+  audioSeparationJobs,
   creditTransactions,
   generations,
   projectAudioClips,
@@ -47,6 +48,7 @@ const tableNames = new Map<unknown, string>([
   [projectCaptionWords, 'project_caption_words'],
   [projectCaptionCues, 'project_caption_cues'],
   [projectAudioClips, 'project_audio_clips'],
+  [audioSeparationJobs, 'audio_separation_jobs'],
   [projectTextOverlays, 'project_text_overlays'],
   [projectClips, 'project_clips'],
   [projects, 'projects'],
@@ -103,6 +105,7 @@ it('deletes every owned R2 key, batches DB deletes in FK order, then deletes Fir
     'project_caption_words',
     'project_caption_cues',
     'project_audio_clips',
+    'audio_separation_jobs',
     'project_text_overlays',
     'project_clips',
     'projects',
@@ -137,6 +140,7 @@ it('pseudonymizes the user and preserves CyberTipline-held generation media on a
     'project_caption_words',
     'project_caption_cues',
     'project_audio_clips',
+    'audio_separation_jobs',
     'project_text_overlays',
     'project_clips',
     'projects',

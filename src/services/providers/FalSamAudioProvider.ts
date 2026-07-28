@@ -92,14 +92,20 @@ export class FalSamAudioProvider implements AudioSeparationProvider {
 
     const { targetUrl, residualUrl } = extractUrls(result.data);
 
-    const [target, residual] = await Promise.all([
+    // fal's schema names these fields target=isolated / residual=everything-else, but live
+    // outputs (confirmed by ear 2026-07-27 on "background music" separations) ship the two
+    // buffers swapped relative to those names: the `target` URL carries the residual mix and
+    // the `residual` URL carries the isolated prompt stem. Crossing them here keeps our
+    // AudioSeparationResult contract honest so attachSeparationStems labels/roles/enabled
+    // ("Everything else" on, prompt stem off) land on the correct audio.
+    const [falTargetField, falResidualField] = await Promise.all([
       fetchBuffer(targetUrl, 'target'),
       fetchBuffer(residualUrl, 'residual'),
     ]);
 
     return {
-      target,
-      residual,
+      target: falResidualField,
+      residual: falTargetField,
       mimeType: 'audio/mpeg',
       providerRequestId: result.requestId,
     };

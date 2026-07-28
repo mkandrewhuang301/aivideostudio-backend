@@ -5,18 +5,24 @@
 // once on failure via a Redis NX guard (CLAUDE.md rule #5 idiom). Closest analog:
 // soundtrackGenerationQueue.ts (full Queue+Worker+on('failed') skeleton copied).
 
+import { execFile } from 'child_process';
+import { promisify } from 'node:util';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { Job, Queue, Worker } from 'bullmq';
 import { eq } from 'drizzle-orm';
 import { config } from '../config';
 import { db } from '../db/client';
 import { projectClips } from '../db/schema';
-import { getGenerationPresignedUrl, uploadBufferToR2 } from '../services/archivalService';
+import { getGenerationPresignedUrl, getUploadPresignedUrl, uploadBufferToR2 } from '../services/archivalService';
 import {
   attachSeparationStems,
   completeAudioSeparation,
   getAudioSeparationJob,
   markAudioSeparationProcessing,
   refundAudioSeparation,
+  resolveSourceClipTimelineOffset,
 } from '../services/audioSeparationService';
 import {
   AudioSeparationProviderError,
@@ -24,6 +30,8 @@ import {
 } from '../services/providers/FalSamAudioProvider';
 import type { AudioSeparationResult } from '../services/providers/AudioSeparationProvider';
 import { redis } from '../redis/client';
+
+const execFileAsync = promisify(execFile);
 
 const QUEUE_NAME = 'audio-separation';
 const connection = {
@@ -46,6 +54,55 @@ export const audioSeparationQueue = new Queue<AudioSeparationJobPayload>(QUEUE_N
   },
 });
 
+/**
+ * Downloads the source clip, extracts ONLY the trimmed visible window as mp3, uploads that
+ * slice under a job-scoped R2 key, and returns a short-lived presigned URL for fal. Sending the
+ * full untrimmed file made stems the wrong length / content for trimmed clips and made a
+ * second-clip separation look empty/wrong when fal processed more than the billed window.
+ */
+async function prepareTrimmedSeparationInput(input: {
+  jobId: string;
+  r2Key: string;
+  trimStartSeconds: number;
+  durationSeconds: number;
+}): Promise<string> {
+  const tempDir = await mkdtemp(path.join(tmpdir(), 'audio-sep-'));
+  try {
+    const ext = path.extname(input.r2Key) || '.mp4';
+    const sourcePath = path.join(tempDir, `source${ext}`);
+    const audioPath = path.join(tempDir, 'input.mp3');
+
+    const sourceUrl = await getGenerationPresignedUrl(input.r2Key);
+    const response = await fetch(sourceUrl);
+    if (!response.ok) {
+      throw new AudioSeparationProviderError(
+        `Failed to download source clip (${response.status})`,
+        true,
+        'fetch_failed',
+      );
+    }
+    await writeFile(sourcePath, Buffer.from(await response.arrayBuffer()));
+
+    await execFileAsync('ffmpeg', [
+      '-y',
+      '-ss', String(Math.max(0, input.trimStartSeconds)),
+      '-t', String(Math.max(0.05, input.durationSeconds)),
+      '-i', sourcePath,
+      '-vn',
+      '-c:a', 'libmp3lame',
+      '-q:a', '4',
+      audioPath,
+    ]);
+
+    const inputKey = `audio-separation/${input.jobId}/source-input.mp3`;
+    await uploadBufferToR2(await readFile(audioPath), inputKey, 'audio/mpeg');
+    // 1h upload TTL is enough for fal to fetch; generation TTL is overkill for this ephemeral key.
+    return getUploadPresignedUrl(inputKey);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+}
+
 export async function processAudioSeparation(job: Job<AudioSeparationJobPayload>): Promise<void> {
   const id = job.data.jobId;
   // Idempotent re-run guard: markAudioSeparationProcessing returns null on a race (already
@@ -56,7 +113,10 @@ export async function processAudioSeparation(job: Job<AudioSeparationJobPayload>
   if (!row || row.status === 'completed' || row.status === 'refunded') return;
 
   const [sourceClip] = await db
-    .select({ r2_key: projectClips.r2_key })
+    .select({
+      r2_key: projectClips.r2_key,
+      trim_start_seconds: projectClips.trim_start_seconds,
+    })
     .from(projectClips)
     .where(eq(projectClips.id, row.source_clip_id));
   if (!sourceClip) {
@@ -65,7 +125,21 @@ export async function processAudioSeparation(job: Job<AudioSeparationJobPayload>
     job.discard();
     throw new AudioSeparationProviderError('Source clip no longer exists', false, 'source_missing');
   }
-  const audioUrl = await getGenerationPresignedUrl(sourceClip.r2_key);
+
+  let audioUrl: string;
+  try {
+    audioUrl = await prepareTrimmedSeparationInput({
+      jobId: id,
+      r2Key: sourceClip.r2_key,
+      trimStartSeconds: sourceClip.trim_start_seconds ?? 0,
+      durationSeconds: row.duration_seconds,
+    });
+  } catch (error) {
+    if (error instanceof AudioSeparationProviderError && !error.retryable) job.discard();
+    throw error;
+  }
+
+  const startOffsetSeconds = await resolveSourceClipTimelineOffset(row.project_id, row.source_clip_id);
 
   let result: AudioSeparationResult;
   try {
@@ -93,6 +167,7 @@ export async function processAudioSeparation(job: Job<AudioSeparationJobPayload>
     residualR2Key: residualKey,
     residualLabel: 'Everything else',
     targetLabel: row.prompt,
+    startOffsetSeconds,
   });
 
   await completeAudioSeparation({

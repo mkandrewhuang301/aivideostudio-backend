@@ -2,6 +2,7 @@ import { DeleteObjectCommand } from '@aws-sdk/client-s3';
 import { eq, or, sql } from 'drizzle-orm';
 import { db } from '../db/client';
 import {
+  audioSeparationJobs,
   creditTransactions,
   generations,
   projectAudioClips,
@@ -94,6 +95,9 @@ export async function deleteUserAccount(
     db.delete(projectAudioClips).where(sql`${projectAudioClips.project_id} IN (
       SELECT id FROM projects WHERE user_id = ${dbUserId}::uuid
     )`),
+    // Stems FK to their job via project_audio_clips.separation_job_id, so the audio clips above
+    // must clear before the job rows they point at.
+    db.delete(audioSeparationJobs).where(eq(audioSeparationJobs.user_id, dbUserId)),
     db.delete(projectTextOverlays).where(sql`${projectTextOverlays.project_id} IN (
       SELECT id FROM projects WHERE user_id = ${dbUserId}::uuid
     )`),

@@ -18,6 +18,10 @@ import {
   projectAudioClips,
   projectCaptionCues,
   projectCaptionWords,
+  projectSoundtrackGenerations,
+  projectVoiceoverGenerations,
+  projectMusicSuggestionCache,
+  audioSeparationJobs,
   generations,
 } from '../db/schema';
 import type {
@@ -361,30 +365,71 @@ export async function deleteProject(projectId: string, userId: string): Promise<
     .where(and(eq(projects.id, projectId), eq(projects.user_id, userId)));
   if (!projectRow) return false;
 
-  const [clipRows, audioRows, cueRows] = await Promise.all([
+  const [clipRows, audioRows, cueRows, soundtrackRows, voiceoverRows, separationRows] = await Promise.all([
     db.select({ r2_key: projectClips.r2_key }).from(projectClips).where(eq(projectClips.project_id, projectId)),
     db
       .select({ r2_key: projectAudioClips.r2_key })
       .from(projectAudioClips)
       .where(eq(projectAudioClips.project_id, projectId)),
     db.select({ id: projectCaptionCues.id }).from(projectCaptionCues).where(eq(projectCaptionCues.project_id, projectId)),
+    db
+      .select({
+        raw_r2_key: projectSoundtrackGenerations.raw_r2_key,
+        final_r2_key: projectSoundtrackGenerations.final_r2_key,
+      })
+      .from(projectSoundtrackGenerations)
+      .where(eq(projectSoundtrackGenerations.project_id, projectId)),
+    db
+      .select({
+        raw_r2_key: projectVoiceoverGenerations.raw_r2_key,
+        final_r2_key: projectVoiceoverGenerations.final_r2_key,
+      })
+      .from(projectVoiceoverGenerations)
+      .where(eq(projectVoiceoverGenerations.project_id, projectId)),
+    // A job that produced stems but never attached them owns R2 objects that no
+    // project_audio_clips row points at, so collect its keys separately.
+    db
+      .select({
+        target_r2_key: audioSeparationJobs.target_r2_key,
+        residual_r2_key: audioSeparationJobs.residual_r2_key,
+      })
+      .from(audioSeparationJobs)
+      .where(eq(audioSeparationJobs.project_id, projectId)),
   ]);
   const cueIds = cueRows.map((c) => c.id);
+  const separationKeys = separationRows
+    .flatMap((row) => [row.target_r2_key, row.residual_r2_key])
+    .filter((key): key is string => typeof key === 'string' && key.length > 0);
 
   if (cueIds.length > 0) {
     await db.delete(projectCaptionWords).where(inArray(projectCaptionWords.cue_id, cueIds));
   }
   await db.delete(projectCaptionCues).where(eq(projectCaptionCues.project_id, projectId));
+  // AI music / voiceover / separation tables FK to projects (and clips) without CASCADE.
+  // Delete in order that satisfies those FKs before audio clips / clips / the project row.
+  await db.delete(projectMusicSuggestionCache).where(eq(projectMusicSuggestionCache.project_id, projectId));
+  await db.delete(projectVoiceoverGenerations).where(eq(projectVoiceoverGenerations.project_id, projectId));
+  // Audio stems may FK -> jobs (separation_job_id). Delete audio first so job rows are unreferenced,
+  // then delete jobs (which FK -> project_clips.source_clip_id / projects.id).
   await db.delete(projectAudioClips).where(eq(projectAudioClips.project_id, projectId));
+  await db.delete(audioSeparationJobs).where(eq(audioSeparationJobs.project_id, projectId));
+  await db.delete(projectSoundtrackGenerations).where(eq(projectSoundtrackGenerations.project_id, projectId));
   await db.delete(projectTextOverlays).where(eq(projectTextOverlays.project_id, projectId));
   await db.delete(projectClips).where(eq(projectClips.project_id, projectId));
   await db.delete(projects).where(eq(projects.id, projectId));
 
-  const allKeys = [
+  const aiAudioKeys = [...soundtrackRows, ...voiceoverRows].flatMap((row) =>
+    [row.raw_r2_key, row.final_r2_key].filter((key): key is string => typeof key === 'string' && key.length > 0),
+  );
+  // Stems are stored under the job's own keys, so audioRows and separationKeys overlap — dedupe
+  // rather than issue a second delete for the same object.
+  const allKeys = [...new Set([
     ...clipRows.map((c) => c.r2_key),
     ...audioRows.map((a) => a.r2_key),
+    ...aiAudioKeys,
+    ...separationKeys,
     ...(projectRow.thumbnail_r2_key ? [projectRow.thumbnail_r2_key] : []),
-  ];
+  ])];
   for (const key of allKeys) {
     try {
       await r2.send(new DeleteObjectCommand({ Bucket: R2_BUCKET, Key: key }));

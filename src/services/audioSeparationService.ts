@@ -15,7 +15,7 @@
 // prior value (e.g. 0.7), never a hardcoded 1.0.
 
 import { randomUUID } from 'node:crypto';
-import { and, eq, isNull, sql } from 'drizzle-orm';
+import { and, asc, eq, isNull, sql } from 'drizzle-orm';
 import { config } from '../config';
 import { db } from '../db/client';
 import { audioSeparationJobs, projectAudioClips, projectClips, projects, type AudioSeparationJob } from '../db/schema';
@@ -56,6 +56,43 @@ export function resolveClipDurationSeconds(
     throw new AudioSeparationValidationError('clip has no resolvable duration');
   }
   return Math.round(duration * 1000) / 1000;
+}
+
+/**
+ * Project-timeline start of a source clip: sum of visible durations of every earlier clip in the
+ * same project (sort_order ascending). Separation stems must land here — not at 0 — so a
+ * separation of clip 2 spans clip 2's lane instead of the project head.
+ */
+export async function resolveSourceClipTimelineOffset(
+  projectId: string,
+  sourceClipId: string,
+): Promise<number> {
+  const clips = await db
+    .select({
+      id: projectClips.id,
+      trim_start_seconds: projectClips.trim_start_seconds,
+      trim_end_seconds: projectClips.trim_end_seconds,
+      original_duration_seconds: projectClips.original_duration_seconds,
+    })
+    .from(projectClips)
+    .where(and(
+      eq(projectClips.project_id, projectId),
+      isNull(projectClips.deleted_at),
+    ))
+    .orderBy(asc(projectClips.sort_order), asc(projectClips.created_at));
+
+  const targetIndex = clips.findIndex((clip) => clip.id === sourceClipId);
+  if (targetIndex < 0) return 0;
+
+  let offset = 0;
+  for (const clip of clips.slice(0, targetIndex)) {
+    try {
+      offset += resolveClipDurationSeconds(clip);
+    } catch {
+      // Skip clips with no resolvable duration rather than aborting placement.
+    }
+  }
+  return Math.round(offset * 1000) / 1000;
 }
 
 function computeSeparationCredits(durationSeconds: number): number {
@@ -222,6 +259,8 @@ export interface AttachSeparationStemsInput {
   residualR2Key: string;
   residualLabel: string;
   targetLabel: string;
+  /** Project-timeline seconds where the source clip begins. Defaults to 0 only as a last resort. */
+  startOffsetSeconds?: number;
 }
 
 export interface AttachSeparationStemsResult {
@@ -288,6 +327,8 @@ export async function attachSeparationStems(input: AttachSeparationStemsInput): 
       AND deleted_at IS NULL
   `);
 
+  const startOffsetSeconds = Math.max(0, input.startOffsetSeconds ?? 0);
+
   const insertResidualQuery = db.insert(projectAudioClips).values({
     project_id: input.job.project_id,
     r2_key: input.residualR2Key,
@@ -298,6 +339,7 @@ export async function attachSeparationStems(input: AttachSeparationStemsInput): 
     sort_order: 0,
     label: input.residualLabel,
     prompt: input.job.prompt,
+    start_offset_seconds: startOffsetSeconds,
     original_duration_seconds: input.job.duration_seconds,
     trim_end_seconds: input.job.duration_seconds,
     enabled: true,
@@ -314,6 +356,7 @@ export async function attachSeparationStems(input: AttachSeparationStemsInput): 
     sort_order: 1,
     label: input.targetLabel,
     prompt: input.job.prompt,
+    start_offset_seconds: startOffsetSeconds,
     original_duration_seconds: input.job.duration_seconds,
     trim_end_seconds: input.job.duration_seconds,
     enabled: false,

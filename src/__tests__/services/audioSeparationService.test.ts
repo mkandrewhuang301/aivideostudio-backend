@@ -38,6 +38,7 @@ import { config } from '../../config';
 import type { AudioSeparationJob } from '../../db/schema';
 import {
   resolveClipDurationSeconds,
+  resolveSourceClipTimelineOffset,
   verifyClipOwnership,
   quoteAudioSeparation,
   checkDailyRateLimit,
@@ -89,6 +90,15 @@ function makePlainSelectChain(rows: unknown[]) {
   return chain;
 }
 
+// Ordered select chain: db.select().from(table).where(...).orderBy(...) — the timeline scan.
+function makeOrderedSelectChain(rows: unknown[]) {
+  const chain: Record<string, jest.Mock> = {};
+  chain.from = jest.fn().mockReturnValue(chain);
+  chain.where = jest.fn().mockReturnValue(chain);
+  chain.orderBy = jest.fn().mockResolvedValue(rows);
+  return chain;
+}
+
 const OWNED_CLIP_ROW = {
   id: 'clip-1',
   project_id: 'project-1',
@@ -127,6 +137,76 @@ describe('resolveClipDurationSeconds', () => {
       .toThrow(AudioSeparationValidationError);
     expect(() => resolveClipDurationSeconds({ trim_start_seconds: 10, trim_end_seconds: 5, original_duration_seconds: null }))
       .toThrow(AudioSeparationValidationError);
+  });
+});
+
+// ─── resolveSourceClipTimelineOffset ──────────────────────────────────────────
+//
+// Stems must land at the source clip's position on the project timeline, not at 0 — a separation
+// of clip 3 has to play over clip 3's lane. The offset is the summed visible duration of every
+// earlier clip, so these tests pin the summation, the ordering it depends on, and the fallbacks.
+
+describe('resolveSourceClipTimelineOffset', () => {
+  const c = (id: string, start: number, end: number) => ({
+    id,
+    trim_start_seconds: start,
+    trim_end_seconds: end,
+    original_duration_seconds: end - start,
+  });
+
+  it('returns 0 for the first clip on the timeline', async () => {
+    (mockDb.select as jest.Mock).mockReturnValueOnce(
+      makeOrderedSelectChain([c('clip-1', 0, 4), c('clip-2', 0, 6)]),
+    );
+    await expect(resolveSourceClipTimelineOffset('project-1', 'clip-1')).resolves.toBe(0);
+  });
+
+  it('sums the VISIBLE (trimmed) durations of every earlier clip, not their original lengths', async () => {
+    (mockDb.select as jest.Mock).mockReturnValueOnce(
+      makeOrderedSelectChain([
+        // 30s source trimmed down to 4 visible seconds — the timeline only advances by 4.
+        { id: 'clip-1', trim_start_seconds: 10, trim_end_seconds: 14, original_duration_seconds: 30 },
+        { id: 'clip-2', trim_start_seconds: 0, trim_end_seconds: 6, original_duration_seconds: 6 },
+        c('clip-3', 0, 5),
+      ]),
+    );
+    await expect(resolveSourceClipTimelineOffset('project-1', 'clip-3')).resolves.toBe(10);
+  });
+
+  it('scans in sort_order (then created_at) and excludes soft-deleted clips from the sum', async () => {
+    const chain = makeOrderedSelectChain([c('clip-1', 0, 3), c('clip-2', 0, 2)]);
+    (mockDb.select as jest.Mock).mockReturnValueOnce(chain);
+
+    await resolveSourceClipTimelineOffset('project-1', 'clip-2');
+
+    expect(chain.orderBy).toHaveBeenCalledTimes(1);
+    // A deleted_at IS NULL predicate must be part of the where — a removed clip occupies no lane.
+    expect(chain.where).toHaveBeenCalledTimes(1);
+    expect(extractSql(chain.where.mock.calls[0][0])).toMatch(/is null/i);
+  });
+
+  it('rounds the accumulated offset to 3 decimals (no float drift into the DB column)', async () => {
+    (mockDb.select as jest.Mock).mockReturnValueOnce(
+      makeOrderedSelectChain([c('clip-1', 0, 0.1), c('clip-2', 0, 0.2), c('clip-3', 0, 5)]),
+    );
+    await expect(resolveSourceClipTimelineOffset('project-1', 'clip-3')).resolves.toBe(0.3);
+  });
+
+  it('falls back to 0 when the source clip is not in the project (rather than throwing)', async () => {
+    (mockDb.select as jest.Mock).mockReturnValueOnce(makeOrderedSelectChain([c('clip-1', 0, 4)]));
+    await expect(resolveSourceClipTimelineOffset('project-1', 'ghost-clip')).resolves.toBe(0);
+  });
+
+  it('skips an earlier clip with no resolvable duration instead of aborting the whole placement', async () => {
+    (mockDb.select as jest.Mock).mockReturnValueOnce(
+      makeOrderedSelectChain([
+        c('clip-1', 0, 4),
+        { id: 'clip-2', trim_start_seconds: 0, trim_end_seconds: null, original_duration_seconds: null },
+        c('clip-3', 0, 5),
+      ]),
+    );
+    // clip-2 contributes nothing, but clip-1's 4s still places clip-3 correctly.
+    await expect(resolveSourceClipTimelineOffset('project-1', 'clip-3')).resolves.toBe(4);
   });
 });
 
@@ -392,11 +472,26 @@ describe('attachSeparationStems', () => {
     expect(residualValues.mock.calls[0][0]).toMatchObject({
       enabled: true, source_type: 'separation', source_clip_id: 'clip-1',
       separation_job_id: 'job-1', separation_role: 'residual', sort_order: 0,
+      start_offset_seconds: 0,
     });
     expect(targetValues.mock.calls[0][0]).toMatchObject({
       enabled: false, source_type: 'separation', source_clip_id: 'clip-1',
       separation_job_id: 'job-1', separation_role: 'target', sort_order: 1,
+      start_offset_seconds: 0,
     });
+  });
+
+  it('places both stems at the source clip timeline offset (not project 0)', async () => {
+    const { residualValues, targetValues } = wireHappyPath(1);
+
+    await attachSeparationStems({
+      job: JOB, targetR2Key: 'k-target', residualR2Key: 'k-residual',
+      residualLabel: 'Everything else', targetLabel: 'background music',
+      startOffsetSeconds: 4.25,
+    });
+
+    expect(residualValues.mock.calls[0][0]).toMatchObject({ start_offset_seconds: 4.25 });
+    expect(targetValues.mock.calls[0][0]).toMatchObject({ start_offset_seconds: 4.25 });
   });
 
   it('soft-deletes (never hard-deletes) any prior live stems for the same source clip before inserting the new pair', async () => {
@@ -442,6 +537,24 @@ describe('attachSeparationStems', () => {
     });
     expect(result.residualClipId).toBe('residual-clip-id');
     expect(result.targetClipId).toBe('target-clip-id');
+  });
+
+  it('defaults to 0 when no offset is supplied, and clamps a negative offset to 0', async () => {
+    const noOffset = wireHappyPath(1);
+    await attachSeparationStems({
+      job: JOB, targetR2Key: 'k-target', residualR2Key: 'k-residual', residualLabel: 'Everything else', targetLabel: 'background music',
+    });
+    expect(noOffset.residualValues.mock.calls[0][0]).toMatchObject({ start_offset_seconds: 0 });
+
+    jest.clearAllMocks();
+    const negative = wireHappyPath(1);
+    await attachSeparationStems({
+      job: JOB, targetR2Key: 'k-target', residualR2Key: 'k-residual',
+      residualLabel: 'Everything else', targetLabel: 'background music',
+      startOffsetSeconds: -3,
+    });
+    expect(negative.residualValues.mock.calls[0][0]).toMatchObject({ start_offset_seconds: 0 });
+    expect(negative.targetValues.mock.calls[0][0]).toMatchObject({ start_offset_seconds: 0 });
   });
 });
 
