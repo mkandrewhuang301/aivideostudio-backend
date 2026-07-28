@@ -12,11 +12,12 @@
 
 const mockSelect = jest.fn();
 const mockDelete = jest.fn();
+const mockExecute = jest.fn();
 jest.mock('../../db/client', () => ({
   db: {
     select: mockSelect,
     delete: mockDelete,
-    execute: jest.fn(),
+    execute: mockExecute,
     insert: jest.fn(),
     update: jest.fn(),
     batch: jest.fn(),
@@ -97,12 +98,13 @@ function fullProjectRowSets(): unknown[][] {
     [{ id: 'cue-1' }, { id: 'cue-2' }],
     [{ raw_r2_key: 'projects/p1/music/raw.wav', final_r2_key: 'projects/p1/music/final.m4a' }],
     [{ raw_r2_key: 'projects/p1/vo/raw.wav', final_r2_key: 'projects/p1/vo/final.m4a' }],
-    [{ target_r2_key: 'projects/p1/sep/target.mp3', residual_r2_key: 'projects/p1/sep/residual.mp3' }],
+    [{ id: 'job-1', target_r2_key: 'projects/p1/sep/target.mp3', residual_r2_key: 'projects/p1/sep/residual.mp3' }],
   ];
 }
 
 beforeEach(() => {
   jest.clearAllMocks();
+  mockExecute.mockResolvedValue({ rows: [] });
   mockR2Send.mockResolvedValue({});
   mockDelete.mockImplementation((table: unknown) => ({
     where: jest.fn().mockResolvedValue({ tableName: tableNames.get(table) }),
@@ -238,6 +240,35 @@ describe('deleteProject — R2 key collection', () => {
     await deleteProject(PROJECT_ID, USER_ID);
 
     expect(deletedR2Keys()).not.toContain('projects/p1/thumb.jpg');
+  });
+
+  it("deletes each job's source-input.mp3, whose key lives in no DB column", async () => {
+    wireSelects(fullProjectRowSets());
+
+    await deleteProject(PROJECT_ID, USER_ID);
+
+    // Reconstructed from the job id — the only way to reach it, since the worker writes it to a
+    // deterministic key and stores that key nowhere.
+    expect(deletedR2Keys()).toContain('audio-separation/job-1/source-input.mp3');
+  });
+
+  it('breaks the job<->stem FK cycle before deleting either table', async () => {
+    wireSelects(fullProjectRowSets());
+
+    await deleteProject(PROJECT_ID, USER_ID);
+
+    const clearEdge = mockExecute.mock.calls.find(([q]) =>
+      JSON.stringify(q ?? '').includes('source_audio_clip_id'));
+    expect(clearEdge).toBeDefined();
+
+    // audio_separation_jobs.source_audio_clip_id -> project_audio_clips and
+    // project_audio_clips.separation_job_id -> audio_separation_jobs form a cycle; clearing the
+    // job->stem edge must happen before either DELETE or both are blocked.
+    const clearOrder = mockExecute.mock.invocationCallOrder[mockExecute.mock.calls.indexOf(clearEdge!)];
+    const audioDeleteIdx = deletedTablesInOrder().indexOf('project_audio_clips');
+    const jobsDeleteIdx = deletedTablesInOrder().indexOf('audio_separation_jobs');
+    expect(clearOrder).toBeLessThan(mockDelete.mock.invocationCallOrder[audioDeleteIdx]);
+    expect(clearOrder).toBeLessThan(mockDelete.mock.invocationCallOrder[jobsDeleteIdx]);
   });
 
   it('still reports success when an R2 delete fails (DB rows are already gone — never strand the project)', async () => {

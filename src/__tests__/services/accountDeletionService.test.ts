@@ -61,14 +61,21 @@ const tableNames = new Map<unknown, string>([
 
 beforeEach(() => {
   jest.clearAllMocks();
-  mockExecute.mockResolvedValue({
-    rows: [
-      { r2_key: 'generations/user/video.mp4' },
-      { r2_key: 'uploads/user/reference.jpg' },
-      { r2_key: 'projects/user/thumbnail.jpg' },
-      { r2_key: 'projects/user/clips/clip.mp4' },
-      { r2_key: 'projects/user/audio/audio.mp3' },
-    ],
+  mockExecute.mockImplementation((query: unknown) => {
+    // The FK-cycle break (clearing audio_separation_jobs.source_audio_clip_id) is a raw UPDATE
+    // inside the delete batch, so tag it to keep the batch-order assertion readable.
+    if (JSON.stringify(query ?? '').includes('source_audio_clip_id')) {
+      return { rows: [], tableName: 'clear_job_stem_edge' };
+    }
+    return {
+      rows: [
+        { r2_key: 'generations/user/video.mp4' },
+        { r2_key: 'uploads/user/reference.jpg' },
+        { r2_key: 'projects/user/thumbnail.jpg' },
+        { r2_key: 'projects/user/clips/clip.mp4' },
+        { r2_key: 'projects/user/audio/audio.mp3' },
+      ],
+    };
   });
   mockR2Send.mockResolvedValue({});
   mockBatch.mockResolvedValue([]);
@@ -104,6 +111,7 @@ it('deletes every owned R2 key, batches DB deletes in FK order, then deletes Fir
   expect(batch.map((query) => query.tableName)).toEqual([
     'project_caption_words',
     'project_caption_cues',
+    'clear_job_stem_edge',
     'project_audio_clips',
     'audio_separation_jobs',
     'project_text_overlays',
@@ -139,6 +147,7 @@ it('pseudonymizes the user and preserves CyberTipline-held generation media on a
   expect(batch.map((query) => query.tableName)).toEqual([
     'project_caption_words',
     'project_caption_cues',
+    'clear_job_stem_edge',
     'project_audio_clips',
     'audio_separation_jobs',
     'project_text_overlays',

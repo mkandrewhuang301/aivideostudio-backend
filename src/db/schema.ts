@@ -11,6 +11,7 @@ import {
   uniqueIndex,
   index,
   doublePrecision,
+  type AnyPgColumn,
 } from 'drizzle-orm/pg-core';
 import { sql, desc } from 'drizzle-orm';
 
@@ -545,8 +546,19 @@ export const projectAudioClips = pgTable(
     // is 'residual' | 'target'; both are null for non-stem rows. A partial unique index on
     // (source_clip_id, separation_role) WHERE source_type='separation' AND deleted_at IS NULL
     // enforces "at most one live pair per source clip" at the DB layer.
-    separation_job_id: uuid('separation_job_id').references(() => audioSeparationJobs.id),
+    // projectAudioClips <-> audioSeparationJobs reference each other (a stem names its job; a
+    // chained job names its source stem), so both sides need the explicit AnyPgColumn return
+    // annotation to break TS's circular inference.
+    separation_job_id: uuid('separation_job_id').references((): AnyPgColumn => audioSeparationJobs.id),
     separation_role: text('separation_role'), // 'residual' | 'target'
+    // Chaining (2026-07-28): either stem of a pair can itself be separated, to arbitrary depth,
+    // so stems form a tree. parent_audio_clip_id is the IMMEDIATE parent and is NULL at depth 1
+    // (separated straight from a clip); source_clip_id stays populated at every depth as the root
+    // clip's provenance. separation_depth is 0 for non-stems, 1 for a clip-sourced stem, 2+ below.
+    // Live-pair uniqueness keys on COALESCE(parent_audio_clip_id, source_clip_id) — see
+    // 2026-07-28-audio-separation-chaining.sql.
+    parent_audio_clip_id: uuid('parent_audio_clip_id').references((): AnyPgColumn => projectAudioClips.id),
+    separation_depth: integer('separation_depth').notNull().default(0),
     // Soft-delete (Plan 13-21 B1) — see project_clips.deleted_at for the contract.
     deleted_at: timestamp('deleted_at', { withTimezone: true }), // nullable
     created_at: timestamp('created_at', { withTimezone: true })
@@ -570,7 +582,10 @@ export const audioSeparationJobs = pgTable(
     id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
     user_id: uuid('user_id').notNull().references(() => users.id),
     project_id: uuid('project_id').notNull().references(() => projects.id),
-    source_clip_id: uuid('source_clip_id').notNull().references(() => projectClips.id),
+    // Exactly one source is set (DB CHECK audio_sep_jobs_one_source_chk): a clip for a depth-1
+    // separation, or an audio clip when separating a stem (chaining, any depth).
+    source_clip_id: uuid('source_clip_id').references(() => projectClips.id),
+    source_audio_clip_id: uuid('source_audio_clip_id').references((): AnyPgColumn => projectAudioClips.id),
     idempotency_key: text('idempotency_key').notNull(),
     status: audioSeparationStatusEnum('status').notNull().default('pending'),
     provider: text('provider').notNull(),
@@ -583,7 +598,11 @@ export const audioSeparationJobs = pgTable(
     residual_r2_key: text('residual_r2_key'),
     target_audio_clip_id: uuid('target_audio_clip_id'),
     residual_audio_clip_id: uuid('residual_audio_clip_id'),
+    // Undo state. A clip-sourced job records the clip's pre-mute volume; an audio-sourced job
+    // records the source stem's pre-separation enabled/gain (separating switches it OFF).
     source_prior_volume: doublePrecision('source_prior_volume'),
+    source_prior_enabled: boolean('source_prior_enabled'),
+    source_prior_gain: doublePrecision('source_prior_gain'),
     failure_code: text('failure_code'),
     failure_reason: text('failure_reason'),
     retry_count: integer('retry_count').notNull().default(0),

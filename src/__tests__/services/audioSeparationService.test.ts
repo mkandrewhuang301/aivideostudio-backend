@@ -39,6 +39,7 @@ import type { AudioSeparationJob } from '../../db/schema';
 import {
   resolveClipDurationSeconds,
   resolveSourceClipTimelineOffset,
+  resolveSeparationSource,
   verifyClipOwnership,
   quoteAudioSeparation,
   checkDailyRateLimit,
@@ -571,6 +572,218 @@ describe('attachSeparationStems', () => {
     });
     expect(negative.residualValues.mock.calls[0][0]).toMatchObject({ start_offset_seconds: 0 });
     expect(negative.targetValues.mock.calls[0][0]).toMatchObject({ start_offset_seconds: 0 });
+  });
+});
+
+// ─── attachSeparationStems: chained (audio-clip source) ───────────────────────
+//
+// Separating a stem must behave like separating a clip EXCEPT for the three things that are
+// inherently clip-specific: what gets silenced, how prior live stems are scoped, and what undo
+// restores. These pin exactly those differences.
+
+describe('attachSeparationStems — chained from a stem', () => {
+  const PARENT_STEM_ID = 'stem-parent-1';
+  const CHAINED_JOB = {
+    id: 'job-2',
+    project_id: 'project-1',
+    source_clip_id: 'clip-1',      // root provenance survives at every depth
+    source_audio_clip_id: PARENT_STEM_ID,
+    prompt: 'drums',
+    duration_seconds: 8,
+  } as unknown as AudioSeparationJob;
+
+  function wireChained(priorEnabled: boolean, priorGain: number) {
+    (mockDb.execute as jest.Mock).mockImplementation((query: unknown) => ({ __sql: extractSql(query) }));
+
+    const residualValues = jest.fn().mockReturnValue({ returning: jest.fn().mockReturnValue({ __insert: 'residual' }) });
+    const targetValues = jest.fn().mockReturnValue({ returning: jest.fn().mockReturnValue({ __insert: 'target' }) });
+    (mockDb.insert as jest.Mock)
+      .mockReturnValueOnce({ values: residualValues })
+      .mockReturnValueOnce({ values: targetValues });
+
+    (mockDb.batch as jest.Mock).mockImplementation(async () => [
+      { rows: [{ source_prior_enabled: priorEnabled, source_prior_gain: priorGain }] },
+      { rows: [] },
+      [{ id: 'residual-2' }],
+      [{ id: 'target-2' }],
+      { rows: [{ id: PARENT_STEM_ID }] },
+    ]);
+
+    return { residualValues, targetValues };
+  }
+
+  const baseInput = {
+    job: CHAINED_JOB,
+    targetR2Key: 'k-target-2',
+    residualR2Key: 'k-residual-2',
+    residualLabel: 'Everything else',
+    targetLabel: 'drums',
+  };
+
+  it('links both new stems to the parent stem and stores them one level deeper', async () => {
+    const { residualValues, targetValues } = wireChained(true, 1);
+
+    await attachSeparationStems({ ...baseInput, sourceDepth: 1, rootClipId: 'clip-1', startOffsetSeconds: 4 });
+
+    for (const values of [residualValues, targetValues]) {
+      expect(values.mock.calls[0][0]).toMatchObject({
+        parent_audio_clip_id: PARENT_STEM_ID,
+        separation_depth: 2,
+        source_clip_id: 'clip-1',   // root provenance carried down
+        start_offset_seconds: 4,
+      });
+    }
+  });
+
+  it('keeps the residual/target partition identical to a clip-sourced separation', async () => {
+    const { residualValues, targetValues } = wireChained(true, 1);
+
+    await attachSeparationStems({ ...baseInput, sourceDepth: 1 });
+
+    expect(residualValues.mock.calls[0][0]).toMatchObject({ separation_role: 'residual', enabled: true, sort_order: 0 });
+    expect(targetValues.mock.calls[0][0]).toMatchObject({ separation_role: 'target', enabled: false, sort_order: 1 });
+  });
+
+  it('scopes the soft-delete of prior stems by PARENT, so a sibling stem\'s children survive', async () => {
+    wireChained(true, 1);
+
+    await attachSeparationStems({ ...baseInput, sourceDepth: 1 });
+
+    const softDelete = (mockDb.execute as jest.Mock).mock.calls
+      .find((call) => extractSql(call[0]).includes('SET deleted_at = now()'));
+    expect(softDelete).toBeDefined();
+    const sqlText = extractSql(softDelete![0]);
+    expect(sqlText).toMatch(/parent_audio_clip_id =/);
+    // Scoping by source_clip_id here would nuke every stem sharing the same root clip.
+    expect(sqlText).not.toMatch(/WHERE source_clip_id =/);
+    expect(sqlText).not.toMatch(/DELETE FROM/);
+  });
+
+  it('silences the source by DISABLING the stem, never by muting the root clip', async () => {
+    wireChained(true, 1);
+
+    await attachSeparationStems({ ...baseInput, sourceDepth: 1 });
+
+    const sqls = (mockDb.execute as jest.Mock).mock.calls.map((call) => extractSql(call[0]));
+    expect(sqls.some((s) => /UPDATE project_audio_clips SET enabled = false/.test(s))).toBe(true);
+    // Muting project_clips would silence the original video clip a level above — wrong node.
+    expect(sqls.some((s) => /UPDATE project_clips SET volume = 0/.test(s))).toBe(false);
+  });
+
+  it('captures the source stem\'s prior enabled/gain for undo, carrying forward from the oldest live pair', async () => {
+    wireChained(true, 0.6);
+
+    const result = await attachSeparationStems({ ...baseInput, sourceDepth: 1 });
+
+    expect(result.sourcePriorEnabled).toBe(true);
+    expect(result.sourcePriorGain).toBe(0.6);
+
+    const capture = (mockDb.execute as jest.Mock).mock.calls
+      .find((call) => extractSql(call[0]).includes('source_prior_enabled = COALESCE'));
+    expect(capture).toBeDefined();
+    const sqlText = extractSql(capture![0]);
+    // Same carry-forward shape as the clip path: oldest live child pair wins over the (already
+    // mutated) current row, or a re-separation would capture the disabled state and strand undo.
+    expect(sqlText).toMatch(/ORDER BY j2\.created_at ASC/);
+    expect(sqlText).toMatch(/a2\.deleted_at IS NULL/);
+    expect(sqlText).toMatch(/source_prior_gain = COALESCE/);
+  });
+
+  it('still batches all five steps atomically', async () => {
+    wireChained(true, 1);
+    await attachSeparationStems({ ...baseInput, sourceDepth: 1 });
+    expect(mockDb.batch).toHaveBeenCalledTimes(1);
+    expect((mockDb.batch as jest.Mock).mock.calls[0][0]).toHaveLength(5);
+  });
+
+  it('defaults a missing gain/enabled capture to unity rather than silencing the stem forever', async () => {
+    (mockDb.execute as jest.Mock).mockImplementation((query: unknown) => ({ __sql: extractSql(query) }));
+    (mockDb.insert as jest.Mock)
+      .mockReturnValueOnce({ values: jest.fn().mockReturnValue({ returning: jest.fn().mockReturnValue({}) }) })
+      .mockReturnValueOnce({ values: jest.fn().mockReturnValue({ returning: jest.fn().mockReturnValue({}) }) });
+    (mockDb.batch as jest.Mock).mockImplementation(async () => [
+      { rows: [{ source_prior_enabled: null, source_prior_gain: null }] },
+      { rows: [] },
+      [{ id: 'residual-2' }],
+      [{ id: 'target-2' }],
+      { rows: [] },
+    ]);
+
+    const result = await attachSeparationStems({ ...baseInput, sourceDepth: 1 });
+
+    expect(result.sourcePriorEnabled).toBe(true);
+    expect(result.sourcePriorGain).toBe(1);
+  });
+});
+
+// ─── clip-sourced stems record their tree position too ────────────────────────
+
+describe('attachSeparationStems — tree fields on a clip-sourced pair', () => {
+  it('stores depth 1 with a null parent, so chaining can hang children off either stem', async () => {
+    (mockDb.execute as jest.Mock).mockImplementation((query: unknown) => ({ __sql: extractSql(query) }));
+    const residualValues = jest.fn().mockReturnValue({ returning: jest.fn().mockReturnValue({}) });
+    const targetValues = jest.fn().mockReturnValue({ returning: jest.fn().mockReturnValue({}) });
+    (mockDb.insert as jest.Mock)
+      .mockReturnValueOnce({ values: residualValues })
+      .mockReturnValueOnce({ values: targetValues });
+    (mockDb.batch as jest.Mock).mockImplementation(async () => [
+      { rows: [{ source_prior_volume: 1 }] }, { rows: [] },
+      [{ id: 'r' }], [{ id: 't' }], { rows: [] },
+    ]);
+
+    await attachSeparationStems({
+      job: { id: 'job-1', project_id: 'project-1', source_clip_id: 'clip-1', source_audio_clip_id: null, prompt: 'background music', duration_seconds: 10 } as unknown as AudioSeparationJob,
+      targetR2Key: 'k-t', residualR2Key: 'k-r', residualLabel: 'Everything else', targetLabel: 'background music',
+    });
+
+    for (const values of [residualValues, targetValues]) {
+      expect(values.mock.calls[0][0]).toMatchObject({
+        parent_audio_clip_id: null,
+        separation_depth: 1,
+        source_clip_id: 'clip-1',
+      });
+    }
+  });
+});
+
+// ─── resolveSeparationSource ──────────────────────────────────────────────────
+
+describe('resolveSeparationSource', () => {
+  it('rejects supplying both a clip and an audio clip', async () => {
+    await expect(resolveSeparationSource({ clipId: 'c', audioClipId: 'a' }, 'user-1'))
+      .rejects.toBeInstanceOf(AudioSeparationValidationError);
+  });
+
+  it('rejects supplying neither', async () => {
+    await expect(resolveSeparationSource({}, 'user-1'))
+      .rejects.toBeInstanceOf(AudioSeparationValidationError);
+  });
+
+  it('resolves a clip source and prices it from the clip duration', async () => {
+    (mockDb.select as jest.Mock).mockReturnValueOnce(makeOwnershipChain([{ ...OWNED_CLIP_ROW, r2_key: 'projects/p/clip.mp4' }]));
+
+    const source = await resolveSeparationSource({ clipId: 'clip-1' }, 'user-1');
+
+    expect(source).toMatchObject({ kind: 'clip', id: 'clip-1', projectId: 'project-1', durationSeconds: 10 });
+  });
+
+  it('resolves a stem source and prices it from the stem duration', async () => {
+    (mockDb.select as jest.Mock).mockReturnValueOnce(makeOwnershipChain([{
+      id: 'stem-1', project_id: 'project-1', r2_key: 'audio-separation/j/residual.mp3',
+      enabled: true, gain: 1, start_offset_seconds: 4, separation_depth: 1, source_clip_id: 'clip-1',
+      trim_start_seconds: 0, trim_end_seconds: 6, original_duration_seconds: 6,
+    }]));
+
+    const source = await resolveSeparationSource({ audioClipId: 'stem-1' }, 'user-1');
+
+    expect(source).toMatchObject({ kind: 'audio_clip', id: 'stem-1', projectId: 'project-1', durationSeconds: 6 });
+  });
+
+  it('throws NotFound for a stem owned by another user (no existence leak)', async () => {
+    (mockDb.select as jest.Mock).mockReturnValueOnce(makeOwnershipChain([]));
+
+    await expect(resolveSeparationSource({ audioClipId: 'stem-1' }, 'user-1'))
+      .rejects.toBeInstanceOf(AudioSeparationNotFoundError);
   });
 });
 

@@ -92,6 +92,13 @@ export async function deleteUserAccount(
     db.delete(projectCaptionCues).where(sql`${projectCaptionCues.project_id} IN (
       SELECT id FROM projects WHERE user_id = ${dbUserId}::uuid
     )`),
+    // project_audio_clips and audio_separation_jobs reference each other (stem -> its job via
+    // separation_job_id; chained job -> its source stem via source_audio_clip_id). Clear the
+    // job -> stem edge first or neither table can be deleted.
+    db.execute(sql`
+      UPDATE audio_separation_jobs SET source_audio_clip_id = NULL
+      WHERE user_id = ${dbUserId}::uuid AND source_audio_clip_id IS NOT NULL
+    `),
     db.delete(projectAudioClips).where(sql`${projectAudioClips.project_id} IN (
       SELECT id FROM projects WHERE user_id = ${dbUserId}::uuid
     )`),

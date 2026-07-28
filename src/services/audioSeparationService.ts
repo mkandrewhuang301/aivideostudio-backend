@@ -35,6 +35,7 @@ export interface AudioSeparationQuote {
 export interface OwnedClip {
   id: string;
   project_id: string;
+  r2_key: string;
   volume: number;
   trim_start_seconds: number;
   trim_end_seconds: number | null;
@@ -99,6 +100,107 @@ function computeSeparationCredits(durationSeconds: number): number {
   return Math.max(1, Math.ceil(durationSeconds * config.audioSepCreditsPerSecond));
 }
 
+// ─── Separation sources (chaining) ────────────────────────────────────────────
+//
+// A separation runs on EITHER a project_clips row (depth 1 — the original video clip) or a
+// project_audio_clips row (a stem, any depth). Both stems of a pair are separable, so stems form
+// a tree. The provider step is already audio-only (the worker's ffmpeg pass strips video to mp3
+// before anything reaches fal), so a stem source needs no new provider handling — only different
+// bookkeeping: where the stems sit on the timeline, what "silence the source" means, and what
+// undo has to restore.
+
+export type SeparationSourceKind = 'clip' | 'audio_clip';
+
+/**
+ * What job CREATION needs to know about a source: who owns it, which project it belongs to, and
+ * how long it is (for pricing). Deliberately excludes the r2 key and timeline offset — those are
+ * execution-time concerns resolved by the worker, and fetching them here would cost an extra
+ * round-trip on every quote/create.
+ */
+export interface SeparationSource {
+  kind: SeparationSourceKind;
+  id: string;
+  projectId: string;
+  durationSeconds: number;
+}
+
+/**
+ * Ownership-scoped audio-clip lookup — the stem-source twin of verifyClipOwnership, with the same
+ * no-existence-leak contract (a foreign or soft-deleted row throws NotFound, never 403).
+ */
+export async function verifyAudioClipOwnership(audioClipId: string, userId: string): Promise<{
+  id: string;
+  project_id: string;
+  r2_key: string;
+  enabled: boolean;
+  gain: number;
+  start_offset_seconds: number;
+  separation_depth: number;
+  source_clip_id: string | null;
+  trim_start_seconds: number;
+  trim_end_seconds: number | null;
+  original_duration_seconds: number | null;
+}> {
+  const [row] = await db
+    .select({
+      id: projectAudioClips.id,
+      project_id: projectAudioClips.project_id,
+      r2_key: projectAudioClips.r2_key,
+      enabled: projectAudioClips.enabled,
+      gain: projectAudioClips.gain,
+      start_offset_seconds: projectAudioClips.start_offset_seconds,
+      separation_depth: projectAudioClips.separation_depth,
+      source_clip_id: projectAudioClips.source_clip_id,
+      trim_start_seconds: projectAudioClips.trim_start_seconds,
+      trim_end_seconds: projectAudioClips.trim_end_seconds,
+      original_duration_seconds: projectAudioClips.original_duration_seconds,
+    })
+    .from(projectAudioClips)
+    .innerJoin(projects, eq(projectAudioClips.project_id, projects.id))
+    .where(and(
+      eq(projectAudioClips.id, audioClipId),
+      eq(projects.user_id, userId),
+      isNull(projectAudioClips.deleted_at),
+    ));
+  if (!row) throw new AudioSeparationNotFoundError();
+  return row;
+}
+
+/**
+ * Normalizes either source kind into the single descriptor the rest of the pipeline consumes.
+ * Exactly one of clipId / audioClipId must be supplied (mirrors the DB's
+ * audio_sep_jobs_one_source_chk).
+ */
+export async function resolveSeparationSource(
+  input: { clipId?: string; audioClipId?: string },
+  userId: string,
+): Promise<SeparationSource> {
+  const { clipId, audioClipId } = input;
+  if ((clipId == null) === (audioClipId == null)) {
+    throw new AudioSeparationValidationError('Provide exactly one of clipId or audioClipId');
+  }
+
+  if (clipId != null) {
+    const clip = await verifyClipOwnership(clipId, userId);
+    return {
+      kind: 'clip',
+      id: clip.id,
+      projectId: clip.project_id,
+      durationSeconds: resolveClipDurationSeconds(clip),
+    };
+  }
+
+  const audio = await verifyAudioClipOwnership(audioClipId as string, userId);
+  return {
+    kind: 'audio_clip',
+    id: audio.id,
+    projectId: audio.project_id,
+    // project_audio_clips uses the same trim/original-duration field names as project_clips, so
+    // the existing resolver applies unchanged.
+    durationSeconds: resolveClipDurationSeconds(audio),
+  };
+}
+
 /**
  * Ownership-scoped clip lookup (DECISIONS.md §5 input-scoping guard: separation only ever runs on
  * a user-owned, already-paid clip — prevents use as a free general-purpose stem API). A clip owned
@@ -110,6 +212,7 @@ export async function verifyClipOwnership(clipId: string, userId: string): Promi
     .select({
       id: projectClips.id,
       project_id: projectClips.project_id,
+      r2_key: projectClips.r2_key,
       volume: projectClips.volume,
       trim_start_seconds: projectClips.trim_start_seconds,
       trim_end_seconds: projectClips.trim_end_seconds,
@@ -132,6 +235,13 @@ export async function quoteAudioSeparation(clipId: string, userId: string): Prom
   return { supported: true, duration_seconds: durationSeconds, cost_credits: computeSeparationCredits(durationSeconds) };
 }
 
+/** Quote for separating an existing stem (chaining). Same per-second pricing as a clip source. */
+export async function quoteAudioClipSeparation(audioClipId: string, userId: string): Promise<AudioSeparationQuote> {
+  const audio = await verifyAudioClipOwnership(audioClipId, userId);
+  const durationSeconds = resolveClipDurationSeconds(audio);
+  return { supported: true, duration_seconds: durationSeconds, cost_credits: computeSeparationCredits(durationSeconds) };
+}
+
 /**
  * Redis daily per-user rate-limit backstop (DECISIONS.md §5) — generous cap, not the primary abuse
  * guard (ownership-scoping is). Throws once the (config.audioSepDailyRateLimitPerUser + 1)-th call
@@ -147,7 +257,10 @@ export async function checkDailyRateLimit(userId: string): Promise<void> {
 
 export async function createAudioSeparationJob(input: {
   userId: string;
-  clipId: string;
+  /** Depth-1 source: the video clip. Mutually exclusive with audioClipId. */
+  clipId?: string;
+  /** Chained source: an existing stem (either role, any depth). */
+  audioClipId?: string;
   prompt: string;
   idempotencyKey: string;
 }): Promise<{ row: AudioSeparationJob; created: boolean }> {
@@ -155,8 +268,11 @@ export async function createAudioSeparationJob(input: {
   if (!prompt) throw new AudioSeparationValidationError('A prompt describing the sound to remove is required');
   if (prompt.length > 300) throw new AudioSeparationValidationError('Prompt is too long');
 
-  const clip = await verifyClipOwnership(input.clipId, input.userId);
-  const durationSeconds = resolveClipDurationSeconds(clip);
+  const source = await resolveSeparationSource(
+    { clipId: input.clipId, audioClipId: input.audioClipId },
+    input.userId,
+  );
+  const durationSeconds = source.durationSeconds;
   const costCredits = computeSeparationCredits(durationSeconds);
 
   const existing = await db
@@ -186,10 +302,13 @@ export async function createAudioSeparationJob(input: {
         FROM deducted
       )
       INSERT INTO audio_separation_jobs (
-        id, user_id, project_id, source_clip_id, idempotency_key, status, provider, model,
-        prompt, duration_seconds, cost_credits
+        id, user_id, project_id, source_clip_id, source_audio_clip_id, idempotency_key, status,
+        provider, model, prompt, duration_seconds, cost_credits
       )
-      SELECT ${id}::uuid, id, ${clip.project_id}::uuid, ${input.clipId}::uuid, ${input.idempotencyKey},
+      SELECT ${id}::uuid, id, ${source.projectId}::uuid,
+        ${source.kind === 'clip' ? source.id : null}::uuid,
+        ${source.kind === 'audio_clip' ? source.id : null}::uuid,
+        ${input.idempotencyKey},
         'pending'::audio_separation_status, 'fal', ${config.audioSepModel},
         ${prompt}, ${durationSeconds}, ${costCredits}
       FROM deducted
@@ -261,12 +380,20 @@ export interface AttachSeparationStemsInput {
   targetLabel: string;
   /** Project-timeline seconds where the source clip begins. Defaults to 0 only as a last resort. */
   startOffsetSeconds?: number;
+  /** Depth of the SOURCE; the produced stems are stored at sourceDepth + 1. Clip sources are 0. */
+  sourceDepth?: number;
+  /** Root clip provenance carried onto both stems. Defaults to the job's own source_clip_id. */
+  rootClipId?: string | null;
 }
 
 export interface AttachSeparationStemsResult {
   residualClipId: string;
   targetClipId: string;
+  /** Clip-sourced jobs only; 1 when nothing was captured. */
   sourcePriorVolume: number;
+  /** Audio-sourced jobs only — the source stem's pre-separation enabled/gain, for undo. */
+  sourcePriorEnabled?: boolean;
+  sourcePriorGain?: number;
 }
 
 /**
@@ -300,6 +427,145 @@ export interface AttachSeparationStemsResult {
  *      has the client-facing reverse endpoint / iOS undo contract).
  */
 export async function attachSeparationStems(input: AttachSeparationStemsInput): Promise<AttachSeparationStemsResult> {
+  // Chaining: a job sourced from a stem replaces the clip-specific capture/mute steps with their
+  // audio-row equivalents. Everything else (batch shape, replace-on-attach, stem partition) is
+  // identical, so the two paths share buildStemInsertQueries.
+  return input.job.source_audio_clip_id
+    ? attachStemsFromAudioClip(input, input.job.source_audio_clip_id)
+    : attachStemsFromClip(input);
+}
+
+/**
+ * Builds the two stem INSERTs shared by both source kinds. `parentAudioClipId` is null at depth 1
+ * (separated straight from a clip); `rootClipId` is the originating clip, carried at every depth.
+ */
+function buildStemInsertQueries(
+  input: AttachSeparationStemsInput,
+  tree: { parentAudioClipId: string | null; rootClipId: string | null; depth: number },
+) {
+  const startOffsetSeconds = Math.max(0, input.startOffsetSeconds ?? 0);
+  const common = {
+    project_id: input.job.project_id,
+    source_type: 'separation' as const,
+    source_clip_id: tree.rootClipId,
+    parent_audio_clip_id: tree.parentAudioClipId,
+    separation_depth: tree.depth,
+    separation_job_id: input.job.id,
+    prompt: input.job.prompt,
+    start_offset_seconds: startOffsetSeconds,
+    original_duration_seconds: input.job.duration_seconds,
+    trim_end_seconds: input.job.duration_seconds,
+    gain: 1,
+  };
+
+  return [
+    db.insert(projectAudioClips).values({
+      ...common,
+      r2_key: input.residualR2Key,
+      separation_role: 'residual',
+      sort_order: 0,
+      label: input.residualLabel,
+      enabled: true,
+    }).returning(),
+    db.insert(projectAudioClips).values({
+      ...common,
+      r2_key: input.targetR2Key,
+      separation_role: 'target',
+      sort_order: 1,
+      label: input.targetLabel,
+      enabled: false,
+    }).returning(),
+  ] as const;
+}
+
+/**
+ * Audio-sourced (chained) attach. Differences from the clip path:
+ *   1. Capture records the source stem's prior enabled/gain (not a clip volume), with the same
+ *      oldest-live-pair carry-forward so a re-separation never captures the already-disabled
+ *      state and strands undo.
+ *   2. Prior live stems are scoped by parent_audio_clip_id, so re-separating one stem never
+ *      disturbs its sibling's own children.
+ *   5. "Silence the source" means switching the source stem OFF, not muting a clip — the mix is
+ *      the sum of enabled rows, so a parent and its children must never both be enabled or the
+ *      audio double-counts.
+ */
+async function attachStemsFromAudioClip(
+  input: AttachSeparationStemsInput,
+  sourceAudioClipId: string,
+): Promise<AttachSeparationStemsResult> {
+  const captureQuery = db.execute(sql`
+    UPDATE audio_separation_jobs
+    SET source_prior_enabled = COALESCE(
+          (
+            SELECT j2.source_prior_enabled
+            FROM project_audio_clips a2
+            JOIN audio_separation_jobs j2 ON j2.id = a2.separation_job_id
+            WHERE a2.parent_audio_clip_id = ${sourceAudioClipId}::uuid
+              AND a2.source_type = 'separation'
+              AND a2.deleted_at IS NULL
+            ORDER BY j2.created_at ASC
+            LIMIT 1
+          ),
+          (SELECT enabled FROM project_audio_clips WHERE id = ${sourceAudioClipId}::uuid)
+        ),
+        source_prior_gain = COALESCE(
+          (
+            SELECT j2.source_prior_gain
+            FROM project_audio_clips a2
+            JOIN audio_separation_jobs j2 ON j2.id = a2.separation_job_id
+            WHERE a2.parent_audio_clip_id = ${sourceAudioClipId}::uuid
+              AND a2.source_type = 'separation'
+              AND a2.deleted_at IS NULL
+            ORDER BY j2.created_at ASC
+            LIMIT 1
+          ),
+          (SELECT gain FROM project_audio_clips WHERE id = ${sourceAudioClipId}::uuid)
+        )
+    WHERE id = ${input.job.id}::uuid
+    RETURNING source_prior_enabled, source_prior_gain
+  `);
+
+  const softDeletePriorStemsQuery = db.execute(sql`
+    UPDATE project_audio_clips
+    SET deleted_at = now()
+    WHERE parent_audio_clip_id = ${sourceAudioClipId}::uuid
+      AND source_type = 'separation'
+      AND deleted_at IS NULL
+  `);
+
+  const [insertResidualQuery, insertTargetQuery] = buildStemInsertQueries(input, {
+    parentAudioClipId: sourceAudioClipId,
+    rootClipId: input.rootClipId ?? null,
+    depth: (input.sourceDepth ?? 0) + 1,
+  });
+
+  const disableSourceQuery = db.execute(sql`
+    UPDATE project_audio_clips SET enabled = false WHERE id = ${sourceAudioClipId}::uuid
+  `);
+
+  const [captureResult, , residualRows, targetRows] = await db.batch([
+    captureQuery,
+    softDeletePriorStemsQuery,
+    insertResidualQuery,
+    insertTargetQuery,
+    disableSourceQuery,
+  ] as const);
+
+  const captured = (captureResult as unknown as {
+    rows?: Array<{ source_prior_enabled: unknown; source_prior_gain: unknown }>;
+  }).rows?.[0];
+
+  return {
+    residualClipId: (residualRows as Array<{ id: string }>)[0].id,
+    targetClipId: (targetRows as Array<{ id: string }>)[0].id,
+    // Not meaningful for an audio source; kept so the result shape stays uniform.
+    sourcePriorVolume: 1,
+    sourcePriorEnabled: captured?.source_prior_enabled == null ? true : Boolean(captured.source_prior_enabled),
+    sourcePriorGain: captured?.source_prior_gain == null ? 1 : Number(captured.source_prior_gain),
+  };
+}
+
+async function attachStemsFromClip(input: AttachSeparationStemsInput): Promise<AttachSeparationStemsResult> {
   const captureQuery = db.execute(sql`
     UPDATE audio_separation_jobs
     SET source_prior_volume = COALESCE(
@@ -327,41 +593,11 @@ export async function attachSeparationStems(input: AttachSeparationStemsInput): 
       AND deleted_at IS NULL
   `);
 
-  const startOffsetSeconds = Math.max(0, input.startOffsetSeconds ?? 0);
-
-  const insertResidualQuery = db.insert(projectAudioClips).values({
-    project_id: input.job.project_id,
-    r2_key: input.residualR2Key,
-    source_type: 'separation',
-    source_clip_id: input.job.source_clip_id,
-    separation_job_id: input.job.id,
-    separation_role: 'residual',
-    sort_order: 0,
-    label: input.residualLabel,
-    prompt: input.job.prompt,
-    start_offset_seconds: startOffsetSeconds,
-    original_duration_seconds: input.job.duration_seconds,
-    trim_end_seconds: input.job.duration_seconds,
-    enabled: true,
-    gain: 1,
-  }).returning();
-
-  const insertTargetQuery = db.insert(projectAudioClips).values({
-    project_id: input.job.project_id,
-    r2_key: input.targetR2Key,
-    source_type: 'separation',
-    source_clip_id: input.job.source_clip_id,
-    separation_job_id: input.job.id,
-    separation_role: 'target',
-    sort_order: 1,
-    label: input.targetLabel,
-    prompt: input.job.prompt,
-    start_offset_seconds: startOffsetSeconds,
-    original_duration_seconds: input.job.duration_seconds,
-    trim_end_seconds: input.job.duration_seconds,
-    enabled: false,
-    gain: 1,
-  }).returning();
+  const [insertResidualQuery, insertTargetQuery] = buildStemInsertQueries(input, {
+    parentAudioClipId: null, // depth 1 — separated straight from the clip
+    rootClipId: input.job.source_clip_id,
+    depth: 1,
+  });
 
   const muteSourceQuery = db.execute(sql`
     UPDATE project_clips SET volume = 0 WHERE id = ${input.job.source_clip_id}::uuid

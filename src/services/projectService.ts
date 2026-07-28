@@ -390,6 +390,7 @@ export async function deleteProject(projectId: string, userId: string): Promise<
     // project_audio_clips row points at, so collect its keys separately.
     db
       .select({
+        id: audioSeparationJobs.id,
         target_r2_key: audioSeparationJobs.target_r2_key,
         residual_r2_key: audioSeparationJobs.residual_r2_key,
       })
@@ -398,7 +399,14 @@ export async function deleteProject(projectId: string, userId: string): Promise<
   ]);
   const cueIds = cueRows.map((c) => c.id);
   const separationKeys = separationRows
-    .flatMap((row) => [row.target_r2_key, row.residual_r2_key])
+    .flatMap((row) => [
+      row.target_r2_key,
+      row.residual_r2_key,
+      // The trimmed fal input is written to a deterministic key and stored in NO column, so it can
+      // only be collected by reconstructing it from the job id — otherwise it leaks on every
+      // separation (verified 2026-07-28: orphaned source-input.mp3 objects in R2).
+      `audio-separation/${row.id}/source-input.mp3`,
+    ])
     .filter((key): key is string => typeof key === 'string' && key.length > 0);
 
   if (cueIds.length > 0) {
@@ -409,8 +417,15 @@ export async function deleteProject(projectId: string, userId: string): Promise<
   // Delete in order that satisfies those FKs before audio clips / clips / the project row.
   await db.delete(projectMusicSuggestionCache).where(eq(projectMusicSuggestionCache.project_id, projectId));
   await db.delete(projectVoiceoverGenerations).where(eq(projectVoiceoverGenerations.project_id, projectId));
-  // Audio stems may FK -> jobs (separation_job_id). Delete audio first so job rows are unreferenced,
-  // then delete jobs (which FK -> project_clips.source_clip_id / projects.id).
+  // project_audio_clips and audio_separation_jobs reference EACH OTHER (a stem names its job via
+  // separation_job_id; a chained job names its source stem via source_audio_clip_id), so neither
+  // can be deleted first. Break the cycle by clearing the job -> stem edge, then delete stems,
+  // then jobs. (The stems' own parent_audio_clip_id self-reference needs no special handling:
+  // Postgres RI triggers fire at end of statement, so one DELETE removes a whole tree.)
+  await db.execute(sql`
+    UPDATE audio_separation_jobs SET source_audio_clip_id = NULL
+    WHERE project_id = ${projectId}::uuid AND source_audio_clip_id IS NOT NULL
+  `);
   await db.delete(projectAudioClips).where(eq(projectAudioClips.project_id, projectId));
   await db.delete(audioSeparationJobs).where(eq(audioSeparationJobs.project_id, projectId));
   await db.delete(projectSoundtrackGenerations).where(eq(projectSoundtrackGenerations.project_id, projectId));

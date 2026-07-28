@@ -14,7 +14,7 @@ import { Job, Queue, Worker } from 'bullmq';
 import { eq } from 'drizzle-orm';
 import { config } from '../config';
 import { db } from '../db/client';
-import { projectClips } from '../db/schema';
+import { projectAudioClips, projectClips } from '../db/schema';
 import { getGenerationPresignedUrl, getUploadPresignedUrl, uploadBufferToR2 } from '../services/archivalService';
 import {
   attachSeparationStems,
@@ -103,6 +103,51 @@ async function prepareTrimmedSeparationInput(input: {
   }
 }
 
+/**
+ * Resolves a job's source (clip or stem) to the r2 key + trim window + timeline position the
+ * worker needs. Returns null when the source row no longer exists, which the caller turns into a
+ * non-retryable 'source_missing' failure.
+ */
+async function resolveWorkerSource(row: { project_id: string; source_clip_id: string | null; source_audio_clip_id: string | null }): Promise<
+  { r2Key: string; trimStartSeconds: number; startOffsetSeconds: number; depth: number; rootClipId: string | null } | null
+> {
+  if (row.source_audio_clip_id) {
+    const [stem] = await db
+      .select({
+        r2_key: projectAudioClips.r2_key,
+        trim_start_seconds: projectAudioClips.trim_start_seconds,
+        start_offset_seconds: projectAudioClips.start_offset_seconds,
+        separation_depth: projectAudioClips.separation_depth,
+        source_clip_id: projectAudioClips.source_clip_id,
+      })
+      .from(projectAudioClips)
+      .where(eq(projectAudioClips.id, row.source_audio_clip_id));
+    if (!stem) return null;
+    return {
+      r2Key: stem.r2_key,
+      trimStartSeconds: stem.trim_start_seconds ?? 0,
+      // A stem already carries its own timeline position — no need to sum earlier clips.
+      startOffsetSeconds: stem.start_offset_seconds ?? 0,
+      depth: stem.separation_depth ?? 0,
+      rootClipId: stem.source_clip_id,
+    };
+  }
+
+  if (!row.source_clip_id) return null;
+  const [clip] = await db
+    .select({ r2_key: projectClips.r2_key, trim_start_seconds: projectClips.trim_start_seconds })
+    .from(projectClips)
+    .where(eq(projectClips.id, row.source_clip_id));
+  if (!clip) return null;
+  return {
+    r2Key: clip.r2_key,
+    trimStartSeconds: clip.trim_start_seconds ?? 0,
+    startOffsetSeconds: await resolveSourceClipTimelineOffset(row.project_id, row.source_clip_id),
+    depth: 0,
+    rootClipId: row.source_clip_id,
+  };
+}
+
 export async function processAudioSeparation(job: Job<AudioSeparationJobPayload>): Promise<void> {
   const id = job.data.jobId;
   // Idempotent re-run guard: markAudioSeparationProcessing returns null on a race (already
@@ -112,26 +157,23 @@ export async function processAudioSeparation(job: Job<AudioSeparationJobPayload>
   if (!row) row = await getAudioSeparationJob(id);
   if (!row || row.status === 'completed' || row.status === 'refunded') return;
 
-  const [sourceClip] = await db
-    .select({
-      r2_key: projectClips.r2_key,
-      trim_start_seconds: projectClips.trim_start_seconds,
-    })
-    .from(projectClips)
-    .where(eq(projectClips.id, row.source_clip_id));
-  if (!sourceClip) {
-    // Source clip is gone (hard-purged past the soft-delete window) — nothing to separate;
+  // The source is a clip (depth 1) or another stem (chaining). Both resolve to an r2 key plus a
+  // trim window; the ffmpeg step below already strips video to mp3, so a stem source (already
+  // mp3) needs no special handling there.
+  const source = await resolveWorkerSource(row);
+  if (!source) {
+    // Source is gone (hard-purged past the soft-delete window) — nothing to separate;
     // non-retryable, so stop burning attempts and let on('failed') refund.
     job.discard();
-    throw new AudioSeparationProviderError('Source clip no longer exists', false, 'source_missing');
+    throw new AudioSeparationProviderError('Separation source no longer exists', false, 'source_missing');
   }
 
   let audioUrl: string;
   try {
     audioUrl = await prepareTrimmedSeparationInput({
       jobId: id,
-      r2Key: sourceClip.r2_key,
-      trimStartSeconds: sourceClip.trim_start_seconds ?? 0,
+      r2Key: source.r2Key,
+      trimStartSeconds: source.trimStartSeconds,
       durationSeconds: row.duration_seconds,
     });
   } catch (error) {
@@ -139,7 +181,7 @@ export async function processAudioSeparation(job: Job<AudioSeparationJobPayload>
     throw error;
   }
 
-  const startOffsetSeconds = await resolveSourceClipTimelineOffset(row.project_id, row.source_clip_id);
+  const startOffsetSeconds = source.startOffsetSeconds;
 
   let result: AudioSeparationResult;
   try {
@@ -168,6 +210,8 @@ export async function processAudioSeparation(job: Job<AudioSeparationJobPayload>
     residualLabel: 'Everything else',
     targetLabel: row.prompt,
     startOffsetSeconds,
+    sourceDepth: source.depth,
+    rootClipId: source.rootClipId,
   });
 
   await completeAudioSeparation({
