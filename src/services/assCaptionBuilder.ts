@@ -72,6 +72,48 @@ function formatAssTimestamp(seconds: number): string {
   return `${hours}:${pad2(mins)}:${pad2(secs)}.${pad2(centiseconds)}`;
 }
 
+// ─── Sketch 016 style helpers (2026-07-29) ─────────────────────────────────────
+
+/** Bundled font families (OFL-licensed) — the allowlist for CaptionStyle.font and
+ * TextOverlayStyleSpec.font. Values MUST be name-table FAMILY names (the same rule the
+ * buildAssFile Inter comment documents); each family needs a TTF under assets/fonts/ for
+ * libass's `fontsdir=` scan to resolve it. */
+export const ASS_FONT_FAMILIES = [
+  'Inter',
+  'Montserrat',
+  'Oswald',
+  'Playfair Display',
+  'Bangers',
+  'Courier Prime',
+] as const;
+
+/** Resolves a client-sent font name against ASS_FONT_FAMILIES — unknown/missing → Inter. */
+export function resolveFontFamily(font: string | undefined): string {
+  return (ASS_FONT_FAMILIES as readonly string[]).includes(font ?? '') ? (font as string) : 'Inter';
+}
+
+/** '#RRGGBB' + alpha (0..1) → '#AARRGGBB', the 8-char input hexToAssColor already understands. */
+export function hexWithAlpha(hex: string, alpha: number): string {
+  const clean = hex.replace(/^#/, '');
+  const body = clean.length === 8 ? clean.slice(2) : clean;
+  const a = Math.round(Math.min(1, Math.max(0, alpha)) * 255)
+    .toString(16).toUpperCase().padStart(2, '0');
+  return `#${a}${body}`;
+}
+
+/** Editor opacity (20–100) → 0..1 multiplier. Undefined/NaN → 1 (fully opaque). */
+export function clampOpacity01(opacity: number | undefined): number {
+  if (typeof opacity !== 'number' || Number.isNaN(opacity)) return 1;
+  return Math.min(1, Math.max(0.2, opacity / 100));
+}
+
+/** One ASS alpha override byte ('&HAA&' form for \1a…\4a tags) from a 0..1 opacity. */
+export function assAlphaTag(alpha: number): string {
+  const a = (255 - Math.round(Math.min(1, Math.max(0, alpha)) * 255))
+    .toString(16).toUpperCase().padStart(2, '0');
+  return `&H${a}&`;
+}
+
 export interface CaptionWord {
   text: string;
   startSeconds: number;
@@ -108,6 +150,33 @@ export interface CaptionStyle {
    * value via the identical preset numbers — see that file's matching doc comment — so the live
    * drag preview and the burned export never disagree. */
   yOffsetNorm?: number;
+
+  // ─── Sketch 016 style sheets (2026-07-29, caption-text-style-sheets-plan.md) ─────────────
+  // ALL optional. When every field below is absent the builder emits BYTE-IDENTICAL output to
+  // the pre-feature legacy path — defaults were chosen to coincide with it.
+  /** Bundled font FAMILY name (name-table family — same rule as the Inter comment in
+   * buildAssFile). Allowlisted via ASS_FONT_FAMILIES; unknown values fall back to Inter. */
+  font?: string;
+  /** Caption timing mode. Absent → derived from the legacy `karaoke` flag (false → 'block'). */
+  timing?: 'word' | 'block' | 'karaoke';
+  /** Background treatment. Absent → legacy behavior (`backgroundBox` === false → outlined glyph,
+   * otherwise the legacy 50%-black pill constant). 'pill' = 45% tint × opacity, 'block' =
+   * solid × opacity. NOTE (accepted limitation, plan Part 3): ASS BorderStyle=3 boxes are
+   * rectangular — the pill's rounded corners are a preview-only nicety. */
+  background?: 'none' | 'pill' | 'block';
+  /** Background color, hex. Default '#000000'. */
+  backgroundColor?: string;
+  /** ASS Bold toggle (-1/0). Default false — the current Style row emits 0. */
+  bold?: boolean;
+  /** Glyph outline on/off — supersedes `outlineWidth` when present (true → 2, false → 0). */
+  outline?: boolean;
+  /** Drop shadow on/off — supersedes `shadowDepth` when present (true → 1, false → 0). */
+  shadow?: boolean;
+  /** Uppercase every word at build time (before escapeAssText). Default false. */
+  allCaps?: boolean;
+  /** Whole-caption opacity, 20–100 — applied to the text/highlight alphas AND the background
+   * alpha (pill stays proportionally lighter). Absent → legacy color math (no alpha emitted). */
+  opacity?: number;
 }
 
 /** Fallback vertical-center anchors for the legacy top/middle/bottom picker, used only when
@@ -145,15 +214,45 @@ export interface CaptionCanvas {
 export function buildAssFile(cues: CaptionCue[], style: CaptionStyle, canvas: CaptionCanvas): string {
   // PrimaryColour = already-swept/active fill (highlight); SecondaryColour = pre-sweep base color
   // — this is exactly how `\k` sweeps Secondary -> Primary as playback crosses each word.
-  const primaryColour = hexToAssColor(style.karaoke === false ? style.color : style.highlightColor);
-  const secondaryColour = hexToAssColor(style.color);
+  // Sketch 016: timing mode — absent → legacy `karaoke` flag mapping (false → 'block'), so
+  // pre-feature styles take the exact paths they always did.
+  const timing = style.timing ?? (style.karaoke === false ? 'block' : 'karaoke');
+  // Opacity: applied to text/highlight AND background alphas — but ONLY when the field is
+  // present; absent → legacy color math with no alpha channel (byte-identical legacy output).
+  const opacity01 = clampOpacity01(style.opacity);
+  const withOpacity = (hex: string) =>
+    style.opacity === undefined ? hexToAssColor(hex) : hexToAssColor(hexWithAlpha(hex, opacity01));
+  const primaryColour = withOpacity(timing === 'karaoke' ? style.highlightColor : style.color);
+  const secondaryColour = withOpacity(style.color);
   const outlineColour = '&H00000000';
-  // Semi-transparent black background pill per 13-UI-SPEC.md's default Caption Style contract
-  // (BorderStyle=3 renders BackColour as an opaque box behind the text, not just an outline).
-  const backColour = '&H80000000';
-  const borderStyle = style.backgroundBox === false ? 1 : 3;
-  const outlineWidth = Math.max(0, style.outlineWidth ?? 0);
-  const shadowDepth = Math.max(0, style.shadowDepth ?? 0);
+  const fontFamily = resolveFontFamily(style.font);
+  const boldField = style.bold === true ? -1 : 0;
+  const outlineWidth = style.outline !== undefined
+    ? (style.outline ? 2 : 0)
+    : Math.max(0, style.outlineWidth ?? 0);
+  const shadowDepth = style.shadow !== undefined
+    ? (style.shadow ? 1 : 0)
+    : Math.max(0, style.shadowDepth ?? 0);
+  // Background. `background` ABSENT → legacy constants: backgroundBox===false → BorderStyle 1
+  // (outlined glyph, no box), else the semi-transparent black pill (BorderStyle=3 renders
+  // BackColour as an opaque box behind the text per 13-UI-SPEC.md). PRESENT → pill = 45% tint ×
+  // opacity, block = solid × opacity, none = BorderStyle 1. BackColour stays the legacy constant
+  // under BorderStyle 1 (inert as a box; still the shadow color, same as before).
+  let borderStyle: number;
+  let backColour: string;
+  if (style.background === undefined) {
+    borderStyle = style.backgroundBox === false ? 1 : 3;
+    backColour = '&H80000000';
+  } else if (style.background === 'none') {
+    borderStyle = 1;
+    backColour = '&H80000000';
+  } else {
+    borderStyle = 3;
+    backColour = hexToAssColor(hexWithAlpha(
+      style.backgroundColor ?? '#000000',
+      (style.background === 'pill' ? 0.45 : 1) * opacity01,
+    ));
+  }
   // Horizontal safe margins keep captions in a CENTERED column clear of platform UI overlays
   // (e.g. TikTok's right-side action bar + bottom caption). ASS still uses MarginL/R to compute
   // wrap width even under the per-line \pos override, so a larger symmetric value narrows the
@@ -191,7 +290,7 @@ export function buildAssFile(cues: CaptionCue[], style: CaptionStyle, canvas: Ca
     // our bundled assets/fonts/Inter-Bold.ttf (confirmed: `fontselect: (Inter, 400, 0) ->
     // Inter-Bold, 0, Inter-Bold`). Bold weight (400 base + Bold=0 below is the ASS bold-toggle,
     // unrelated to font selection) comes from this being the only style in the bundled font file.
-    `Style: Caption,Inter,${style.fontSize},${primaryColour},${secondaryColour},${outlineColour},${backColour},0,0,0,0,100,100,0,0,${borderStyle},${outlineWidth},${shadowDepth},5,${sideMargin},${sideMargin},10,1`,
+    `Style: Caption,${fontFamily},${style.fontSize},${primaryColour},${secondaryColour},${outlineColour},${backColour},${boldField},0,0,0,100,100,0,0,${borderStyle},${outlineWidth},${shadowDepth},5,${sideMargin},${sideMargin},10,1`,
     '',
   ];
 
@@ -200,20 +299,39 @@ export function buildAssFile(cues: CaptionCue[], style: CaptionStyle, canvas: Ca
     'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text',
   ];
 
-  const dialogueLines = cues.map((cue) => {
-    const words = style.karaoke === false
-      ? cue.words.map((word) => escapeAssText(word.text)).join(' ')
+  // Sketch 016: allCaps uppercases every word BEFORE escapeAssText (order irrelevant to the
+  // injection guard — escape strips control chars either way). Absent/false → identity.
+  const caps = style.allCaps === true;
+  const xform = (s: string) => escapeAssText(caps ? s.toUpperCase() : s);
+
+  const dialogueLines: string[] = [];
+  for (const cue of cues) {
+    if (timing === 'word') {
+      // One word at a time (sketch 016): each word is its OWN Dialogue event spanning its own
+      // start/end — never joined, never \k-swept. Active-word color is meaningless here, so
+      // PrimaryColour already resolved to the base color above.
+      for (const word of cue.words) {
+        const wStart = formatAssTimestamp(word.startSeconds);
+        const wEnd = formatAssTimestamp(word.endSeconds);
+        dialogueLines.push(
+          `Dialogue: 0,${wStart},${wEnd},Caption,,0,0,0,,{\\an5\\pos(${centerX},${centerY})}${xform(word.text)}`,
+        );
+      }
+      continue;
+    }
+    const words = timing === 'block'
+      ? cue.words.map((word) => xform(word.text)).join(' ')
       : cue.words
         .map((word) => {
           const durationCentiseconds = Math.max(0, Math.round((word.endSeconds - word.startSeconds) * 100));
-          return `{\\k${durationCentiseconds}}${escapeAssText(word.text)}`;
+          return `{\\k${durationCentiseconds}}${xform(word.text)}`;
         })
         .join(' ');
     const text = `{\\an5\\pos(${centerX},${centerY})}${words}`;
     const start = formatAssTimestamp(cue.startSeconds);
     const end = formatAssTimestamp(cue.endSeconds);
-    return `Dialogue: 0,${start},${end},Caption,,0,0,0,,${text}`;
-  });
+    dialogueLines.push(`Dialogue: 0,${start},${end},Caption,,0,0,0,,${text}`);
+  }
 
   return [...scriptInfoLines, ...styleLines, ...eventsHeaderLines, ...dialogueLines].join('\n') + '\n';
 }
@@ -223,6 +341,32 @@ export function buildAssFile(cues: CaptionCue[], style: CaptionStyle, canvas: Ca
 // rotate and ignores width_norm scale. This reuses the SAME escapeAssText/formatAssTimestamp/
 // Fontname:Inter machinery already proven for captions above, so every user-authored overlay
 // string passes through the identical T-13-05 injection guard.
+
+/** Per-overlay style (sketch 016, 2026-07-29) — stored as the text overlay's `style` jsonb.
+ * ALL optional; an overlay whose style is undefined emits EXACTLY the pre-feature Dialogue
+ * line and no extra Style row (legacy output unchanged). */
+export interface TextOverlayStyleSpec {
+  /** Bundled font family (ASS_FONT_FAMILIES allowlist; unknown → Inter). */
+  font?: string;
+  /** Text color, hex. Default '#FFFFFF' (the legacy fixed white). */
+  color?: string;
+  /** Background treatment: 'pill' = 45% tint × opacity, 'block' = solid × opacity, 'none' =
+   * outlined glyph. BorderStyle is style-level (not per-line overridable), so boxed overlays
+   * use the TextOverlayBox Style row below. */
+  background?: 'none' | 'pill' | 'block';
+  /** Background color, hex. Default '#000000'. */
+  backgroundColor?: string;
+  bold?: boolean;
+  /** Glyph outline on/off. Absent → the Style row's default width (2). */
+  outline?: boolean;
+  /** Drop shadow on/off. Absent → the Style row's default depth (1). */
+  shadow?: boolean;
+  allCaps?: boolean;
+  /** Whole-overlay opacity 20–100 — text AND background. Absent → 100. */
+  opacity?: number;
+  /** Editor pt size (16–40, default 26) — multiplies the widthNorm-based size by fontSize/26. */
+  fontSize?: number;
+}
 
 export interface TextOverlaySpec {
   text: string;
@@ -235,6 +379,8 @@ export interface TextOverlaySpec {
   rotation?: number;
   startSeconds: number;
   endSeconds: number;
+  /** Per-overlay style (sketch 016). Undefined → legacy fixed-white-Inter output. */
+  style?: TextOverlayStyleSpec;
 }
 
 // Proportional to the output canvas height so scale=1 reads consistently across every aspect
@@ -259,6 +405,14 @@ export function buildTextOverlayAss(overlays: TextOverlaySpec[], canvas: Caption
     '',
   ];
 
+  // Sketch 016: a second Style row for boxed overlays — ASS BorderStyle (1 = outline, 3 = opaque
+  // box) is a STYLE-LEVEL attribute with no per-line override tag, so pill/block overlays must
+  // reference their own row. Emitted ONLY when some overlay actually uses a box, keeping
+  // legacy (all-unstyled) files byte-identical.
+  const anyBox = overlays.some(
+    (o) => o.style !== undefined && (o.style.background === 'pill' || o.style.background === 'block'),
+  );
+
   const styleLines = [
     '[V4+ Styles]',
     'Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding',
@@ -269,6 +423,9 @@ export function buildTextOverlayAss(overlays: TextOverlaySpec[], canvas: Caption
     // BorderStyle=1 (outline, no box) + a semi-transparent BackColour used as the shadow color —
     // mirrors the editor's on-video text-shadow look instead of the caption track's opaque pill.
     'Style: TextOverlay,Inter,48,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,2,1,5,0,0,0,1',
+    ...(anyBox
+      ? ['Style: TextOverlayBox,Inter,48,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,3,0,0,5,0,0,0,1']
+      : []),
     '',
   ];
 
@@ -280,15 +437,35 @@ export function buildTextOverlayAss(overlays: TextOverlaySpec[], canvas: Caption
   const dialogueLines = overlays.map((overlay) => {
     const x = Math.round(overlay.xNorm * canvas.width);
     const y = Math.round(overlay.yNorm * canvas.height);
-    const fontSize = Math.max(1, Math.round(TEXT_OVERLAY_BASE_FRAC * canvas.height * (overlay.widthNorm ?? 1)));
+    const st = overlay.style;
+    // Sketch 016: the editor's pt size scales the widthNorm-based size (26pt = 1×, the default).
+    const sizeScale = (st?.fontSize ?? 26) / 26;
+    const fontSize = Math.max(1, Math.round(TEXT_OVERLAY_BASE_FRAC * canvas.height * (overlay.widthNorm ?? 1) * sizeScale));
     // ASS \frz is COUNTER-clockwise-positive; SwiftUI .rotationEffect is CLOCKWISE-positive —
     // negate, else the export would mirror the editor's rotation direction. \frz rotates about
     // the \an5\pos origin (box center), same pivot .rotationEffect uses.
     const angle = -(overlay.rotation ?? 0);
     const start = formatAssTimestamp(overlay.startSeconds);
     const end = formatAssTimestamp(overlay.endSeconds);
-    const text = escapeAssText(overlay.text);
-    return `Dialogue: 0,${start},${end},TextOverlay,,0,0,0,,{\\an5\\pos(${x},${y})\\fs${fontSize}\\frz${angle}}${text}`;
+    const text = escapeAssText(st?.allCaps === true ? overlay.text.toUpperCase() : overlay.text);
+    if (st === undefined) {
+      // Legacy path — EXACTLY the pre-feature line (no extra tags, TextOverlay style row).
+      return `Dialogue: 0,${start},${end},TextOverlay,,0,0,0,,{\\an5\\pos(${x},${y})\\fs${fontSize}\\frz${angle}}${text}`;
+    }
+    const opacity01 = clampOpacity01(st.opacity);
+    const boxed = st.background === 'pill' || st.background === 'block';
+    const tags =
+      `\\an5\\pos(${x},${y})\\fs${fontSize}\\frz${angle}` +
+      `\\fn${resolveFontFamily(st.font)}` +
+      `\\1c${hexToAssColor(st.color ?? '#FFFFFF')}\\1a${assAlphaTag(opacity01)}` +
+      (st.bold === true ? '\\b1' : '\\b0') +
+      (st.outline === false ? '\\bord0' : '') +
+      (st.shadow === false ? '\\shad0' : '') +
+      (boxed
+        ? `\\4c${hexToAssColor(st.backgroundColor ?? '#000000')}` +
+          `\\4a${assAlphaTag((st.background === 'pill' ? 0.45 : 1) * opacity01)}`
+        : '');
+    return `Dialogue: 0,${start},${end},${boxed ? 'TextOverlayBox' : 'TextOverlay'},,0,0,0,,{${tags}}${text}`;
   });
 
   return [...scriptInfoLines, ...styleLines, ...eventsHeaderLines, ...dialogueLines].join('\n') + '\n';

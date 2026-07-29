@@ -14,6 +14,7 @@ import { db } from '../db/client';
 import {
   projects,
   projectClips,
+  projectVideoOverlays,
   projectTextOverlays,
   projectAudioClips,
   projectCaptionCues,
@@ -28,6 +29,8 @@ import type {
   Project,
   NewProject,
   ProjectClip,
+  ProjectVideoOverlay,
+  NewProjectVideoOverlay,
   ProjectTextOverlay,
   ProjectAudioClip,
   ProjectCaptionCue,
@@ -37,10 +40,11 @@ import { eq, and, asc, desc, lt, or, sql, inArray, isNull, isNotNull } from 'dri
 import { getUploadPresignedUrl } from './archivalService';
 import { extractVideoFrame } from './frameExtractor';
 import { probeDurationSeconds, probeVideoMeta } from './mediaProbe';
-import type { ComposeSpec, ComposeCaptionCue, ComposeCaptionStyle } from '../queue/ffmpegWorker';
+import type { ComposeSpec, ComposeCaptionCue, ComposeCaptionStyle, ComposeTextSpec } from '../queue/ffmpegWorker';
 
 // DoS guard (T-13-10): route layer enforces this cap before calling importClipByCopy.
 export const MAX_CLIPS_PER_PROJECT = 50;
+export const MAX_VIDEO_OVERLAYS_PER_PROJECT = 30;
 // DoS guards (T-13-16) for the element tracks added in Plan 04.
 export const MAX_TEXT_OVERLAYS_PER_PROJECT = 30;
 export const MAX_AUDIO_CLIPS_PER_PROJECT = 10;
@@ -92,7 +96,7 @@ async function isProjectOwned(projectId: string, userId: string): Promise<boolea
 async function purgeExpiredSoftDeletes(projectId: string): Promise<void> {
   const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
 
-  const [expiredClips, expiredAudio] = await Promise.all([
+  const [expiredClips, expiredVideoOverlays, expiredAudio] = await Promise.all([
     db
       .select({ id: projectClips.id, r2_key: projectClips.r2_key })
       .from(projectClips)
@@ -101,6 +105,16 @@ async function purgeExpiredSoftDeletes(projectId: string): Promise<void> {
           eq(projectClips.project_id, projectId),
           isNotNull(projectClips.deleted_at),
           lt(projectClips.deleted_at, cutoff),
+        ),
+      ),
+    db
+      .select({ id: projectVideoOverlays.id, r2_key: projectVideoOverlays.r2_key })
+      .from(projectVideoOverlays)
+      .where(
+        and(
+          eq(projectVideoOverlays.project_id, projectId),
+          isNotNull(projectVideoOverlays.deleted_at),
+          lt(projectVideoOverlays.deleted_at, cutoff),
         ),
       ),
     db
@@ -122,6 +136,14 @@ async function purgeExpiredSoftDeletes(projectId: string): Promise<void> {
       console.error('[projectService] Best-effort purge R2 delete failed for clip', clip.id, err);
     }
     await db.delete(projectClips).where(eq(projectClips.id, clip.id));
+  }
+  for (const overlay of expiredVideoOverlays) {
+    try {
+      await r2.send(new DeleteObjectCommand({ Bucket: R2_BUCKET, Key: overlay.r2_key }));
+    } catch (err) {
+      console.error('[projectService] Best-effort purge R2 delete failed for video overlay', overlay.id, err);
+    }
+    await db.delete(projectVideoOverlays).where(eq(projectVideoOverlays.id, overlay.id));
   }
   for (const audio of expiredAudio) {
     try {
@@ -182,12 +204,16 @@ export interface ProjectClipWithUrl extends Omit<ProjectClip, 'r2_key'> {
 export interface ProjectAudioClipWithUrl extends Omit<ProjectAudioClip, 'r2_key'> {
   url: string;
 }
+export interface ProjectVideoOverlayWithUrl extends Omit<ProjectVideoOverlay, 'r2_key'> {
+  url: string;
+}
 export interface ProjectCaptionCueWithWords extends ProjectCaptionCue {
   words: ProjectCaptionWord[];
 }
 export interface FullProjectState extends Omit<Project, 'thumbnail_r2_key'> {
   thumbnail_url: string | null;
   clips: ProjectClipWithUrl[];
+  video_overlays: ProjectVideoOverlayWithUrl[];
   text_overlays: ProjectTextOverlay[];
   audio_clips: ProjectAudioClipWithUrl[];
   caption_cues: ProjectCaptionCueWithWords[];
@@ -212,12 +238,17 @@ export async function getProjectWithState(
     console.error('[projectService] purgeExpiredSoftDeletes failed (non-blocking):', err);
   }
 
-  const [clipRows, textRows, audioRows, cueRows] = await Promise.all([
+  const [clipRows, videoOverlayRows, textRows, audioRows, cueRows] = await Promise.all([
     db
       .select()
       .from(projectClips)
       .where(and(eq(projectClips.project_id, projectId), isNull(projectClips.deleted_at)))
       .orderBy(projectClips.sort_order),
+    db
+      .select()
+      .from(projectVideoOverlays)
+      .where(and(eq(projectVideoOverlays.project_id, projectId), isNull(projectVideoOverlays.deleted_at)))
+      .orderBy(asc(projectVideoOverlays.z_index), asc(projectVideoOverlays.created_at)),
     db
       .select()
       .from(projectTextOverlays)
@@ -320,6 +351,55 @@ export async function getProjectWithState(
       return { ...rest, original_duration_seconds, url };
     }),
   );
+  const videoOverlays: ProjectVideoOverlayWithUrl[] = await Promise.all(
+    videoOverlayRows.map(async (overlay) => {
+      const { r2_key, ...rest } = overlay;
+      const url = await getUploadPresignedUrl(r2_key);
+      let original_duration_seconds = rest.original_duration_seconds;
+      let width = rest.width;
+      let height = rest.height;
+      if (original_duration_seconds == null || width == null || height == null) {
+        try {
+          const meta = await probeVideoMeta(url);
+          const updates: {
+            original_duration_seconds?: number;
+            trim_end_seconds?: number;
+            trim_max_seconds?: number;
+            width?: number;
+            height?: number;
+          } = {};
+          if (original_duration_seconds == null && meta.durationSeconds != null) {
+            original_duration_seconds = meta.durationSeconds;
+            updates.original_duration_seconds = meta.durationSeconds;
+            if (rest.trim_end_seconds == null) updates.trim_end_seconds = meta.durationSeconds;
+            if (rest.trim_max_seconds == null) updates.trim_max_seconds = meta.durationSeconds;
+          }
+          if (width == null && meta.width != null) {
+            width = meta.width;
+            updates.width = meta.width;
+          }
+          if (height == null && meta.height != null) {
+            height = meta.height;
+            updates.height = meta.height;
+          }
+          if (Object.keys(updates).length > 0) {
+            await db.update(projectVideoOverlays).set(updates).where(eq(projectVideoOverlays.id, overlay.id));
+          }
+        } catch (err) {
+          console.error('[projectService] Self-heal probe failed for video overlay', overlay.id, err);
+        }
+      }
+      return {
+        ...rest,
+        original_duration_seconds,
+        width,
+        height,
+        trim_end_seconds: rest.trim_end_seconds ?? original_duration_seconds,
+        trim_max_seconds: rest.trim_max_seconds ?? original_duration_seconds,
+        url,
+      };
+    }),
+  );
   const thumbnailUrl = projectRow.thumbnail_r2_key
     ? await getUploadPresignedUrl(projectRow.thumbnail_r2_key)
     : null;
@@ -330,6 +410,7 @@ export async function getProjectWithState(
     ...projectFields,
     thumbnail_url: thumbnailUrl,
     clips,
+    video_overlays: videoOverlays,
     text_overlays: textRows,
     audio_clips: audioClips,
     caption_cues: cueRows.map((c) => ({ ...c, words: wordsByCue[c.id] ?? [] })),
@@ -365,8 +446,12 @@ export async function deleteProject(projectId: string, userId: string): Promise<
     .where(and(eq(projects.id, projectId), eq(projects.user_id, userId)));
   if (!projectRow) return false;
 
-  const [clipRows, audioRows, cueRows, soundtrackRows, voiceoverRows, separationRows] = await Promise.all([
+  const [clipRows, videoOverlayRows, audioRows, cueRows, soundtrackRows, voiceoverRows, separationRows] = await Promise.all([
     db.select({ r2_key: projectClips.r2_key }).from(projectClips).where(eq(projectClips.project_id, projectId)),
+    db
+      .select({ r2_key: projectVideoOverlays.r2_key })
+      .from(projectVideoOverlays)
+      .where(eq(projectVideoOverlays.project_id, projectId)),
     db
       .select({ r2_key: projectAudioClips.r2_key })
       .from(projectAudioClips)
@@ -430,6 +515,7 @@ export async function deleteProject(projectId: string, userId: string): Promise<
   await db.delete(audioSeparationJobs).where(eq(audioSeparationJobs.project_id, projectId));
   await db.delete(projectSoundtrackGenerations).where(eq(projectSoundtrackGenerations.project_id, projectId));
   await db.delete(projectTextOverlays).where(eq(projectTextOverlays.project_id, projectId));
+  await db.delete(projectVideoOverlays).where(eq(projectVideoOverlays.project_id, projectId));
   await db.delete(projectClips).where(eq(projectClips.project_id, projectId));
   await db.delete(projects).where(eq(projects.id, projectId));
 
@@ -440,6 +526,7 @@ export async function deleteProject(projectId: string, userId: string): Promise<
   // rather than issue a second delete for the same object.
   const allKeys = [...new Set([
     ...clipRows.map((c) => c.r2_key),
+    ...videoOverlayRows.map((overlay) => overlay.r2_key),
     ...audioRows.map((a) => a.r2_key),
     ...aiAudioKeys,
     ...separationKeys,
@@ -669,6 +756,248 @@ export async function importClipByCopy(input: ImportClipParams): Promise<Project
   return clip;
 }
 
+// ─── Video overlays (picture-in-picture) ──────────────────────────────────────
+
+export interface ImportVideoOverlayParams {
+  projectId: string;
+  userId: string;
+  sourceType: 'generation' | 'upload';
+  sourceId?: string;
+  uploadedR2Key?: string;
+  startOffsetSeconds: number;
+  durationSeconds?: number;
+  width?: number;
+  height?: number;
+}
+
+export async function importVideoOverlayByCopy(
+  input: ImportVideoOverlayParams,
+): Promise<ProjectVideoOverlay | null> {
+  if (!(await isProjectOwned(input.projectId, input.userId))) return null;
+
+  let r2Key: string;
+  let { durationSeconds, width, height } = input;
+  if (input.sourceType === 'generation') {
+    if (!input.sourceId) throw new Error('sourceId is required for a generation overlay');
+    const [generation] = await db
+      .select({
+        r2_key: generations.r2_key,
+        status: generations.status,
+        media_type: generations.media_type,
+      })
+      .from(generations)
+      .where(and(eq(generations.id, input.sourceId), eq(generations.user_id, input.userId)));
+    if (
+      !generation ||
+      generation.status !== 'completed' ||
+      !generation.r2_key ||
+      generation.media_type === 'image'
+    ) {
+      throw new ImportSourceNotFoundError('Source video generation not found, not owned, or not completed');
+    }
+    const ext = generation.r2_key.split('.').pop() ?? 'mp4';
+    r2Key = `projects/${input.projectId}/overlays/${randomUUID()}.${ext}`;
+    await r2.send(
+      new CopyObjectCommand({
+        Bucket: R2_BUCKET,
+        CopySource: `${R2_BUCKET}/${generation.r2_key}`,
+        Key: r2Key,
+      }),
+    );
+    try {
+      const meta = await probeVideoMeta(await getUploadPresignedUrl(r2Key));
+      durationSeconds = meta.durationSeconds ?? undefined;
+      width = meta.width ?? undefined;
+      height = meta.height ?? undefined;
+    } catch (err) {
+      console.error('[projectService] Video overlay generation probe failed (self-heals on read):', err);
+    }
+  } else {
+    if (!input.uploadedR2Key) throw new Error('uploadedR2Key is required for an upload overlay');
+    r2Key = input.uploadedR2Key;
+  }
+
+  const nextZResult = await db.execute(sql`
+    SELECT COALESCE(MAX(z_index), -1) + 1 AS next_z
+    FROM project_video_overlays
+    WHERE project_id = ${input.projectId}::uuid AND deleted_at IS NULL
+  `);
+  const nextZ = Math.min(
+    50,
+    Number((nextZResult.rows?.[0] as { next_z?: number } | undefined)?.next_z ?? 0),
+  );
+  const [overlay] = await db
+    .insert(projectVideoOverlays)
+    .values({
+      project_id: input.projectId,
+      r2_key: r2Key,
+      source_type: input.sourceType,
+      original_duration_seconds: durationSeconds ?? null,
+      width: width ?? null,
+      height: height ?? null,
+      start_offset_seconds: input.startOffsetSeconds,
+      trim_start_seconds: 0,
+      trim_end_seconds: durationSeconds ?? null,
+      trim_min_seconds: 0,
+      trim_max_seconds: durationSeconds ?? null,
+      z_index: nextZ,
+    })
+    .returning();
+  return overlay ?? null;
+}
+
+export async function updateVideoOverlay(
+  projectId: string,
+  userId: string,
+  overlayId: string,
+  updates: Partial<
+    Pick<
+      NewProjectVideoOverlay,
+      | 'start_offset_seconds'
+      | 'trim_start_seconds'
+      | 'trim_end_seconds'
+      | 'x_norm'
+      | 'y_norm'
+      | 'width_norm'
+      | 'rotation'
+      | 'volume'
+      | 'z_index'
+    >
+  >,
+): Promise<ProjectVideoOverlay | null> {
+  if (!(await isProjectOwned(projectId, userId))) return null;
+  const [overlay] = await db
+    .update(projectVideoOverlays)
+    .set(updates)
+    .where(
+      and(
+        eq(projectVideoOverlays.id, overlayId),
+        eq(projectVideoOverlays.project_id, projectId),
+        isNull(projectVideoOverlays.deleted_at),
+      ),
+    )
+    .returning();
+  return overlay ?? null;
+}
+
+export async function softDeleteVideoOverlay(
+  projectId: string,
+  userId: string,
+  overlayId: string,
+): Promise<boolean> {
+  if (!(await isProjectOwned(projectId, userId))) return false;
+  const [overlay] = await db
+    .update(projectVideoOverlays)
+    .set({ deleted_at: new Date() })
+    .where(
+      and(
+        eq(projectVideoOverlays.id, overlayId),
+        eq(projectVideoOverlays.project_id, projectId),
+        isNull(projectVideoOverlays.deleted_at),
+      ),
+    )
+    .returning({ id: projectVideoOverlays.id });
+  return !!overlay;
+}
+
+export async function restoreVideoOverlay(
+  projectId: string,
+  userId: string,
+  overlayId: string,
+): Promise<ProjectVideoOverlay | null> {
+  if (!(await isProjectOwned(projectId, userId))) return null;
+  const [overlay] = await db
+    .update(projectVideoOverlays)
+    .set({ deleted_at: null })
+    .where(
+      and(
+        eq(projectVideoOverlays.id, overlayId),
+        eq(projectVideoOverlays.project_id, projectId),
+        isNotNull(projectVideoOverlays.deleted_at),
+      ),
+    )
+    .returning();
+  return overlay ?? null;
+}
+
+export async function splitVideoOverlay(
+  projectId: string,
+  userId: string,
+  overlayId: string,
+  atSeconds: number,
+): Promise<ProjectVideoOverlay | null> {
+  if (!(await isProjectOwned(projectId, userId))) return null;
+  const [overlay] = await db
+    .select()
+    .from(projectVideoOverlays)
+    .where(
+      and(
+        eq(projectVideoOverlays.id, overlayId),
+        eq(projectVideoOverlays.project_id, projectId),
+        isNull(projectVideoOverlays.deleted_at),
+      ),
+    );
+  if (!overlay) return null;
+
+  const trimEnd = overlay.trim_end_seconds ?? overlay.original_duration_seconds;
+  if (trimEnd == null) {
+    throw new SplitValidationError('Overlay has no resolvable duration');
+  }
+  const sourceSplit = overlay.trim_start_seconds + (atSeconds - overlay.start_offset_seconds);
+  if (
+    !Number.isFinite(sourceSplit) ||
+    sourceSplit <= overlay.trim_start_seconds ||
+    sourceSplit >= trimEnd
+  ) {
+    throw new SplitValidationError('Split point must be strictly inside the overlay');
+  }
+
+  const ext = overlay.r2_key.split('.').pop() ?? 'mp4';
+  const destinationKey = `projects/${projectId}/overlays/${randomUUID()}.${ext}`;
+  await r2.send(
+    new CopyObjectCommand({
+      Bucket: R2_BUCKET,
+      CopySource: `${R2_BUCKET}/${overlay.r2_key}`,
+      Key: destinationKey,
+    }),
+  );
+
+  try {
+    return await db.transaction(async (tx) => {
+      await tx
+        .update(projectVideoOverlays)
+        .set({ trim_end_seconds: sourceSplit })
+        .where(and(eq(projectVideoOverlays.id, overlayId), eq(projectVideoOverlays.project_id, projectId)));
+      const [newOverlay] = await tx
+        .insert(projectVideoOverlays)
+        .values({
+          project_id: projectId,
+          r2_key: destinationKey,
+          source_type: overlay.source_type,
+          original_duration_seconds: overlay.original_duration_seconds,
+          width: overlay.width,
+          height: overlay.height,
+          start_offset_seconds: atSeconds,
+          trim_start_seconds: sourceSplit,
+          trim_end_seconds: trimEnd,
+          trim_min_seconds: overlay.trim_min_seconds,
+          trim_max_seconds: overlay.trim_max_seconds,
+          x_norm: overlay.x_norm,
+          y_norm: overlay.y_norm,
+          width_norm: overlay.width_norm,
+          rotation: overlay.rotation,
+          volume: overlay.volume,
+          z_index: overlay.z_index,
+        })
+        .returning();
+      return newOverlay ?? null;
+    });
+  } catch (err) {
+    await r2.send(new DeleteObjectCommand({ Bucket: R2_BUCKET, Key: destinationKey })).catch(() => {});
+    throw err;
+  }
+}
+
 async function setProjectThumbnailFromClip(
   projectId: string,
   clipR2Key: string,
@@ -762,6 +1091,8 @@ export async function splitClip(
       trim_start_seconds: input.newTrimStart,
       trim_end_seconds: input.newTrimEnd,
       volume: clip.volume,
+      playback_rate: clip.playback_rate,
+      speed_curve: clip.speed_curve,
     })
     .returning();
 
@@ -816,6 +1147,8 @@ export interface AddTextOverlayInput {
   rowIndex?: number;
   startSeconds: number;
   endSeconds: number;
+  /** Sketch 016: per-overlay style jsonb (see schema.ts's style column doc). */
+  style?: Record<string, unknown> | null;
 }
 export interface UpdateTextOverlayInput {
   text?: string;
@@ -826,6 +1159,8 @@ export interface UpdateTextOverlayInput {
   rowIndex?: number;
   startSeconds?: number;
   endSeconds?: number;
+  /** Sketch 016: per-overlay style jsonb (see schema.ts's style column doc). */
+  style?: Record<string, unknown> | null;
 }
 
 export async function addTextOverlay(
@@ -847,6 +1182,7 @@ export async function addTextOverlay(
       row_index: input.rowIndex ?? null,
       start_seconds: input.startSeconds,
       end_seconds: input.endSeconds,
+      ...(input.style !== undefined ? { style: input.style } : {}),
     })
     .returning();
   return row;
@@ -869,6 +1205,7 @@ export async function updateTextOverlay(
   if (updates.rowIndex !== undefined) setValues.row_index = updates.rowIndex;
   if (updates.startSeconds !== undefined) setValues.start_seconds = updates.startSeconds;
   if (updates.endSeconds !== undefined) setValues.end_seconds = updates.endSeconds;
+  if (updates.style !== undefined) setValues.style = updates.style;
 
   const [row] = await db
     .update(projectTextOverlays)
@@ -1659,6 +1996,8 @@ export async function buildComposeSnapshot(projectId: string, userId: string): P
       trimStartSeconds: c.trim_start_seconds,
       trimEndSeconds,
       volume: c.volume,
+      playbackRate: c.playback_rate,
+      speedCurve: c.speed_curve,
     };
   });
 
@@ -1714,6 +2053,8 @@ export async function buildComposeSnapshot(projectId: string, userId: string): P
       rotation: t.rotation ?? 0,
       startSeconds: t.start_seconds,
       endSeconds: t.end_seconds,
+      // Sketch 016: per-overlay style jsonb — NULL/absent renders the legacy fixed look.
+      style: (t.style as ComposeTextSpec['style']) ?? undefined,
     })),
     audioClips,
     captionCues,

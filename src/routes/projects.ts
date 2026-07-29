@@ -17,6 +17,7 @@ import { db } from '../db/client';
 import {
   projects,
   projectClips,
+  projectVideoOverlays,
   projectTextOverlays,
   projectAudioClips,
   projectCaptionCues,
@@ -38,6 +39,12 @@ import {
   smartUnpackOnImport,
   ImportSourceNotFoundError,
   MAX_CLIPS_PER_PROJECT,
+  importVideoOverlayByCopy,
+  updateVideoOverlay,
+  softDeleteVideoOverlay,
+  restoreVideoOverlay,
+  splitVideoOverlay,
+  MAX_VIDEO_OVERLAYS_PER_PROJECT,
   addTextOverlay,
   updateTextOverlay,
   deleteTextOverlay,
@@ -72,6 +79,72 @@ export const projectsRouter = Router();
 // Plan 13-22 B2: 'original' = the first clip's exact native ratio (not snapped to a preset).
 const VALID_ASPECT_RATIOS = ['original', '9:16', '4:5', '1:1', '16:9'];
 const VALID_CAPTION_POSITIONS = ['top', 'middle', 'bottom'];
+// Sketch 016 (2026-07-29): style-sheet fields on caption_style jsonb + text-overlay style jsonb.
+const VALID_CAPTION_TIMINGS = ['word', 'block', 'karaoke'];
+const VALID_STYLE_BACKGROUNDS = ['none', 'pill', 'block'];
+const STYLE_HEX_RE = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
+
+/** Validates the sketch-016 style fields shared by caption_style and text-overlay style bodies.
+ * Returns an error string, or null when valid/absent. Pass allowTiming=false for overlay styles
+ * (timing is a caption-only concept — rejected there, not ignored, so client bugs surface). */
+function validateStyleFields(style: Record<string, unknown> | undefined | null, label: string, allowTiming: boolean): string | null {
+  if (style === undefined || style === null) return null;
+  if (typeof style !== 'object' || Array.isArray(style)) return `${label} must be an object`;
+  if (style.timing !== undefined) {
+    if (!allowTiming) return `${label}.timing is only valid on caption_style`;
+    if (typeof style.timing !== 'string' || !VALID_CAPTION_TIMINGS.includes(style.timing)) {
+      return `Invalid ${label}.timing`;
+    }
+  }
+  if (
+    style.background !== undefined &&
+    (typeof style.background !== 'string' || !VALID_STYLE_BACKGROUNDS.includes(style.background))
+  ) {
+    return `Invalid ${label}.background`;
+  }
+  for (const key of ['color', 'highlightColor', 'backgroundColor'] as const) {
+    if (style[key] !== undefined && (typeof style[key] !== 'string' || !STYLE_HEX_RE.test(style[key] as string))) {
+      return `Invalid ${label}.${key}`;
+    }
+  }
+  if (
+    style.opacity !== undefined &&
+    (typeof style.opacity !== 'number' || style.opacity < 20 || style.opacity > 100)
+  ) {
+    return `${label}.opacity must be between 20 and 100`;
+  }
+  for (const key of ['bold', 'outline', 'shadow', 'allCaps'] as const) {
+    if (style[key] !== undefined && typeof style[key] !== 'boolean') return `Invalid ${label}.${key}`;
+  }
+  if (style.font !== undefined && typeof style.font !== 'string') return `Invalid ${label}.font`;
+  return null;
+}
+
+type SpeedCurvePoint = { position: number; rate: number };
+
+function isValidSpeedCurve(value: unknown): value is SpeedCurvePoint[] {
+  if (!Array.isArray(value) || value.length < 2 || value.length > 12) return false;
+  let previousPosition = -1;
+  for (const point of value) {
+    if (
+      typeof point !== 'object' ||
+      point === null ||
+      typeof (point as SpeedCurvePoint).position !== 'number' ||
+      !Number.isFinite((point as SpeedCurvePoint).position) ||
+      typeof (point as SpeedCurvePoint).rate !== 'number' ||
+      !Number.isFinite((point as SpeedCurvePoint).rate) ||
+      (point as SpeedCurvePoint).position < 0 ||
+      (point as SpeedCurvePoint).position > 1 ||
+      (point as SpeedCurvePoint).rate < 0.1 ||
+      (point as SpeedCurvePoint).rate > 10 ||
+      (point as SpeedCurvePoint).position <= previousPosition
+    ) {
+      return false;
+    }
+    previousPosition = (point as SpeedCurvePoint).position;
+  }
+  return value[0].position === 0 && value[value.length - 1].position === 1;
+}
 
 const ALLOWED_CLIP_MIMES: Record<string, string> = {
   'image/jpeg': 'jpg',
@@ -91,6 +164,19 @@ const clipUpload = multer({
   limits: { fileSize: 200 * 1024 * 1024 }, // 200MB — clips can be short video, larger than a still image reference
   fileFilter: (_req, file, cb) => {
     cb(null, file.mimetype in ALLOWED_CLIP_MIMES);
+  },
+});
+
+const ALLOWED_VIDEO_OVERLAY_MIMES: Record<string, string> = {
+  'video/mp4': 'mp4',
+  'video/quicktime': 'mov',
+};
+
+const videoOverlayUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 200 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    cb(null, file.mimetype in ALLOWED_VIDEO_OVERLAY_MIMES);
   },
 });
 
@@ -307,6 +393,12 @@ projectsRouter.patch('/:id', async (req: Request, res: Response) => {
       caption_style.yOffsetNorm > 1)
   ) {
     res.status(400).json({ error: 'caption_style.yOffsetNorm must be between 0 and 1' });
+    return;
+  }
+  // Sketch 016: validate the new style-sheet fields (timing/background/colors/effects/opacity).
+  const captionStyleError = validateStyleFields(caption_style, 'caption_style', true);
+  if (captionStyleError) {
+    res.status(400).json({ error: captionStyleError });
     return;
   }
 
@@ -552,7 +644,14 @@ projectsRouter.patch('/:id/clips/:clipId', async (req: Request, res: Response) =
   }
   const projectId = req.params.id as string;
   const clipId = req.params.clipId as string;
-  const { sort_order, trim_start_seconds, trim_end_seconds, volume } = req.body ?? {};
+  const {
+    sort_order,
+    trim_start_seconds,
+    trim_end_seconds,
+    volume,
+    playback_rate,
+    speed_curve,
+  } = req.body ?? {};
   const trimWasSupplied = trim_start_seconds !== undefined || trim_end_seconds !== undefined;
 
   try {
@@ -594,6 +693,27 @@ projectsRouter.patch('/:id/clips/:clipId', async (req: Request, res: Response) =
         return;
       }
       setValues.volume = volume;
+    }
+    if (playback_rate !== undefined) {
+      if (
+        typeof playback_rate !== 'number' ||
+        !Number.isFinite(playback_rate) ||
+        playback_rate < 0.1 ||
+        playback_rate > 10
+      ) {
+        res.status(400).json({ error: 'playback_rate must be a finite number between 0.1 and 10' });
+        return;
+      }
+      setValues.playback_rate = playback_rate;
+    }
+    if (speed_curve !== undefined) {
+      if (speed_curve !== null && !isValidSpeedCurve(speed_curve)) {
+        res.status(400).json({
+          error: 'speed_curve must be null or 2-12 ordered points spanning position 0...1 with rates 0.1...10',
+        });
+        return;
+      }
+      setValues.speed_curve = speed_curve;
     }
     if (Object.keys(setValues).length === 0 && requestedSortOrder === undefined) {
       res.status(400).json({ error: 'No valid fields to update' });
@@ -647,7 +767,7 @@ projectsRouter.patch('/:id/clips/:clipId', async (req: Request, res: Response) =
     }
 
     const captionStalenessResponse = async (): Promise<{ captions_may_be_stale?: true }> => {
-      if (!trimActuallyChanged) return {};
+      if (!trimActuallyChanged && playback_rate === undefined && speed_curve === undefined) return {};
       const [captionCue] = await db
         .select({ id: projectCaptionCues.id })
         .from(projectCaptionCues)
@@ -886,6 +1006,294 @@ projectsRouter.post('/:id/export', async (req: Request, res: Response) => {
   }
 });
 
+// ─── Video overlays (picture-in-picture) ──────────────────────────────────────
+
+projectsRouter.post(
+  '/:id/overlays',
+  videoOverlayUpload.single('file'),
+  async (req: Request, res: Response) => {
+    if (!req.user?.dbUserId) {
+      res.status(401).json({ error: 'Not authenticated' });
+      return;
+    }
+    const projectId = req.params.id as string;
+    const startOffsetSeconds = parseOptionalNumber(req.body?.start_offset_seconds) ?? 0;
+    if (startOffsetSeconds < 0) {
+      res.status(400).json({ error: 'start_offset_seconds must be a non-negative number' });
+      return;
+    }
+
+    let uploadedKey: string | null = null;
+    try {
+      const [ownedProject] = await db
+        .select({ id: projects.id })
+        .from(projects)
+        .where(and(eq(projects.id, projectId), eq(projects.user_id, req.user.dbUserId)));
+      if (!ownedProject) {
+        res.status(404).json({ error: 'Project not found' });
+        return;
+      }
+
+      const [{ count }] = await db
+        .select({ count: sql<number>`count(*)` })
+        .from(projectVideoOverlays)
+        .where(
+          and(eq(projectVideoOverlays.project_id, projectId), isNull(projectVideoOverlays.deleted_at)),
+        );
+      if (Number(count) >= MAX_VIDEO_OVERLAYS_PER_PROJECT) {
+        res.status(400).json({
+          error: `Project already has the maximum of ${MAX_VIDEO_OVERLAYS_PER_PROJECT} video overlays`,
+        });
+        return;
+      }
+
+      if (req.file) {
+        const ext = ALLOWED_VIDEO_OVERLAY_MIMES[req.file.mimetype];
+        uploadedKey = `projects/${projectId}/overlays/${randomUUID()}.${ext}`;
+        await r2.send(
+          new PutObjectCommand({
+            Bucket: R2_BUCKET,
+            Key: uploadedKey,
+            Body: req.file.buffer,
+            ContentType: req.file.mimetype,
+          }),
+        );
+
+        let durationSeconds: number | undefined;
+        let width: number | undefined;
+        let height: number | undefined;
+        const tempPath = path.join(tmpdir(), `overlay-probe-${randomUUID()}.${ext}`);
+        try {
+          await writeFile(tempPath, req.file.buffer);
+          const meta = await probeVideoMeta(tempPath);
+          durationSeconds = meta.durationSeconds ?? undefined;
+          width = meta.width ?? undefined;
+          height = meta.height ?? undefined;
+        } catch (err) {
+          console.error('[projects] Video overlay upload probe failed (self-heals on read):', err);
+        } finally {
+          await unlink(tempPath).catch(() => {});
+        }
+
+        const overlay = await importVideoOverlayByCopy({
+          projectId,
+          userId: req.user.dbUserId,
+          sourceType: 'upload',
+          uploadedR2Key: uploadedKey,
+          startOffsetSeconds,
+          durationSeconds,
+          width,
+          height,
+        });
+        if (!overlay) {
+          res.status(404).json({ error: 'Project not found' });
+          return;
+        }
+        uploadedKey = null; // the persisted row now owns this object
+        res.status(201).json({ video_overlay: overlay });
+        return;
+      }
+
+      if (req.is('multipart/form-data')) {
+        res.status(400).json({ error: 'No video file provided or unsupported video type' });
+        return;
+      }
+
+      const { source_type, generation_id } = req.body ?? {};
+      if (source_type !== 'generation' || typeof generation_id !== 'string') {
+        res.status(400).json({
+          error: 'Provide a video file, or { source_type: "generation", generation_id }',
+        });
+        return;
+      }
+      const overlay = await importVideoOverlayByCopy({
+        projectId,
+        userId: req.user.dbUserId,
+        sourceType: 'generation',
+        sourceId: generation_id,
+        startOffsetSeconds,
+      });
+      if (!overlay) {
+        res.status(404).json({ error: 'Project not found' });
+        return;
+      }
+      res.status(201).json({ video_overlay: overlay });
+    } catch (err) {
+      if (uploadedKey) {
+        await r2.send(new DeleteObjectCommand({ Bucket: R2_BUCKET, Key: uploadedKey })).catch(() => {});
+      }
+      if (err instanceof ImportSourceNotFoundError) {
+        res.status(404).json({ error: err.message });
+        return;
+      }
+      console.error('[projects] Error adding video overlay:', err);
+      res.status(500).json({ error: 'Failed to add video overlay' });
+    }
+  },
+);
+
+projectsRouter.patch('/:id/overlays/:overlayId', async (req: Request, res: Response) => {
+  if (!req.user?.dbUserId) {
+    res.status(401).json({ error: 'Not authenticated' });
+    return;
+  }
+  const projectId = req.params.id as string;
+  const overlayId = req.params.overlayId as string;
+  const body = req.body ?? {};
+  const numericBounds: Record<string, [number, number]> = {
+    start_offset_seconds: [0, Number.MAX_SAFE_INTEGER],
+    trim_start_seconds: [0, Number.MAX_SAFE_INTEGER],
+    trim_end_seconds: [0, Number.MAX_SAFE_INTEGER],
+    x_norm: [0, 1],
+    y_norm: [0, 1],
+    width_norm: [0.05, 2],
+    rotation: [-3600, 3600],
+    volume: [0, 1],
+    z_index: [0, 50],
+  };
+  const updates: Record<string, number> = {};
+  for (const [field, [minimum, maximum]] of Object.entries(numericBounds)) {
+    if (body[field] === undefined) continue;
+    const value = body[field];
+    if (
+      typeof value !== 'number' ||
+      !Number.isFinite(value) ||
+      value < minimum ||
+      value > maximum ||
+      (field === 'z_index' && !Number.isInteger(value))
+    ) {
+      res.status(400).json({ error: `${field} is outside its allowed range` });
+      return;
+    }
+    updates[field] = value;
+  }
+  if (Object.keys(updates).length === 0) {
+    res.status(400).json({ error: 'No valid fields to update' });
+    return;
+  }
+
+  try {
+    if (updates.trim_start_seconds !== undefined || updates.trim_end_seconds !== undefined) {
+      const [current] = await db
+        .select()
+        .from(projectVideoOverlays)
+        .where(
+          and(
+            eq(projectVideoOverlays.id, overlayId),
+            eq(projectVideoOverlays.project_id, projectId),
+            isNull(projectVideoOverlays.deleted_at),
+          ),
+        );
+      if (!current) {
+        res.status(404).json({ error: 'Video overlay not found' });
+        return;
+      }
+      const nextStart = updates.trim_start_seconds ?? current.trim_start_seconds;
+      const nextEnd =
+        updates.trim_end_seconds ?? current.trim_end_seconds ?? current.original_duration_seconds;
+      if (nextEnd == null || nextStart >= nextEnd) {
+        res.status(400).json({ error: 'trim_start_seconds must be less than trim_end_seconds' });
+        return;
+      }
+      if (current.original_duration_seconds != null && nextEnd > current.original_duration_seconds) {
+        res.status(400).json({ error: 'Trim bounds cannot exceed the overlay source duration' });
+        return;
+      }
+    }
+
+    const overlay = await updateVideoOverlay(
+      projectId,
+      req.user.dbUserId,
+      overlayId,
+      updates,
+    );
+    if (!overlay) {
+      res.status(404).json({ error: 'Video overlay not found' });
+      return;
+    }
+    res.status(200).json({ video_overlay: overlay });
+  } catch (err) {
+    console.error('[projects] Error updating video overlay:', err);
+    res.status(500).json({ error: 'Failed to update video overlay' });
+  }
+});
+
+projectsRouter.delete('/:id/overlays/:overlayId', async (req: Request, res: Response) => {
+  if (!req.user?.dbUserId) {
+    res.status(401).json({ error: 'Not authenticated' });
+    return;
+  }
+  try {
+    const deleted = await softDeleteVideoOverlay(
+      req.params.id as string,
+      req.user.dbUserId,
+      req.params.overlayId as string,
+    );
+    if (!deleted) {
+      res.status(404).json({ error: 'Video overlay not found' });
+      return;
+    }
+    res.status(204).send();
+  } catch (err) {
+    console.error('[projects] Error deleting video overlay:', err);
+    res.status(500).json({ error: 'Failed to delete video overlay' });
+  }
+});
+
+projectsRouter.post('/:id/overlays/:overlayId/restore', async (req: Request, res: Response) => {
+  if (!req.user?.dbUserId) {
+    res.status(401).json({ error: 'Not authenticated' });
+    return;
+  }
+  try {
+    const overlay = await restoreVideoOverlay(
+      req.params.id as string,
+      req.user.dbUserId,
+      req.params.overlayId as string,
+    );
+    if (!overlay) {
+      res.status(404).json({ error: 'Video overlay not found or already restored' });
+      return;
+    }
+    res.status(200).json({ video_overlay: overlay });
+  } catch (err) {
+    console.error('[projects] Error restoring video overlay:', err);
+    res.status(500).json({ error: 'Failed to restore video overlay' });
+  }
+});
+
+projectsRouter.post('/:id/overlays/:overlayId/split', async (req: Request, res: Response) => {
+  if (!req.user?.dbUserId) {
+    res.status(401).json({ error: 'Not authenticated' });
+    return;
+  }
+  const atSeconds = req.body?.at_seconds;
+  if (typeof atSeconds !== 'number' || !Number.isFinite(atSeconds) || atSeconds < 0) {
+    res.status(400).json({ error: 'at_seconds must be a non-negative number' });
+    return;
+  }
+  try {
+    const overlay = await splitVideoOverlay(
+      req.params.id as string,
+      req.user.dbUserId,
+      req.params.overlayId as string,
+      atSeconds,
+    );
+    if (!overlay) {
+      res.status(404).json({ error: 'Video overlay not found' });
+      return;
+    }
+    res.status(201).json({ video_overlay: overlay });
+  } catch (err) {
+    if (err instanceof SplitValidationError) {
+      res.status(400).json({ error: err.message });
+      return;
+    }
+    console.error('[projects] Error splitting video overlay:', err);
+    res.status(500).json({ error: 'Failed to split video overlay' });
+  }
+});
+
 // ─── Text overlays (SC3) ────────────────────────────────────────────────────────
 // Bounds validation (T-13-44 — the authoritative server-side backstop the iOS plan's
 // threat register T-13-32 relies on): x_norm/y_norm ∈ [0,1], width_norm ∈ [0.5,3],
@@ -898,10 +1306,17 @@ projectsRouter.post('/:id/text', async (req: Request, res: Response) => {
     return;
   }
   const projectId = req.params.id as string;
-  const { text, x_norm, y_norm, width_norm, rotation, row_index, start_seconds, end_seconds } = req.body ?? {};
+  const { text, x_norm, y_norm, width_norm, rotation, row_index, start_seconds, end_seconds, style } = req.body ?? {};
 
   if (typeof text !== 'string' || text.length === 0) {
     res.status(400).json({ error: 'text is required' });
+    return;
+  }
+  // Sketch 016: per-overlay style jsonb (validated; usually omitted — overlays are created
+  // with the legacy look and styled afterwards via PATCH).
+  const addStyleError = validateStyleFields(style, 'style', false);
+  if (addStyleError) {
+    res.status(400).json({ error: addStyleError });
     return;
   }
   if (
@@ -968,6 +1383,7 @@ projectsRouter.post('/:id/text', async (req: Request, res: Response) => {
       rowIndex: typeof row_index === 'number' ? row_index : undefined,
       startSeconds: start_seconds,
       endSeconds: end_seconds,
+      style: style !== undefined ? (style as Record<string, unknown> | null) : undefined,
     });
     if (!overlay) {
       res.status(404).json({ error: 'Project not found' });
@@ -986,10 +1402,16 @@ projectsRouter.patch('/:id/text/:textId', async (req: Request, res: Response) =>
     res.status(401).json({ error: 'Not authenticated' });
     return;
   }
-  const { text, x_norm, y_norm, width_norm, rotation, row_index, start_seconds, end_seconds } = req.body ?? {};
+  const { text, x_norm, y_norm, width_norm, rotation, row_index, start_seconds, end_seconds, style } = req.body ?? {};
 
   if (text !== undefined && typeof text !== 'string') {
     res.status(400).json({ error: 'text must be a string' });
+    return;
+  }
+  // Sketch 016: per-overlay style jsonb (null clears it back to the legacy fixed look).
+  const overlayStyleError = validateStyleFields(style, 'style', false);
+  if (overlayStyleError) {
+    res.status(400).json({ error: overlayStyleError });
     return;
   }
   if (x_norm !== undefined && (typeof x_norm !== 'number' || x_norm < 0 || x_norm > 1)) {
@@ -1043,6 +1465,7 @@ projectsRouter.patch('/:id/text/:textId', async (req: Request, res: Response) =>
       rowIndex: typeof row_index === 'number' ? row_index : undefined,
       startSeconds: typeof start_seconds === 'number' ? start_seconds : undefined,
       endSeconds: typeof end_seconds === 'number' ? end_seconds : undefined,
+      style: style !== undefined ? (style as Record<string, unknown> | null) : undefined,
     });
     if (!overlay) {
       res.status(404).json({ error: 'Text overlay not found' });

@@ -258,12 +258,14 @@ describe('GET /api/projects/:id', () => {
     dbMock.select
       .mockReturnValueOnce(makeChain([baseProjectRow({ id: 'proj-1' })])) // project row
       .mockReturnValueOnce(makeChain([])) // B1.5 purge: expired clips (none)
+      .mockReturnValueOnce(makeChain([])) // B1.5 purge: expired video overlays (none)
       .mockReturnValueOnce(makeChain([])) // B1.5 purge: expired audio (none)
       .mockReturnValueOnce(
         makeChain([
           { id: 'clip-1', project_id: 'proj-1', sort_order: 0, r2_key: 'projects/proj-1/clips/a.mp4', media_type: 'video', source_type: 'upload', original_duration_seconds: null, trim_start_seconds: 0, trim_end_seconds: null, created_at: NOW },
         ]),
       ) // clips
+      .mockReturnValueOnce(makeChain([])) // video overlays
       .mockReturnValueOnce(makeChain([])) // text overlays
       .mockReturnValueOnce(
         makeChain([
@@ -290,12 +292,14 @@ describe('GET /api/projects/:id', () => {
     dbMock.select
       .mockReturnValueOnce(makeChain([baseProjectRow({ id: 'proj-1' })])) // project row
       .mockReturnValueOnce(makeChain([])) // B1.5 purge: expired clips (none)
+      .mockReturnValueOnce(makeChain([])) // B1.5 purge: expired video overlays (none)
       .mockReturnValueOnce(makeChain([])) // B1.5 purge: expired audio (none)
       .mockReturnValueOnce(
         makeChain([
           { id: 'clip-heal', project_id: 'proj-1', sort_order: 0, r2_key: 'projects/proj-1/clips/a.mp4', media_type: 'video', source_type: 'upload', original_duration_seconds: null, width: null, height: null, trim_start_seconds: 0, trim_end_seconds: null, created_at: NOW },
         ]),
       ) // clips
+      .mockReturnValueOnce(makeChain([])) // video overlays
       .mockReturnValueOnce(makeChain([])) // text overlays
       .mockReturnValueOnce(makeChain([])) // audio clips
       .mockReturnValueOnce(makeChain([])); // caption cues
@@ -320,12 +324,14 @@ describe('GET /api/projects/:id', () => {
     dbMock.select
       .mockReturnValueOnce(makeChain([baseProjectRow({ id: 'proj-1' })]))
       .mockReturnValueOnce(makeChain([])) // B1.5 purge: expired clips (none)
+      .mockReturnValueOnce(makeChain([])) // B1.5 purge: expired video overlays (none)
       .mockReturnValueOnce(makeChain([])) // B1.5 purge: expired audio (none)
       .mockReturnValueOnce(
         makeChain([
           { id: 'clip-heal-img', project_id: 'proj-1', sort_order: 0, r2_key: 'projects/proj-1/clips/a.jpg', media_type: 'image', source_type: 'upload', original_duration_seconds: null, width: null, height: null, trim_start_seconds: 0, trim_end_seconds: null, created_at: NOW },
         ]),
       )
+      .mockReturnValueOnce(makeChain([])) // video overlays
       .mockReturnValueOnce(makeChain([]))
       .mockReturnValueOnce(makeChain([]))
       .mockReturnValueOnce(makeChain([]));
@@ -347,12 +353,14 @@ describe('GET /api/projects/:id', () => {
     dbMock.select
       .mockReturnValueOnce(makeChain([baseProjectRow({ id: 'proj-1' })]))
       .mockReturnValueOnce(makeChain([])) // B1.5 purge: expired clips (none)
+      .mockReturnValueOnce(makeChain([])) // B1.5 purge: expired video overlays (none)
       .mockReturnValueOnce(makeChain([])) // B1.5 purge: expired audio (none)
       .mockReturnValueOnce(
         makeChain([
           { id: 'clip-heal-fail', project_id: 'proj-1', sort_order: 0, r2_key: 'projects/proj-1/clips/a.mp4', media_type: 'video', source_type: 'upload', original_duration_seconds: null, width: null, height: null, trim_start_seconds: 0, trim_end_seconds: null, created_at: NOW },
         ]),
       )
+      .mockReturnValueOnce(makeChain([])) // video overlays
       .mockReturnValueOnce(makeChain([]))
       .mockReturnValueOnce(makeChain([]))
       .mockReturnValueOnce(makeChain([]));
@@ -370,8 +378,10 @@ describe('GET /api/projects/:id', () => {
     dbMock.select
       .mockReturnValueOnce(makeChain([baseProjectRow({ id: 'proj-1' })])) // project row
       .mockReturnValueOnce(makeChain([{ id: 'expired-clip', r2_key: 'projects/proj-1/clips/old.mp4' }])) // purge: expired clips
+      .mockReturnValueOnce(makeChain([])) // purge: expired video overlays
       .mockReturnValueOnce(makeChain([{ id: 'expired-audio', r2_key: 'projects/proj-1/audio/old.mp3' }])) // purge: expired audio
       .mockReturnValueOnce(makeChain([])) // clips (post-purge, none active)
+      .mockReturnValueOnce(makeChain([])) // video overlays
       .mockReturnValueOnce(makeChain([])) // text overlays
       .mockReturnValueOnce(makeChain([])) // audio clips (post-purge, none active)
       .mockReturnValueOnce(makeChain([])); // caption cues
@@ -395,10 +405,12 @@ describe('GET /api/projects/:id', () => {
     dbMock.select
       .mockReturnValueOnce(makeChain([baseProjectRow({ id: 'proj-1' })])) // project row
       .mockReturnValueOnce(makeChain([])) // purge: no expired clips
+      .mockReturnValueOnce(makeChain([])) // purge: no expired video overlays
       .mockReturnValueOnce(makeChain([])) // purge: no expired audio
       // clips query is scoped with deleted_at IS NULL — a just-deleted (not yet 24h expired) row
       // is excluded at the query level, so the mocked "active clips" result is simply empty here.
       .mockReturnValueOnce(makeChain([]))
+      .mockReturnValueOnce(makeChain([])) // video overlays
       .mockReturnValueOnce(makeChain([]))
       .mockReturnValueOnce(makeChain([]))
       .mockReturnValueOnce(makeChain([]));
@@ -471,6 +483,39 @@ describe('PATCH /api/projects/:id', () => {
       .send({ caption_style: { fontSize: 32, color: '#fff', highlightColor: '#0f0', position: 'left' } });
 
     expect(res.status).toBe(400);
+    expect(dbMock.update).not.toHaveBeenCalled();
+  });
+
+  // Sketch 016 (2026-07-29): the style-sheet fields on caption_style.
+  it('accepts the sketch-016 caption_style fields (timing/background/effects/opacity) with 200', async () => {
+    const style = {
+      fontSize: 32, color: '#FFFFFF', highlightColor: '#8C59FF', position: 'bottom',
+      font: 'Bangers', timing: 'karaoke', background: 'pill', backgroundColor: '#000000',
+      bold: true, outline: false, shadow: true, allCaps: true, opacity: 80,
+    };
+    const setFn = jest.fn().mockReturnValue(makeChain([baseProjectRow({ caption_style: style })]));
+    dbMock.update.mockReturnValueOnce({ set: setFn });
+
+    const res = await request(app).patch('/api/projects/proj-1').send({ caption_style: style });
+
+    expect(res.status).toBe(200);
+    expect(res.body.project.caption_style).toEqual(style);
+  });
+
+  it.each([
+    [{ timing: 'sometimes' }, 'Invalid caption_style.timing'],
+    [{ background: 'cloud' }, 'Invalid caption_style.background'],
+    [{ backgroundColor: 'black' }, 'Invalid caption_style.backgroundColor'],
+    [{ opacity: 5 }, 'caption_style.opacity must be between 20 and 100'],
+    [{ opacity: 101 }, 'caption_style.opacity must be between 20 and 100'],
+    [{ bold: 'yes' }, 'Invalid caption_style.bold'],
+  ])('rejects invalid caption_style field %j with 400', async (bad, message) => {
+    const res = await request(app)
+      .patch('/api/projects/proj-1')
+      .send({ caption_style: { fontSize: 32, color: '#fff', highlightColor: '#0f0', position: 'bottom', ...bad } });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe(message);
     expect(dbMock.update).not.toHaveBeenCalled();
   });
 
@@ -1741,7 +1786,6 @@ describe('PATCH /api/projects/:id/text/:textId', () => {
     dbMock.update.mockReturnValueOnce(
       makeChain([{ id: 'text-1', project_id: 'proj-1', text: 'Hi', rotation: -30 }]),
     );
-
     const res = await request(app).patch('/api/projects/proj-1/text/text-1').send({ rotation: -30 });
 
     expect(res.status).toBe(200);
@@ -1780,6 +1824,34 @@ describe('PATCH /api/projects/:id/text/:textId', () => {
     const res = await request(app).patch('/api/projects/not-mine/text/text-1').send({ text: 'Hijacked' });
 
     expect(res.status).toBe(404);
+  });
+
+  // Sketch 016 (2026-07-29): per-overlay style jsonb.
+  it('accepts a per-overlay style and threads it to the update', async () => {
+    const style = { font: 'Bangers', color: '#FFD60A', background: 'block', bold: true, opacity: 90 };
+    dbMock.select.mockReturnValueOnce(makeChain([{ id: 'proj-1' }])); // isProjectOwned
+    const setFn = jest.fn().mockReturnValue(makeChain([{ id: 'text-1', project_id: 'proj-1', text: 'Hi', style }]));
+    dbMock.update.mockReturnValueOnce({ set: setFn });
+
+    const res = await request(app).patch('/api/projects/proj-1/text/text-1').send({ style });
+
+    expect(res.status).toBe(200);
+    expect(setFn).toHaveBeenCalledWith(expect.objectContaining({ style }));
+    expect(res.body.text_overlay.style).toEqual(style);
+  });
+
+  it.each([
+    [{ timing: 'karaoke' }, 'style.timing is only valid on caption_style'],
+    [{ background: 'cloud' }, 'Invalid style.background'],
+    [{ color: 'yellow' }, 'Invalid style.color'],
+    [{ opacity: 150 }, 'style.opacity must be between 20 and 100'],
+    [{ allCaps: 'yes' }, 'Invalid style.allCaps'],
+  ])('rejects invalid overlay style field %j with 400', async (bad, message) => {
+    const res = await request(app).patch('/api/projects/proj-1/text/text-1').send({ style: bad });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe(message);
+    expect(dbMock.update).not.toHaveBeenCalled();
   });
 });
 

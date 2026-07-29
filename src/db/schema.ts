@@ -330,6 +330,10 @@ export const projectClips = pgTable(
     trim_end_seconds: doublePrecision('trim_end_seconds'), // nullable
     // Linear source-audio gain for this clip: 0 = muted, 1 = original level.
     volume: doublePrecision('volume').notNull().default(1),
+    // Normal source-speed multiplier. A non-null speed_curve supersedes this value.
+    playback_rate: doublePrecision('playback_rate').notNull().default(1),
+    // Variable source-speed control points: [{ position: 0...1, rate: 0.1...10 }].
+    speed_curve: jsonb('speed_curve').$type<Array<{ position: number; rate: number }>>(),
     // Soft-delete (Plan 13-21 B1): full undo of deletes. R2 object is kept until the lazy purge
     // (getProjectWithState) reaps rows older than 24h. Every read path MUST filter deleted_at IS NULL.
     deleted_at: timestamp('deleted_at', { withTimezone: true }), // nullable
@@ -342,9 +346,48 @@ export const projectClips = pgTable(
   }),
 );
 
+// ─── project_video_overlays (Studio picture-in-picture video) ─────────────────
+// Independently timed video layers. Like project_clips, every row owns its own R2 copy so
+// deleting the source generation cannot break an existing project.
+
+export const projectVideoOverlays = pgTable(
+  'project_video_overlays',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    project_id: uuid('project_id')
+      .notNull()
+      .references(() => projects.id),
+    r2_key: text('r2_key').notNull(),
+    source_type: text('source_type').notNull(), // 'generation' | 'upload'
+    original_duration_seconds: doublePrecision('original_duration_seconds'),
+    width: integer('width'),
+    height: integer('height'),
+    start_offset_seconds: doublePrecision('start_offset_seconds').notNull().default(0),
+    trim_start_seconds: doublePrecision('trim_start_seconds').notNull().default(0),
+    trim_end_seconds: doublePrecision('trim_end_seconds'),
+    trim_min_seconds: doublePrecision('trim_min_seconds').notNull().default(0),
+    trim_max_seconds: doublePrecision('trim_max_seconds'),
+    x_norm: doublePrecision('x_norm').notNull().default(0.5),
+    y_norm: doublePrecision('y_norm').notNull().default(0.5),
+    width_norm: doublePrecision('width_norm').notNull().default(0.35),
+    rotation: doublePrecision('rotation').notNull().default(0),
+    volume: doublePrecision('volume').notNull().default(1),
+    z_index: integer('z_index').notNull().default(0),
+    deleted_at: timestamp('deleted_at', { withTimezone: true }),
+    created_at: timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+  },
+  (table) => ({
+    projectIdIdx: index('project_video_overlays_project_id_idx').on(table.project_id),
+  }),
+);
+
 // ─── project_text_overlays (Phase 13: Edit Studio) ────────────────────────────
-// Draggable Text overlays — normalized 0..1 position, fixed single style (no font/color
-// picker in v1, per 13-RESEARCH.md Open Question 2 resolution).
+// Draggable Text overlays — normalized 0..1 position. v1 shipped a fixed single style (per
+// 13-RESEARCH.md Open Question 2); sketch 016 (2026-07-29, caption-text-style-sheets-plan.md)
+// adds a per-overlay `style` jsonb — NULL = the legacy fixed-white-Inter look, both in the
+// editor preview and the ASS export (assCaptionBuilder.ts's TextOverlayStyleSpec).
 
 export const projectTextOverlays = pgTable(
   'project_text_overlays',
@@ -368,6 +411,11 @@ export const projectTextOverlays = pgTable(
     // — legacy rows and any overlay never explicitly placed fall back to greedy row assignment
     // computed client-side (TimelineTrackView.effectiveRow). Bounds (0..50) enforced at the route.
     row_index: integer('row_index'),
+    // Sketch 016 (2026-07-29): per-overlay style {font, color, background, backgroundColor, bold,
+    // outline, shadow, allCaps, opacity, fontSize} — camelCase, same convention as projects'
+    // caption_style jsonb (round-tripped verbatim; semantics in assCaptionBuilder.ts). NULL =
+    // legacy fixed-white-Inter look.
+    style: jsonb('style'),
     created_at: timestamp('created_at', { withTimezone: true })
       .notNull()
       .default(sql`now()`),
@@ -683,6 +731,8 @@ export type Project = typeof projects.$inferSelect;
 export type NewProject = typeof projects.$inferInsert;
 export type ProjectClip = typeof projectClips.$inferSelect;
 export type NewProjectClip = typeof projectClips.$inferInsert;
+export type ProjectVideoOverlay = typeof projectVideoOverlays.$inferSelect;
+export type NewProjectVideoOverlay = typeof projectVideoOverlays.$inferInsert;
 export type ProjectTextOverlay = typeof projectTextOverlays.$inferSelect;
 export type NewProjectTextOverlay = typeof projectTextOverlays.$inferInsert;
 export type ProjectSoundtrackGeneration = typeof projectSoundtrackGenerations.$inferSelect;

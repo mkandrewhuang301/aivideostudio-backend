@@ -43,6 +43,13 @@ const connectionOptions = {
 
 export type FfmpegOp = 'mux' | 'concat' | 'compose' | 'explainer_compose' | 'summary_compose';
 
+export interface SpeedCurvePoint {
+  /** Source-relative position across the trimmed clip, from 0 to 1. */
+  position: number;
+  /** Playback multiplier at this control point, from 0.1x to 10x. */
+  rate: number;
+}
+
 // Phase 13 (Edit Studio) — 'compose' job type contract. Defines the shape the export pipeline
 // (plans 06/07) dispatches into the queue; this plan only defines the contract, it does NOT
 // implement the compose worker branch (that lives in ffmpegProcessor.ts, plan 06).
@@ -53,6 +60,10 @@ export interface ComposeClipSpec {
   trimEndSeconds: number;
   /** Linear source-audio gain. Optional only for backward compatibility with already-queued jobs. */
   volume?: number;
+  /** Uniform source-speed multiplier. Defaults to 1 for already-queued jobs. */
+  playbackRate?: number;
+  /** Piecewise-linear source-speed curve. When valid, supersedes playbackRate. */
+  speedCurve?: SpeedCurvePoint[] | null;
 }
 
 export interface ComposeTextSpec {
@@ -65,6 +76,20 @@ export interface ComposeTextSpec {
   rotation?: number;
   startSeconds: number;
   endSeconds: number;
+  /** Sketch 016: per-overlay style jsonb (see assCaptionBuilder.ts's TextOverlayStyleSpec).
+   * Undefined → legacy fixed-white-Inter render. */
+  style?: {
+    font?: string;
+    color?: string;
+    background?: 'none' | 'pill' | 'block';
+    backgroundColor?: string;
+    bold?: boolean;
+    outline?: boolean;
+    shadow?: boolean;
+    allCaps?: boolean;
+    opacity?: number;
+    fontSize?: number;
+  };
 }
 
 export interface ComposeAudioSpec {
@@ -97,6 +122,17 @@ export interface ComposeCaptionStyle {
   /** Item 3: optional continuous vertical anchor (0..1, box center) — see
    * assCaptionBuilder.ts's CaptionStyle.yOffsetNorm doc comment for the full contract. */
   yOffsetNorm?: number;
+  // ─── Sketch 016 (2026-07-29) — all optional, all passthrough from caption_style jsonb; the
+  // semantics live in assCaptionBuilder.ts's CaptionStyle doc comments.
+  font?: string;
+  timing?: 'word' | 'block' | 'karaoke';
+  background?: 'none' | 'pill' | 'block';
+  backgroundColor?: string;
+  bold?: boolean;
+  outline?: boolean;
+  shadow?: boolean;
+  allCaps?: boolean;
+  opacity?: number;
 }
 
 export interface ComposeSpec {

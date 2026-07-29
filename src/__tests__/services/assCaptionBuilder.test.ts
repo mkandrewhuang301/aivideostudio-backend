@@ -12,6 +12,7 @@ import {
   buildTextOverlayAss,
   escapeAssText,
   hexToAssColor,
+  hexWithAlpha,
   resolveCaptionYOffsetNorm,
   CAPTION_POSITION_PRESETS,
 } from '../../services/assCaptionBuilder';
@@ -286,5 +287,171 @@ describe('buildTextOverlayAss', () => {
     const withoutOverrideBlock = dialogueLine.replace(/\{[^}]*\}/, '');
     expect(withoutOverrideBlock).not.toMatch(/[{}\\]/);
     expect(dialogueLine).not.toContain('{\\pos');
+  });
+});
+
+// ─── Sketch 016 (2026-07-29, caption-text-style-sheets-plan.md) ────────────────
+// Style-sheet fields: timing modes, background modes + color, opacity over text AND
+// background, font family mapping, bold/outline/shadow/allCaps. Legacy styles (none of
+// the new fields present) keep the pre-feature byte-identical paths — the suites above
+// all pass such styles and cover that contract.
+describe('buildAssFile — sketch 016 style fields', () => {
+  const canvas = { width: 1080, height: 1920 };
+  const style = {
+    fontSize: 64,
+    color: '#FFFFFF',
+    highlightColor: '#8C59FF',
+    position: 'bottom' as const,
+  };
+  const cue = {
+    startSeconds: 0,
+    endSeconds: 2,
+    words: [
+      { text: 'one', startSeconds: 0, endSeconds: 1 },
+      { text: 'two', startSeconds: 1, endSeconds: 2 },
+    ],
+  };
+  const dialogues = (ass: string) => ass.split('\n').filter((l: string) => l.startsWith('Dialogue:'));
+  const styleLine = (ass: string) => ass.split('\n').find((l: string) => l.startsWith('Style: Caption,')) as string;
+
+  it("timing 'word' emits one Dialogue event PER WORD with the word's own time range and no \\k tags", () => {
+    const ass = buildAssFile([cue], { ...style, timing: 'word' }, canvas);
+    const lines = dialogues(ass);
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain('0:00:00.00,0:00:01.00');
+    expect(lines[0]).toContain('one');
+    expect(lines[1]).toContain('0:00:01.00,0:00:02.00');
+    expect(lines[1]).toContain('two');
+    expect(lines.join('\n')).not.toMatch(/\{\\k\d+\}/);
+    // No active-word sweep in word mode — PrimaryColour resolves to the base color.
+    expect(styleLine(ass)).toContain('Style: Caption,Inter,64,' + hexToAssColor(style.color) + ',');
+  });
+
+  it("timing 'block' joins the whole cue with no \\k tags (same as legacy karaoke:false)", () => {
+    const ass = buildAssFile([cue], { ...style, timing: 'block' }, canvas);
+    const lines = dialogues(ass);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('one two');
+    expect(lines[0]).not.toMatch(/\{\\k\d+\}/);
+  });
+
+  it("absent timing + karaoke:false still takes the legacy block path (byte-compat)", () => {
+    const legacy = buildAssFile([cue], { ...style, karaoke: false }, canvas);
+    const explicit = buildAssFile([cue], { ...style, timing: 'block' }, canvas);
+    expect(dialogues(legacy)).toEqual(dialogues(explicit));
+  });
+
+  it("background 'pill' burns BackColour at 45% tint × opacity via BorderStyle 3", () => {
+    const ass = buildAssFile([], { ...style, background: 'pill', backgroundColor: '#000000' }, canvas);
+    expect(styleLine(ass)).toContain(hexToAssColor(hexWithAlpha('#000000', 0.45)));
+  });
+
+  it("background 'block' burns a solid box; opacity scales the box alpha", () => {
+    const ass = buildAssFile([], { ...style, background: 'block', backgroundColor: '#0A84FF', opacity: 60 }, canvas);
+    expect(styleLine(ass)).toContain(hexToAssColor(hexWithAlpha('#0A84FF', 0.6)));
+  });
+
+  it("background 'none' uses BorderStyle 1 (outlined glyph, no box)", () => {
+    const ass = buildAssFile([], { ...style, background: 'none' }, canvas);
+    expect(styleLine(ass)).toContain(',1,');
+    expect(styleLine(ass)).not.toContain(',3,');
+  });
+
+  it('absent background keeps the legacy 50%-black pill constant (byte-compat)', () => {
+    const legacy = buildAssFile([], style, canvas);
+    expect(styleLine(legacy)).toContain('&H80000000');
+    expect(styleLine(legacy)).toContain(',3,');
+  });
+
+  it('opacity scales the text AND highlight alphas when present', () => {
+    const ass = buildAssFile([], { ...style, opacity: 50 }, canvas);
+    const line = styleLine(ass);
+    expect(line).toContain(hexToAssColor(hexWithAlpha(style.highlightColor, 0.5)));
+    expect(line).toContain(hexToAssColor(hexWithAlpha(style.color, 0.5)));
+  });
+
+  it('font maps to the ASS Fontname; unknown families fall back to Inter', () => {
+    expect(styleLine(buildAssFile([], { ...style, font: 'Bangers' }, canvas))).toContain('Caption,Bangers,');
+    expect(styleLine(buildAssFile([], { ...style, font: 'Comic Sans' }, canvas))).toContain('Caption,Inter,');
+  });
+
+  it('bold toggles the ASS Bold field (-1), leaving the rest of the row intact', () => {
+    expect(styleLine(buildAssFile([], { ...style, bold: true }, canvas))).toContain(',-1,0,0,0,100,100,');
+    expect(styleLine(buildAssFile([], style, canvas))).toContain(',0,0,0,0,100,100,');
+  });
+
+  it('outline/shadow booleans supersede the numeric width/depth fields', () => {
+    const line = styleLine(buildAssFile([], { ...style, background: 'none', outline: true, shadow: false }, canvas));
+    expect(line).toContain(',1,2,0,5,');
+  });
+
+  it('allCaps uppercases every word before escaping', () => {
+    const ass = buildAssFile([cue], { ...style, timing: 'block', allCaps: true }, canvas);
+    expect(dialogues(ass)[0]).toContain('ONE TWO');
+  });
+});
+
+describe('buildTextOverlayAss — sketch 016 per-overlay style', () => {
+  const canvas = { width: 1080, height: 1920 };
+  const base = { text: 'day 3', xNorm: 0.5, yNorm: 0.5, startSeconds: 0, endSeconds: 1 };
+  const dialogue = (ass: string) => ass.split('\n').find((l: string) => l.startsWith('Dialogue:')) as string;
+
+  it('unstyled overlays keep the exact legacy Dialogue line and no TextOverlayBox row', () => {
+    const ass = buildTextOverlayAss([base], canvas);
+    expect(dialogue(ass)).toBe(
+      'Dialogue: 0,0:00:00.00,0:00:01.00,TextOverlay,,0,0,0,,{\\an5\\pos(540,960)\\fs48\\frz0}day 3',
+    );
+    expect(ass).not.toContain('TextOverlayBox');
+  });
+
+  it('styled overlays carry per-line \\fn \\1c \\1a \\b tags and honor fontSize/allCaps/bold/outline', () => {
+    const ass = buildTextOverlayAss(
+      [{
+        ...base,
+        widthNorm: 1,
+        style: { font: 'Oswald', color: '#FF3B30', bold: true, outline: false, allCaps: true, opacity: 50, fontSize: 52 },
+      }],
+      canvas,
+    );
+    const line = dialogue(ass);
+    expect(line).toContain('\\fnOswald');
+    expect(line).toContain(`\\1c${hexToAssColor('#FF3B30')}`);
+    expect(line).toContain('\\1a&H7F&'); // 50% opacity → ASS alpha 0x7F
+    expect(line).toContain('\\b1');
+    expect(line).toContain('\\bord0');
+    expect(line).toContain('\\fs96'); // 52pt = 2× the 26pt default → 48 × 2
+    expect(line).toContain('DAY 3');
+    expect(ass).not.toContain('TextOverlayBox'); // no box → stays on the outline style row
+  });
+
+  it("boxed overlays use the TextOverlayBox row with per-line \\4c \\4a (pill = 45% tint × opacity)", () => {
+    const ass = buildTextOverlayAss(
+      [{ ...base, style: { background: 'pill', backgroundColor: '#000000' } }],
+      canvas,
+    );
+    const line = dialogue(ass);
+    expect(line).toContain('Dialogue: 0,0:00:00.00,0:00:01.00,TextOverlayBox,');
+    expect(line).toContain(`\\4c${hexToAssColor('#000000')}`);
+    expect(line).toContain('\\4a&H8C&'); // 45% → input alpha 0x73 → ASS alpha 0x8C
+    expect(ass).toContain('Style: TextOverlayBox,');
+  });
+
+  it('a solid block box burns at full color alpha (scaled by opacity)', () => {
+    const ass = buildTextOverlayAss(
+      [{ ...base, style: { background: 'block', backgroundColor: '#FFFFFF', opacity: 60 } }],
+      canvas,
+    );
+    expect(dialogue(ass)).toContain('\\4a&H66&'); // 60% → input 0x99 → ASS 0x66
+  });
+
+  it('escapes styled overlay text (T-13-05 guard applies to the new path too)', () => {
+    const ass = buildTextOverlayAss(
+      [{ ...base, text: 'x{\\pos(0,0)}y', style: { bold: true } }],
+      canvas,
+    );
+    const line = dialogue(ass);
+    expect(line).not.toContain('{\\pos');
+    // escapeAssText REMOVES the control chars, keeping the harmless inner text.
+    expect(line).toContain('xpos(0,0)y');
   });
 });
