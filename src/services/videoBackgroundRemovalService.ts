@@ -472,3 +472,32 @@ export async function undoBackgroundRemoval(
   }
   return { restoredR2Key: job.source_prior_r2_key };
 }
+
+/**
+ * Redo: re-applies the already-produced object after a successful undo. No provider call, upload,
+ * or credit mutation occurs. The guarded current-key check is the mirror of undo: redo may only
+ * replace the exact original object captured by this job, never media changed by a later edit.
+ */
+export async function redoBackgroundRemoval(
+  jobId: string,
+  userId: string,
+): Promise<{ restoredR2Key: string }> {
+  const job = await getBgRemovalJob(jobId);
+  if (!job || job.user_id !== userId) throw new VideoBgRemovalNotFoundError();
+  if (job.status !== 'completed' || !job.source_prior_r2_key || !job.output_r2_key) {
+    throw new VideoBgRemovalValidationError('Nothing to redo for this job');
+  }
+
+  const result = await db.execute(sql`
+    UPDATE project_clips
+    SET r2_key = ${job.output_r2_key}
+    WHERE id = ${job.source_clip_id}::uuid
+      AND deleted_at IS NULL
+      AND r2_key = ${job.source_prior_r2_key}
+    RETURNING r2_key
+  `);
+  if (!result.rows?.length) {
+    throw new VideoBgRemovalValidationError('Clip media has changed since this job — redo is stale');
+  }
+  return { restoredR2Key: job.output_r2_key };
+}

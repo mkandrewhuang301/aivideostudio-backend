@@ -17,8 +17,16 @@ jest.mock('../../storage/r2', () => ({
 }));
 
 jest.mock('@aws-sdk/lib-storage', () => ({
-  Upload: jest.fn().mockImplementation(() => ({
-    done: jest.fn().mockResolvedValue(undefined),
+  Upload: jest.fn().mockImplementation(({ params }) => ({
+    // Consume the route's read stream before resolving, matching the real uploader. Resolving
+    // immediately lets the route unlink its multer temp file before the stream has opened.
+    done: jest.fn().mockImplementation(async () => {
+      await new Promise<void>((resolve, reject) => {
+        params.Body.on('error', reject);
+        params.Body.on('end', resolve);
+        params.Body.resume();
+      });
+    }),
   })),
 }));
 
@@ -35,6 +43,7 @@ jest.mock('../../services/videoBackgroundRemovalService', () => ({
   getBgRemovalJob: jest.fn(),
   parseBackgroundColor: jest.fn(),
   quoteVideoBackgroundRemoval: jest.fn(),
+  redoBackgroundRemoval: jest.fn(),
   refundBgRemoval: jest.fn(),
   undoBackgroundRemoval: jest.fn(),
 }));
@@ -45,7 +54,9 @@ import { videoBackgroundRemovalRouter } from '../../routes/videoBackgroundRemova
 import {
   applyOnDeviceBackgroundRemoval,
   findVideoBackgroundRemovalByIdempotency,
+  getBgRemovalJob,
   quoteVideoBackgroundRemoval,
+  redoBackgroundRemoval,
 } from '../../services/videoBackgroundRemovalService';
 
 const CLIP_ID = '11111111-1111-4111-8111-111111111111';
@@ -107,5 +118,23 @@ describe('POST /clips/:clipId/background-removals/on-device', () => {
       idempotencyKey: 'on-device-key-1',
       outputR2Key: expect.stringMatching(/^video-background-removal\/.+\.mov$/),
     }));
+  });
+});
+
+describe('POST /clips/:clipId/background-removals/:jobId/redo', () => {
+  it('re-applies the retained output for the owned clip job', async () => {
+    (getBgRemovalJob as jest.Mock).mockResolvedValue({
+      id: JOB_ID,
+      user_id: USER_ID,
+      source_clip_id: CLIP_ID,
+    });
+    (redoBackgroundRemoval as jest.Mock).mockResolvedValue({ restoredR2Key: 'processed.mov' });
+
+    const response = await request(buildApp())
+      .post(`/api/clips/${CLIP_ID}/background-removals/${JOB_ID}/redo`);
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({ status: 'redone' });
+    expect(redoBackgroundRemoval).toHaveBeenCalledWith(JOB_ID, USER_ID);
   });
 });

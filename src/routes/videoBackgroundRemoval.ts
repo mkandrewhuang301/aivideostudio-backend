@@ -26,6 +26,7 @@ import {
   InsufficientBgRemovalCreditsError,
   parseBackgroundColor,
   quoteVideoBackgroundRemoval,
+  redoBackgroundRemoval,
   refundBgRemoval,
   undoBackgroundRemoval,
   VideoBgRemovalNotFoundError,
@@ -254,5 +255,23 @@ videoBackgroundRemovalRouter.post('/clips/:clipId/background-removals/:jobId/und
     if (error instanceof VideoBgRemovalNotFoundError) { res.status(404).json({ error: 'Background removal job not found' }); return; }
     if (error instanceof VideoBgRemovalValidationError) { res.status(422).json({ error: error.message }); return; }
     res.status(500).json({ error: 'Failed to undo background removal' });
+  }
+});
+
+// Redo only swaps back to the job's retained processed R2 object. It never re-runs inference or
+// charges credits, and the service rejects the operation if any newer media edit intervened.
+videoBackgroundRemovalRouter.post('/clips/:clipId/background-removals/:jobId/redo', async (req, res) => {
+  const uid = userId(req, res); if (!uid) return;
+  const job = await getBgRemovalJob(req.params.jobId as string);
+  if (!job || job.user_id !== uid || job.source_clip_id !== req.params.clipId) {
+    res.status(404).json({ error: 'Background removal job not found' }); return;
+  }
+  try {
+    await redoBackgroundRemoval(req.params.jobId as string, uid);
+    res.status(200).json({ status: 'redone' });
+  } catch (error) {
+    if (error instanceof VideoBgRemovalNotFoundError) { res.status(404).json({ error: 'Background removal job not found' }); return; }
+    if (error instanceof VideoBgRemovalValidationError) { res.status(422).json({ error: error.message }); return; }
+    res.status(500).json({ error: 'Failed to redo background removal' });
   }
 });

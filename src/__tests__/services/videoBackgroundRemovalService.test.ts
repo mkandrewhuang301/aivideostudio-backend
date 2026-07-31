@@ -48,6 +48,7 @@ import {
   parseBackgroundColor,
   quoteVideoBackgroundRemoval,
   refundBgRemoval,
+  redoBackgroundRemoval,
   resolveBillableDuration,
   resolveOutputContainer,
   resolveOutputExtension,
@@ -499,5 +500,41 @@ describe('undoBackgroundRemoval', () => {
     await undoBackgroundRemoval('job-1', 'user-1');
     const statements = (mockDb.execute as jest.Mock).mock.calls.map((call) => deepSql(call[0]));
     expect(statements.join(' ')).not.toContain('generation_refund');
+  });
+});
+
+describe('redoBackgroundRemoval', () => {
+  const COMPLETED_JOB = {
+    id: 'job-1',
+    user_id: 'user-1',
+    source_clip_id: 'clip-1',
+    status: 'completed',
+    source_prior_r2_key: 'clips/clip-1.mp4',
+    output_r2_key: 'video-background-removal/job-1/output.mov',
+  };
+
+  it('re-applies the retained processed media without inference or billing', async () => {
+    (mockDb.select as jest.Mock).mockReturnValueOnce(makePlainSelectChain([COMPLETED_JOB]));
+    (mockDb.execute as jest.Mock).mockResolvedValueOnce({ rows: [{ r2_key: COMPLETED_JOB.output_r2_key }] });
+
+    await expect(redoBackgroundRemoval('job-1', 'user-1')).resolves.toEqual({
+      restoredR2Key: COMPLETED_JOB.output_r2_key,
+    });
+    const statements = (mockDb.execute as jest.Mock).mock.calls.map((call) => deepSql(call[0]));
+    expect(statements.join(' ')).not.toContain('credits_balance');
+  });
+
+  it('guards redo on the clip still holding this job original', async () => {
+    (mockDb.select as jest.Mock).mockReturnValueOnce(makePlainSelectChain([COMPLETED_JOB]));
+    (mockDb.execute as jest.Mock).mockResolvedValueOnce({ rows: [] });
+
+    await expect(redoBackgroundRemoval('job-1', 'user-1'))
+      .rejects.toBeInstanceOf(VideoBgRemovalValidationError);
+  });
+
+  it('rejects a job owned by another user as NotFound', async () => {
+    (mockDb.select as jest.Mock).mockReturnValueOnce(makePlainSelectChain([COMPLETED_JOB]));
+    await expect(redoBackgroundRemoval('job-1', 'other-user'))
+      .rejects.toBeInstanceOf(VideoBgRemovalNotFoundError);
   });
 });
