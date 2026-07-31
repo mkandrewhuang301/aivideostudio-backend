@@ -60,6 +60,14 @@ export const audioSeparationStatusEnum = pgEnum('audio_separation_status', [
   'refunded',
 ]);
 
+export const videoBgRemovalStatusEnum = pgEnum('video_bg_removal_status', [
+  'pending',
+  'processing',
+  'completed',
+  'failed',
+  'refunded',
+]);
+
 export const voiceoverGenerationStatusEnum = pgEnum('voiceover_generation_status', [
   'pending',
   'processing',
@@ -668,6 +676,52 @@ export const audioSeparationJobs = pgTable(
   }),
 );
 
+// ─── video_background_removal_jobs (Phase 20.2: Video Background Removal) ─────
+// Job-tracking table mirroring audio_separation_jobs's atomic deduct/refund/status
+// lifecycle. Unlike separation (which ADDS stem rows), background removal REPLACES the
+// source clip's media in place: project_clips.r2_key is swapped to the processed object.
+// The swap is timebase-preserving (same duration + frame timing), so trim/split/overlay/
+// caption state stays valid across it. source_prior_r2_key captures the clip's r2_key
+// immediately BEFORE the swap so undo restores the exact original object.
+
+export const videoBackgroundRemovalJobs = pgTable(
+  'video_background_removal_jobs',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    user_id: uuid('user_id').notNull().references(() => users.id),
+    project_id: uuid('project_id').notNull().references(() => projects.id),
+    source_clip_id: uuid('source_clip_id').notNull().references(() => projectClips.id),
+    idempotency_key: text('idempotency_key').notNull(),
+    status: videoBgRemovalStatusEnum('status').notNull().default('pending'),
+    provider: text('provider').notNull(),
+    model: text('model').notNull(),
+    background_color: text('background_color').notNull().default('Transparent'),
+    // Derived server-side from background_color — never client-chosen (the wrong container
+    // silently produces video iOS cannot play; see videoBackgroundRemovalService).
+    output_container_and_codec: text('output_container_and_codec').notNull(),
+    duration_seconds: doublePrecision('duration_seconds').notNull(),
+    cost_credits: integer('cost_credits').notNull(),
+    provider_request_id: text('provider_request_id'),
+    output_r2_key: text('output_r2_key'),
+    source_prior_r2_key: text('source_prior_r2_key'),
+    failure_code: text('failure_code'),
+    failure_reason: text('failure_reason'),
+    retry_count: integer('retry_count').notNull().default(0),
+    created_at: timestamp('created_at', { withTimezone: true }).notNull().default(sql`now()`),
+    started_at: timestamp('started_at', { withTimezone: true }),
+    completed_at: timestamp('completed_at', { withTimezone: true }),
+    failed_at: timestamp('failed_at', { withTimezone: true }),
+  },
+  (table) => ({
+    userIdempotencyIdx: uniqueIndex('video_bg_removal_user_idempotency_unique_idx').on(
+      table.user_id,
+      table.idempotency_key,
+    ),
+    statusCreatedIdx: index('video_bg_removal_status_created_idx').on(table.status, table.created_at),
+    sourceClipIdx: index('video_bg_removal_source_clip_idx').on(table.source_clip_id),
+  }),
+);
+
 // ─── project_caption_cues (Phase 13: Edit Studio) ─────────────────────────────
 // A "cue" = one displayed line/phrase on the Captions track (distinct from Text overlays).
 
@@ -750,3 +804,6 @@ export type NewProjectCaptionWord = typeof projectCaptionWords.$inferInsert;
 export type AudioSeparationJob = typeof audioSeparationJobs.$inferSelect;
 export type NewAudioSeparationJob = typeof audioSeparationJobs.$inferInsert;
 export type AudioSeparationStatus = (typeof audioSeparationStatusEnum.enumValues)[number];
+export type VideoBackgroundRemovalJob = typeof videoBackgroundRemovalJobs.$inferSelect;
+export type NewVideoBackgroundRemovalJob = typeof videoBackgroundRemovalJobs.$inferInsert;
+export type VideoBgRemovalStatus = (typeof videoBgRemovalStatusEnum.enumValues)[number];
