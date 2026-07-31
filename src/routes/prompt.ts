@@ -4,10 +4,12 @@
 //   POST /from-image — { generation_id? | upload_id?, preset_id?, hint? }      → { prompt }
 //   POST /from-video — { generation_id? | upload_id?, hint? }                  → { prompt }
 //
-// from-video (2026-07-25) is the CONTINUATION GUIDE: Gemini watches the reference clip and
-// writes one grounded continuation prompt (subject/position/motion/camera/lighting/ambience at
-// the final moment → the new action). It shapes what the user TYPES; the sight-unseen dispatch
-// interceptor (enhanceForDispatch) still cleans up whatever finally submits. Results are
+// from-video (2026-07-25; next-shot flip 2026-07-27) is the NEXT-SHOT GUIDE: Gemini watches
+// the reference clip and writes one grounded prompt for a natural CUT to a new scene after it
+// (subject/world/ambience carried from the final moments → new action, new framing — never a
+// seamless resume, which glitches on Seedance Mini). It shapes what the user TYPES; the
+// shape-neutral dispatch interceptor (enhanceForDispatch) faithfully enriches whatever
+// finally submits, continuation or cut. Results are
 // Redis-cached 30min keyed by video id + hint so re-taps are instant; the endpoint is on-demand
 // only (no prefetch — cost lands exclusively on actual taps, ~$0.001/read after 480p downscale).
 //

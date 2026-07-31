@@ -83,6 +83,18 @@ export const config = {
   falTtsFallbackModel: process.env.FAL_TTS_FALLBACK_MODEL ?? 'fal-ai/gemini-3.1-flash-tts',
   falLyriaFallbackModel: process.env.FAL_LYRIA_FALLBACK_MODEL ?? 'fal-ai/lyria2',
   videoSummaryModel: process.env.VIDEO_SUMMARY_MODEL ?? 'gemini-3.5-flash',
+  // Prompt intelligence (2026-07-30): gpt-5-mini → GPT-5.6 Luna after the 80% Luna price cut
+  // ($0.20/$1.20 vs mini's $0.25/$2.00 per 1M). Env-overridable for no-deploy A/B and instant
+  // rollback — set PROMPT_INTEL_MODEL / PROMPT_INTERCEPTOR_MODEL back to 'gpt-5-mini' to revert.
+  // Spike-verified 2026-07-30 against the live API: model id 'gpt-5.6-luna' is valid, BUT Luna
+  // does not support reasoning_effort 'minimal' (supported: none/low/medium/high/xhigh) — a
+  // mini-style 'minimal' call 400s. Interceptor default 'low': the 2026-07-30 spike series
+  // (8 prompts x none/low/medium) found low = the quality sweet spot (medium adds reasoning
+  // spend with flat-to-worse output on short creative rewrites). When rolling the model back
+  // to gpt-5-mini, set the effort env back to 'minimal' to match.
+  promptIntelligenceModel: process.env.PROMPT_INTEL_MODEL ?? 'gpt-5.6-luna',
+  promptInterceptorModel: process.env.PROMPT_INTERCEPTOR_MODEL ?? 'gpt-5.6-luna',
+  promptInterceptorReasoningEffort: process.env.PROMPT_INTERCEPTOR_REASONING_EFFORT ?? 'low',
   // Continuation guide (POST /api/prompt/from-video, 2026-07-25): Gemini is the only model in
   // the stack that takes actual VIDEO input (gpt-5-mini/nano are text+image only). Short clips
   // go inline after a 480p downscale — whole clip is 3-8s, no trimming needed.
@@ -139,6 +151,28 @@ export const config = {
   audioSepWorkerConcurrency: Number(process.env.AUDIO_SEP_WORKER_CONCURRENCY ?? '2'),
   audioSepRequestsPerMinute: Number(process.env.AUDIO_SEP_REQUESTS_PER_MINUTE ?? '8'),
   audioSepDailyRateLimitPerUser: Number(process.env.AUDIO_SEP_DAILY_RATE_LIMIT_PER_USER ?? '50'),
+
+  // Phase 20.2 (Video Background Removal) — Bria VRMBG 3.0 via fal.ai, behind
+  // VideoBackgroundRemovalProvider.
+  //
+  // PRICING: fal quotes bria/video/background-removal/v3 at $0.0042 per second (confirmed by
+  // Andrew from the model page, 2026-07-30). Per the credit rule (credits = provider cost in
+  // cents, rounded up) that is 0.42 credits/second: a 10s clip = ceil(4.2) = 5 credits, a 60s
+  // clip = 26. Note the OLDER non-v3 endpoint (bria/video/background-removal) is listed at
+  // $0.14/s — 33× more. If VIDEO_BG_REMOVAL_MODEL is ever repointed at a non-v3 endpoint,
+  // VIDEO_BG_REMOVAL_CREDITS_PER_SECOND MUST be repriced in the same change.
+  //
+  // Defaults OFF: the iOS "Remove background" button does not exist yet, and the transparent
+  // (alpha) output path has not been played back on a real device. Flip
+  // VIDEO_BG_REMOVAL_ENABLED=true to open it.
+  videoBgRemovalEnabled: process.env.VIDEO_BG_REMOVAL_ENABLED === 'true',
+  videoBgRemovalModel: process.env.VIDEO_BG_REMOVAL_MODEL ?? 'bria/video/background-removal/v3',
+  videoBgRemovalCreditsPerSecond: Number(process.env.VIDEO_BG_REMOVAL_CREDITS_PER_SECOND ?? '0.42'),
+  // Guards a per-second-billed provider against a runaway 20-minute upload.
+  videoBgRemovalMaxDurationSeconds: Number(process.env.VIDEO_BG_REMOVAL_MAX_DURATION_SECONDS ?? '180'),
+  videoBgRemovalWorkerConcurrency: Number(process.env.VIDEO_BG_REMOVAL_WORKER_CONCURRENCY ?? '2'),
+  videoBgRemovalRequestsPerMinute: Number(process.env.VIDEO_BG_REMOVAL_REQUESTS_PER_MINUTE ?? '8'),
+  videoBgRemovalDailyRateLimitPerUser: Number(process.env.VIDEO_BG_REMOVAL_DAILY_RATE_LIMIT_PER_USER ?? '30'),
   // Celebrity-likeness check (AWS Rekognition RecognizeCelebrities) for the upload-driven
   // motion-transfer / ai-influencer presets — blocks animating a real celebrity's face.
   // Defaults OFF (opt-in) since it needs real AWS IAM creds provisioned; this stays dark until
