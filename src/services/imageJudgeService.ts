@@ -1,7 +1,7 @@
 // imageJudgeService.ts — VLM quality gate for explainer stills (2026-07-25 spec, locked same-day).
 //
 // Every fresh still (both tiers' base stills, content-class/flip fallback step stills) and every
-// nano-edit after-frame is checked by gemini-3.5-flash via the native generativelanguage API
+// nano-edit after-frame is checked by gemini-3.6-flash via the native generativelanguage API
 // (GEMINI_API_KEY — no Replicate queue, fractions of a cent per call, adds latency not queue
 // contention). 2.5-flash was deprecated 2026-06-17; do NOT regress the model id.
 //

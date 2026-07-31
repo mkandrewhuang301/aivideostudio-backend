@@ -54,11 +54,13 @@ export const config = {
   // for a no-deploy rollback to the previous /v1/images/edits path.
   magicEditorProvider: process.env.MAGIC_EDITOR_PROVIDER ?? 'nano',
   nanoImageModel: process.env.NANO_IMAGE_MODEL ?? 'gemini-3.1-flash-image-preview',
-  // VLM quality judge for explainer stills (2026-07-25): gemini-3.5-flash via the native
+  // VLM quality judge for explainer stills (2026-07-25): gemini-3.6-flash via the native
   // generativelanguage API using geminiApiKey (2.5-flash deprecated 2026-06-17 — do NOT regress).
+  // Upgraded 3.5→3.6 on 2026-07-31: same $1.50 input, $7.50 vs $9 output, ~17% fewer output
+  // tokens (~31% cheaper per task, ~half task time, flat AA composite). Key spiked 2026-07-31.
   // Fail-open everywhere; enabled-flag is the no-deploy kill switch.
   imageJudgeEnabled: process.env.IMAGE_JUDGE_ENABLED !== 'false',
-  imageJudgeModel: process.env.IMAGE_JUDGE_MODEL ?? 'gemini-3.5-flash',
+  imageJudgeModel: process.env.IMAGE_JUDGE_MODEL ?? 'gemini-3.6-flash',
   // Native Gemini audio is materially cheaper than Fal's wrappers. Both APIs are preview, so
   // these switches provide a no-deploy rollback and an automatic provider fallback.
   googleNativeAudioEnabled: process.env.GOOGLE_NATIVE_AUDIO_ENABLED !== 'false',
@@ -82,7 +84,7 @@ export const config = {
   vlogExpansionModel: process.env.VLOG_EXPANSION_MODEL ?? 'anthropic/claude-sonnet-5',
   falTtsFallbackModel: process.env.FAL_TTS_FALLBACK_MODEL ?? 'fal-ai/gemini-3.1-flash-tts',
   falLyriaFallbackModel: process.env.FAL_LYRIA_FALLBACK_MODEL ?? 'fal-ai/lyria2',
-  videoSummaryModel: process.env.VIDEO_SUMMARY_MODEL ?? 'gemini-3.5-flash',
+  videoSummaryModel: process.env.VIDEO_SUMMARY_MODEL ?? 'gemini-3.6-flash', // 3.5→3.6 2026-07-31 (same input price, cheaper/faster output; keeps video input)
   // Prompt intelligence (2026-07-30): gpt-5-mini → GPT-5.6 Luna after the 80% Luna price cut
   // ($0.20/$1.20 vs mini's $0.25/$2.00 per 1M). Env-overridable for no-deploy A/B and instant
   // rollback — set PROMPT_INTEL_MODEL / PROMPT_INTERCEPTOR_MODEL back to 'gpt-5-mini' to revert.
@@ -98,7 +100,7 @@ export const config = {
   // Continuation guide (POST /api/prompt/from-video, 2026-07-25): Gemini is the only model in
   // the stack that takes actual VIDEO input (gpt-5-mini/nano are text+image only). Short clips
   // go inline after a 480p downscale — whole clip is 3-8s, no trimming needed.
-  videoGuideModel: process.env.VIDEO_GUIDE_MODEL ?? 'gemini-3.5-flash',
+  videoGuideModel: process.env.VIDEO_GUIDE_MODEL ?? 'gemini-3.6-flash',
   // Bounded text-only narration audit. Flash-Lite is intentionally separate from the full-video
   // planner so the additional reliability pass costs substantially less than another video pass.
   videoSummaryTextModel: process.env.VIDEO_SUMMARY_TEXT_MODEL ?? 'gemini-3.5-flash-lite',
@@ -125,7 +127,7 @@ export const config = {
   aiMusicMaxDurationSeconds: Number(process.env.AI_MUSIC_MAX_DURATION_SECONDS ?? '184'),
   aiMusicWorkerConcurrency: Number(process.env.AI_MUSIC_WORKER_CONCURRENCY ?? '2'),
   aiMusicRequestsPerMinute: Number(process.env.AI_MUSIC_REQUESTS_PER_MINUTE ?? '8'),
-  aiMusicAnalysisModel: process.env.AI_MUSIC_ANALYSIS_MODEL ?? 'gemini-3.1-flash-lite',
+  aiMusicAnalysisModel: process.env.AI_MUSIC_ANALYSIS_MODEL ?? 'gemini-3.5-flash-lite', // 3.1-lite→3.5-lite 2026-07-31 (current-gen lite, $0.30/$2.50, 350 tok/s; key spiked)
   aiMusicAnalysisFrameCount: Number(process.env.AI_MUSIC_ANALYSIS_FRAME_COUNT ?? '5'),
   // Phase 20.1 (Audio Separation) — Meta SAM Audio via fal.ai, behind AudioSeparationProvider.
   // audioSepCreditsPerSecond is CONFIRMED (Plan 20.1-02 Task 3, 2026-07-26): two real
