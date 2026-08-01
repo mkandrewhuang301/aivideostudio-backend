@@ -1,0 +1,102 @@
+[
+  {
+    "id": "clean",
+    "name": "Clean",
+    "category": "featured"
+  },
+  {
+    "id": "vivid",
+    "name": "Vivid",
+    "category": "featured"
+  },
+  {
+    "id": "warm",
+    "name": "Warm",
+    "category": "featured"
+  },
+  {
+    "id": "cool",
+    "name": "Cool",
+    "category": "featured"
+  },
+  {
+    "id": "noir",
+    "name": "Noir",
+    "category": "mono"
+  },
+  {
+    "id": "mono",
+    "name": "Mono",
+    "category": "mono"
+  },
+  {
+    "id": "sepia",
+    "name": "Sepia",
+    "category": "mono"
+  },
+  {
+    "id": "silver",
+    "name": "Silver",
+    "category": "mono"
+  },
+  {
+    "id": "film35",
+    "name": "Film 35",
+    "category": "film"
+  },
+  {
+    "id": "faded",
+    "name": "Faded",
+    "category": "film"
+  },
+  {
+    "id": "kodak",
+    "name": "Kodak",
+    "category": "film"
+  },
+  {
+    "id": "portra",
+    "name": "Portra",
+    "category": "film"
+  },
+  {
+    "id": "tealorange",
+    "name": "Teal & Orange",
+    "category": "cinematic"
+  },
+  {
+    "id": "bleach",
+    "name": "Bleach",
+    "category": "cinematic"
+  },
+  {
+    "id": "midnight",
+    "name": "Midnight",
+    "category": "cinematic"
+  },
+  {
+    "id": "noirblue",
+    "name": "Noir Blue",
+    "category": "cinematic"
+  },
+  {
+    "id": "sunset",
+    "name": "Sunset",
+    "category": "vibe"
+  },
+  {
+    "id": "cyberpunk",
+    "name": "Cyberpunk",
+    "category": "vibe"
+  },
+  {
+    "id": "mint",
+    "name": "Mint",
+    "category": "vibe"
+  },
+  {
+    "id": "dusk",
+    "name": "Dusk",
+    "category": "vibe"
+  }
+]
