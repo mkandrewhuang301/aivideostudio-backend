@@ -74,6 +74,21 @@ function formatAssTimestamp(seconds: number): string {
 
 // ─── Sketch 016 style helpers (2026-07-29) ─────────────────────────────────────
 
+/**
+ * Tint the background box burns at, BEFORE the user's opacity slider multiplies it.
+ *
+ * ⚠️ Mirrored EXACTLY by the iOS client's `TextBackgroundTint` (Fantasia/Models/EditProject.swift).
+ * The editor's miniplayer preview and this burned-in export both derive their alpha from these
+ * two numbers, so they can never be changed in one repo alone or the export stops matching what
+ * the user styled. Softened from 0.45 / 1.0 on 2026-07-31 (Andrew: the box read too heavy).
+ */
+export const TEXT_BACKGROUND_TINT = { pill: 0.35, block: 0.85 } as const;
+
+/** Tint for a resolved background treatment ('pill' → pill tint, anything else → block tint). */
+export function textBackgroundTint(background: string): number {
+  return background === 'pill' ? TEXT_BACKGROUND_TINT.pill : TEXT_BACKGROUND_TINT.block;
+}
+
 /** Bundled font families (OFL-licensed) — the allowlist for CaptionStyle.font and
  * TextOverlayStyleSpec.font. Values MUST be name-table FAMILY names (the same rule the
  * buildAssFile Inter comment documents); each family needs a TTF under assets/fonts/ for
@@ -160,9 +175,10 @@ export interface CaptionStyle {
   /** Caption timing mode. Absent → derived from the legacy `karaoke` flag (false → 'block'). */
   timing?: 'word' | 'block' | 'karaoke';
   /** Background treatment. Absent → legacy behavior (`backgroundBox` === false → outlined glyph,
-   * otherwise the legacy 50%-black pill constant). 'pill' = 45% tint × opacity, 'block' =
-   * solid × opacity. NOTE (accepted limitation, plan Part 3): ASS BorderStyle=3 boxes are
-   * rectangular — the pill's rounded corners are a preview-only nicety. */
+   * otherwise the legacy 50%-black pill constant). 'pill' = TEXT_BACKGROUND_TINT.pill × opacity,
+   * 'block' = TEXT_BACKGROUND_TINT.block × opacity. NOTE (accepted limitation, plan Part 3):
+   * ASS BorderStyle=3 boxes are rectangular — the pill's rounded corners are a preview-only
+   * nicety. */
   background?: 'none' | 'pill' | 'block';
   /** Background color, hex. Default '#000000'. */
   backgroundColor?: string;
@@ -235,9 +251,9 @@ export function buildAssFile(cues: CaptionCue[], style: CaptionStyle, canvas: Ca
     : Math.max(0, style.shadowDepth ?? 0);
   // Background. `background` ABSENT → legacy constants: backgroundBox===false → BorderStyle 1
   // (outlined glyph, no box), else the semi-transparent black pill (BorderStyle=3 renders
-  // BackColour as an opaque box behind the text per 13-UI-SPEC.md). PRESENT → pill = 45% tint ×
-  // opacity, block = solid × opacity, none = BorderStyle 1. BackColour stays the legacy constant
-  // under BorderStyle 1 (inert as a box; still the shadow color, same as before).
+  // BackColour as an opaque box behind the text per 13-UI-SPEC.md). PRESENT → the pill/block
+  // tint (TEXT_BACKGROUND_TINT) × opacity, none = BorderStyle 1. BackColour stays the legacy
+  // constant under BorderStyle 1 (inert as a box; still the shadow color, same as before).
   let borderStyle: number;
   let backColour: string;
   if (style.background === undefined) {
@@ -250,7 +266,7 @@ export function buildAssFile(cues: CaptionCue[], style: CaptionStyle, canvas: Ca
     borderStyle = 3;
     backColour = hexToAssColor(hexWithAlpha(
       style.backgroundColor ?? '#000000',
-      (style.background === 'pill' ? 0.45 : 1) * opacity01,
+      textBackgroundTint(style.background) * opacity01,
     ));
   }
   // Horizontal safe margins keep captions in a CENTERED column clear of platform UI overlays
@@ -350,7 +366,7 @@ export interface TextOverlayStyleSpec {
   font?: string;
   /** Text color, hex. Default '#FFFFFF' (the legacy fixed white). */
   color?: string;
-  /** Background treatment: 'pill' = 45% tint × opacity, 'block' = solid × opacity, 'none' =
+  /** Background treatment: 'pill'/'block' = TEXT_BACKGROUND_TINT × opacity, 'none' =
    * outlined glyph. BorderStyle is style-level (not per-line overridable), so boxed overlays
    * use the TextOverlayBox Style row below. */
   background?: 'none' | 'pill' | 'block';
@@ -463,7 +479,7 @@ export function buildTextOverlayAss(overlays: TextOverlaySpec[], canvas: Caption
       (st.shadow === false ? '\\shad0' : '') +
       (boxed
         ? `\\4c${hexToAssColor(st.backgroundColor ?? '#000000')}` +
-          `\\4a${assAlphaTag((st.background === 'pill' ? 0.45 : 1) * opacity01)}`
+          `\\4a${assAlphaTag(textBackgroundTint(st.background ?? 'block') * opacity01)}`
         : '');
     return `Dialogue: 0,${start},${end},${boxed ? 'TextOverlayBox' : 'TextOverlay'},,0,0,0,,{${tags}}${text}`;
   });

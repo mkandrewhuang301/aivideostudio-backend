@@ -8,6 +8,7 @@
 // builders.
 
 import {
+  assAlphaTag,
   buildAssFile,
   buildTextOverlayAss,
   escapeAssText,
@@ -15,6 +16,7 @@ import {
   hexWithAlpha,
   resolveCaptionYOffsetNorm,
   CAPTION_POSITION_PRESETS,
+  TEXT_BACKGROUND_TINT,
 } from '../../services/assCaptionBuilder';
 
 describe('escapeAssText', () => {
@@ -341,14 +343,16 @@ describe('buildAssFile — sketch 016 style fields', () => {
     expect(dialogues(legacy)).toEqual(dialogues(explicit));
   });
 
-  it("background 'pill' burns BackColour at 45% tint × opacity via BorderStyle 3", () => {
+  it("background 'pill' burns BackColour at the pill tint × opacity via BorderStyle 3", () => {
     const ass = buildAssFile([], { ...style, background: 'pill', backgroundColor: '#000000' }, canvas);
-    expect(styleLine(ass)).toContain(hexToAssColor(hexWithAlpha('#000000', 0.45)));
+    expect(styleLine(ass)).toContain(hexToAssColor(hexWithAlpha('#000000', TEXT_BACKGROUND_TINT.pill)));
   });
 
-  it("background 'block' burns a solid box; opacity scales the box alpha", () => {
+  it("background 'block' burns the block tint; opacity scales the box alpha", () => {
     const ass = buildAssFile([], { ...style, background: 'block', backgroundColor: '#0A84FF', opacity: 60 }, canvas);
-    expect(styleLine(ass)).toContain(hexToAssColor(hexWithAlpha('#0A84FF', 0.6)));
+    expect(styleLine(ass)).toContain(
+      hexToAssColor(hexWithAlpha('#0A84FF', TEXT_BACKGROUND_TINT.block * 0.6)),
+    );
   });
 
   it("background 'none' uses BorderStyle 1 (outlined glyph, no box)", () => {
@@ -424,7 +428,7 @@ describe('buildTextOverlayAss — sketch 016 per-overlay style', () => {
     expect(ass).not.toContain('TextOverlayBox'); // no box → stays on the outline style row
   });
 
-  it("boxed overlays use the TextOverlayBox row with per-line \\4c \\4a (pill = 45% tint × opacity)", () => {
+  it("boxed overlays use the TextOverlayBox row with per-line \\4c \\4a (pill tint × opacity)", () => {
     const ass = buildTextOverlayAss(
       [{ ...base, style: { background: 'pill', backgroundColor: '#000000' } }],
       canvas,
@@ -432,16 +436,16 @@ describe('buildTextOverlayAss — sketch 016 per-overlay style', () => {
     const line = dialogue(ass);
     expect(line).toContain('Dialogue: 0,0:00:00.00,0:00:01.00,TextOverlayBox,');
     expect(line).toContain(`\\4c${hexToAssColor('#000000')}`);
-    expect(line).toContain('\\4a&H8C&'); // 45% → input alpha 0x73 → ASS alpha 0x8C
+    expect(line).toContain(`\\4a${assAlphaTag(TEXT_BACKGROUND_TINT.pill)}`);
     expect(ass).toContain('Style: TextOverlayBox,');
   });
 
-  it('a solid block box burns at full color alpha (scaled by opacity)', () => {
+  it('a solid block box burns at the block tint (scaled by opacity)', () => {
     const ass = buildTextOverlayAss(
       [{ ...base, style: { background: 'block', backgroundColor: '#FFFFFF', opacity: 60 } }],
       canvas,
     );
-    expect(dialogue(ass)).toContain('\\4a&H66&'); // 60% → input 0x99 → ASS 0x66
+    expect(dialogue(ass)).toContain(`\\4a${assAlphaTag(TEXT_BACKGROUND_TINT.block * 0.6)}`);
   });
 
   it('escapes styled overlay text (T-13-05 guard applies to the new path too)', () => {
