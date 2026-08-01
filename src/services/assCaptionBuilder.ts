@@ -13,13 +13,35 @@
 // `{\pos(0,0)}`) inside the burned subtitle stream.
 
 /**
- * Strips ASS override-block control characters ('{', '}', '\') and collapses raw newlines to a
- * single space. This is a REMOVE (not a backslash-escape) strategy — escaping ASS's own control
- * characters would still leave a literal '{' or '\' in the stream for some libass edge cases, so
- * the safest mitigation is to never let a raw override-block character reach the .ass file at all.
+ * Strips ASS override-block control characters ('{', '}', '\') and converts raw newlines into
+ * ASS's own hard line break ('\N'). This is a REMOVE (not a backslash-escape) strategy — escaping
+ * ASS's own control characters would still leave a literal '{' or '\' in the stream for some
+ * libass edge cases, so the safest mitigation is to never let a raw override-block character reach
+ * the .ass file at all.
+ *
+ * ORDER IS LOAD-BEARING for T-13-05: every user backslash is stripped FIRST, and only then is our
+ * own '\N' inserted — so the escape can never be assembled out of user input, and the '{'/'}'
+ * strip still means an override block (the actual injection vector) can't be opened at all. A bare
+ * '\N' outside braces is a line break, not an override.
+ *
+ * Newlines became meaningful in 2026-07-31: the editor's inline caption/text field turns RETURN
+ * into a line break instead of a commit, so a user-authored break now reaches here. Collapsing it
+ * to a space (the old behavior) rendered the break in the app's preview and dropped it in the
+ * burn — exactly the preview/export disagreement the rest of this file exists to prevent.
  */
 export function escapeAssText(raw: string): string {
-  return raw.replace(/[\r\n]+/g, ' ').replace(/[{}\\]/g, '');
+  return raw.replace(/[{}\\]/g, '').replace(/[\r\n]+/g, '\\N');
+}
+
+/**
+ * Joins already-escaped word fragments with a space, EXCEPT after a fragment that ends in a hard
+ * line break — a space there would indent the next line (visible on centered captions).
+ */
+export function joinAssWords(parts: string[]): string {
+  return parts.reduce(
+    (out, part) => (out === '' || out.endsWith('\\N') ? out + part : `${out} ${part}`),
+    '',
+  );
 }
 
 /**
@@ -329,20 +351,27 @@ export function buildAssFile(cues: CaptionCue[], style: CaptionStyle, canvas: Ca
       for (const word of cue.words) {
         const wStart = formatAssTimestamp(word.startSeconds);
         const wEnd = formatAssTimestamp(word.endSeconds);
+        // A line-ending word is shown ALONE here, so its trailing break belongs to the join it is
+        // no longer part of — keeping it would render an empty second line and push the word off
+        // its anchor (the iOS One-word preview trims it for the same reason).
+        const text = xform(word.text).replace(/\\N$/, '');
         dialogueLines.push(
-          `Dialogue: 0,${wStart},${wEnd},Caption,,0,0,0,,{\\an5\\pos(${centerX},${centerY})}${xform(word.text)}`,
+          `Dialogue: 0,${wStart},${wEnd},Caption,,0,0,0,,{\\an5\\pos(${centerX},${centerY})}${text}`,
         );
       }
       continue;
     }
+    // joinAssWords, not join(' '): a cue stores a user line break as a trailing newline on the
+    // word that ends the line (the word list is flat — there is nowhere else to put it), so the
+    // separator has to be suppressed after that word. Same rule the iOS preview joins by.
     const words = timing === 'block'
-      ? cue.words.map((word) => xform(word.text)).join(' ')
-      : cue.words
-        .map((word) => {
+      ? joinAssWords(cue.words.map((word) => xform(word.text)))
+      : joinAssWords(
+        cue.words.map((word) => {
           const durationCentiseconds = Math.max(0, Math.round((word.endSeconds - word.startSeconds) * 100));
           return `{\\k${durationCentiseconds}}${xform(word.text)}`;
-        })
-        .join(' ');
+        }),
+      );
     const text = `{\\an5\\pos(${centerX},${centerY})}${words}`;
     const start = formatAssTimestamp(cue.startSeconds);
     const end = formatAssTimestamp(cue.endSeconds);

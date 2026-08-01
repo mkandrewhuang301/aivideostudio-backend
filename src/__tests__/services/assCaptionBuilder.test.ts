@@ -14,6 +14,7 @@ import {
   escapeAssText,
   hexToAssColor,
   hexWithAlpha,
+  joinAssWords,
   resolveCaptionYOffsetNorm,
   CAPTION_POSITION_PRESETS,
   TEXT_BACKGROUND_TINT,
@@ -29,8 +30,25 @@ describe('escapeAssText', () => {
     expect(result).not.toContain('{\\pos');
   });
 
-  it('collapses raw newlines to spaces', () => {
+  it('converts raw newlines into ASS hard line breaks', () => {
+    // The editor's inline caption/text field turns RETURN into a line break, so a user break has
+    // to survive the burn — it used to be collapsed to a space and silently lost.
+    expect(escapeAssText('line1\nline2')).toBe('line1\\Nline2');
+    expect(escapeAssText('line1\r\n\nline2')).toBe('line1\\Nline2');
     expect(escapeAssText('line1\nline2')).not.toMatch(/[\r\n]/);
+  });
+
+  it('never lets user input assemble its own escape (strip runs before \\N insertion)', () => {
+    // A user typing a literal backslash-N must NOT end up with a real ASS line break.
+    expect(escapeAssText('a\\Nb')).toBe('aNb');
+  });
+});
+
+describe('joinAssWords', () => {
+  it('separates words with a space but not after a hard line break', () => {
+    expect(joinAssWords(['a', 'b'])).toBe('a b');
+    expect(joinAssWords(['a\\N', 'b'])).toBe('a\\Nb');
+    expect(joinAssWords([])).toBe('');
   });
 });
 
