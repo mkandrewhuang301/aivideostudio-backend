@@ -104,6 +104,8 @@ export const users = pgTable(
     moderation_strikes: integer('moderation_strikes').notNull().default(0),
     onboarding_preferences: jsonb('onboarding_preferences'), // nullable jsonb; saved after auth from bubble-picker onboarding (Phase 6)
     face_consent_at: timestamp('face_consent_at', { withTimezone: true }), // SC2: set once on first-use face-input consent attestation; NULL = not yet consented
+    age_terms_version: text('age_terms_version'), // versioned 18+ + Terms attestation for Google-powered AI Music
+    age_terms_accepted_at: timestamp('age_terms_accepted_at', { withTimezone: true }),
     created_at: timestamp('created_at', { withTimezone: true })
       .notNull()
       .default(sql`now()`),

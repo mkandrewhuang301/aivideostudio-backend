@@ -4,6 +4,7 @@ import { soundtrackGenerationQueue } from '../queue/soundtrackGenerationQueue';
 import { suggestionsForProject } from '../services/musicSuggestionService';
 import {
   attachSoundtrack,
+  AIMusicAgeTermsRequiredError,
   createSoundtrackGeneration,
   deleteSoundtrackFromLibrary,
   getSoundtrack,
@@ -67,6 +68,9 @@ aiMusicRouter.post('/projects/:projectId/ai-soundtracks', async (req, res) => {
       idempotencyKey,
       soundMode,
       direction: typeof req.body?.direction === 'string' ? req.body.direction : null,
+      ageTermsVersion: typeof req.body?.age_terms_version === 'string'
+        ? req.body.age_terms_version
+        : null,
     });
     if (created.created) {
       try {
@@ -83,6 +87,14 @@ aiMusicRouter.post('/projects/:projectId/ai-soundtracks', async (req, res) => {
       cost_credits: created.row.cost_credits,
     });
   } catch (error) {
+    if (error instanceof AIMusicAgeTermsRequiredError) {
+      res.status(403).json({
+        error: error.message,
+        code: 'AI_MUSIC_AGE_TERMS_REQUIRED',
+        age_terms_version: error.requiredVersion,
+      });
+      return;
+    }
     if (error instanceof SoundtrackNotFoundError) { res.status(404).json({ error: 'Project not found' }); return; }
     if (error instanceof InsufficientSoundtrackCreditsError) { res.status(402).json({ error: 'Not enough credits' }); return; }
     if (error instanceof SoundtrackValidationError) { res.status(422).json({ error: error.message }); return; }

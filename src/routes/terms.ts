@@ -34,15 +34,15 @@ const TERMS_HTML = `<!DOCTYPE html>
 </head>
 <body>
 <h1>Terms of Service</h1>
-<p><strong>Last Updated:</strong> July 19, 2026</p>
+<p><strong>Last Updated:</strong> July 30, 2026</p>
 <div class="draft-notice">This is a draft Terms of Service, not yet legally reviewed. It is not final and should not be relied upon as a complete or binding agreement until reviewed and approved.</div>
-<p>These Terms of Service ("Terms") govern your access to and use of the Fantasia AI mobile application (the "App," "Service"), operated by ${DMCA_AGENT_NAME} ("we," "our," or "us"). By creating an account or using the App, you agree to be bound by these Terms. If you do not agree, do not use the App.</p>
+<p>These Terms of Service ("Terms") govern your access to and use of the Fantasia AI mobile application (the "App," "Service"), operated by ${DMCA_AGENT_NAME} ("we," "our," or "us"). By using the App, you agree to be bound by these Terms. If you do not agree, do not use the App.</p>
 
 <h2>1. Eligibility</h2>
-<p>You must be at least ${MINIMUM_AGE} years old to use the App. By using the App, you represent that you meet this requirement and that you have the legal capacity to enter into these Terms.</p>
+<p>You must be at least ${MINIMUM_AGE} years old to use the App. You must be at least 18 years old to create AI Music. By using the App or creating AI Music, you represent that you meet the applicable age requirement and that you have the legal capacity to enter into these Terms.</p>
 
 <h2>2. Your Account</h2>
-<p>You are responsible for maintaining the confidentiality of your account credentials and for all activity under your account. Notify us promptly of any unauthorized use.</p>
+<p>The App starts with a guest session and does not require you to create an account. If you choose to link your progress using Apple or Google, you are responsible for maintaining the security of that identity and for activity associated with it. Notify us promptly of any unauthorized use.</p>
 
 <h2>3. The Service</h2>
 <p>Fantasia AI lets you generate AI images and videos from text prompts and, for some features, your own uploaded photos or videos. Generation requests are processed by third-party AI providers (see our <a href="/privacy">Privacy Policy</a> for the current list). Output quality, style, and accuracy are not guaranteed — AI-generated content can be unpredictable, and a generation may not match what you expected or intended.</p>

@@ -59,6 +59,10 @@ import {
   isFalAsyncVideoModel,
 } from '../services/providers/FalProvider';
 import { refundCredits, deductCredits } from '../services/creditService';
+import {
+  AIMusicAgeTermsRequiredError,
+  ensureAIMusicAgeTermsAccepted,
+} from '../services/soundtrackService';
 import { classifyFailureReason, markFailed } from '../services/generationService';
 import { getGenerationPresignedUrl, getUploadPresignedUrl } from '../services/archivalService';
 import { enhanceForDispatch } from '../services/promptIntelligenceService';
@@ -287,6 +291,28 @@ async function prepareCost(req: Request, res: Response, next: NextFunction): Pro
     if (req._formatResolved !== true || !tier || !formatDef || !inputs) {
       res.status(400).json({ error: 'Missing format descriptor', code: 'INVALID_INPUT' });
       return;
+    }
+    // 18+ attestation for AI music (2026-07-31): explainer/format generations with a music bed
+    // call Lyria server-side, so the versioned attestation must exist before cost resolution and
+    // credit deduction. Same contract as routes/aiMusic.ts — the client shows the one-tap confirm
+    // sheet and retries with age_terms_version. 'none' means the bed is off → no gate.
+    if (inputs.music && inputs.music !== 'none' && req.user?.dbUserId) {
+      try {
+        await ensureAIMusicAgeTermsAccepted(
+          req.user.dbUserId,
+          typeof req.body?.age_terms_version === 'string' ? req.body.age_terms_version : null,
+        );
+      } catch (error) {
+        if (error instanceof AIMusicAgeTermsRequiredError) {
+          res.status(403).json({
+            error: error.message,
+            code: 'AI_MUSIC_AGE_TERMS_REQUIRED',
+            age_terms_version: error.requiredVersion,
+          });
+          return;
+        }
+        throw error;
+      }
     }
     // Cost comes ENTIRELY from the server format registry's matched duration tier — the client's
     // cost, model, and media type values are never read (T-14-COST, mirrors T-09.6-09). The tier

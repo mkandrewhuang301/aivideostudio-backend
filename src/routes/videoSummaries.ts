@@ -17,6 +17,10 @@ import { concurrencyGate } from '../middleware/concurrencyGate';
 import { isPromptFlagged, promptModerationMiddleware } from '../middleware/promptModeration';
 import { getUploadPresignedUrl } from '../services/archivalService';
 import { deductCredits, refundCredits } from '../services/creditService';
+import {
+  AIMusicAgeTermsRequiredError,
+  ensureAIMusicAgeTermsAccepted,
+} from '../services/soundtrackService';
 import { createGeneration, markFailed } from '../services/generationService';
 import { scanInputMedia } from '../services/hiveService';
 import { probeDurationSeconds } from '../services/mediaProbe';
@@ -280,6 +284,28 @@ videoSummariesRouter.post(
       }
 
       cost = computeVideoSummaryCost(sourceDurationSeconds, outputDurationSeconds, includeMusic);
+      // 18+ attestation for AI music (2026-07-31): recaps with a music bed call Lyria in the
+      // summary worker, so the versioned attestation must exist before credits are deducted.
+      // Same contract as routes/aiMusic.ts — client shows the one-tap confirm and retries with
+      // age_terms_version. include_music === false → no Lyria → no gate.
+      if (includeMusic) {
+        try {
+          await ensureAIMusicAgeTermsAccepted(
+            userId,
+            typeof req.body?.age_terms_version === 'string' ? req.body.age_terms_version : null,
+          );
+        } catch (error) {
+          if (error instanceof AIMusicAgeTermsRequiredError) {
+            res.status(403).json({
+              error: error.message,
+              code: 'AI_MUSIC_AGE_TERMS_REQUIRED',
+              age_terms_version: error.requiredVersion,
+            });
+            return;
+          }
+          throw error;
+        }
+      }
       if (!await deductCredits(userId, cost)) {
         res.status(402).json({ error: 'Insufficient credits', code: 'INSUFFICIENT_CREDITS', cost_credits: cost });
         return;

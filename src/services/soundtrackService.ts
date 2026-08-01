@@ -8,6 +8,7 @@ import {
   projectClips,
   projects,
   projectSoundtrackGenerations,
+  users,
   type ProjectSoundtrackGeneration,
 } from '../db/schema';
 import { getUploadPresignedUrl } from './archivalService';
@@ -15,6 +16,7 @@ import { r2, R2_BUCKET } from '../storage/r2';
 import { insertProjectAudioClipWithCapacity } from './projectService';
 
 export type SoundMode = 'instrumental' | 'vocals';
+export const AI_MUSIC_AGE_TERMS_VERSION = '2026-07-30';
 
 export interface SoundtrackClipSnapshot {
   id: string;
@@ -37,6 +39,8 @@ export interface SoundtrackProjectSnapshot {
 export interface SoundtrackQuote {
   supported: boolean;
   project_duration_seconds: number;
+  age_terms_required?: boolean;
+  age_terms_version?: string;
   maximum_duration_seconds?: number;
   model_tier?: 'clip' | 'pro';
   model?: string;
@@ -48,6 +52,14 @@ export interface SoundtrackQuote {
 export class SoundtrackNotFoundError extends Error {}
 export class SoundtrackValidationError extends Error {}
 export class InsufficientSoundtrackCreditsError extends Error {}
+export class AIMusicAgeTermsRequiredError extends Error {
+  readonly requiredVersion = AI_MUSIC_AGE_TERMS_VERSION;
+
+  constructor() {
+    super('Confirm that you’re 18+ and agree to the Terms before creating AI Music.');
+    this.name = 'AIMusicAgeTermsRequiredError';
+  }
+}
 
 export function quoteSoundtrack(durationSeconds: number, hasVisualClips = true): SoundtrackQuote {
   const rounded = Math.round(durationSeconds * 1000) / 1000;
@@ -139,7 +151,42 @@ export async function buildSoundtrackSnapshot(
 export async function getSoundtrackQuote(projectId: string, userId: string): Promise<SoundtrackQuote | null> {
   const built = await buildSoundtrackSnapshot(projectId, userId);
   if (!built) return null;
-  return quoteSoundtrack(built.snapshot.duration_seconds, built.snapshot.clips.length > 0);
+  const [user] = await db
+    .select({ ageTermsVersion: users.age_terms_version })
+    .from(users)
+    .where(eq(users.id, userId));
+  return {
+    ...quoteSoundtrack(built.snapshot.duration_seconds, built.snapshot.clips.length > 0),
+    age_terms_required: user?.ageTermsVersion !== AI_MUSIC_AGE_TERMS_VERSION,
+    age_terms_version: AI_MUSIC_AGE_TERMS_VERSION,
+  };
+}
+
+/**
+ * Checks or records the versioned attestation before the credit-deduction query.
+ * A Firebase anonymous guest has a normal database user row, so this works
+ * without showing login and is retained if that guest later links an identity.
+ */
+export async function ensureAIMusicAgeTermsAccepted(
+  userId: string,
+  presentedVersion?: string | null,
+): Promise<void> {
+  const [user] = await db
+    .select({ ageTermsVersion: users.age_terms_version })
+    .from(users)
+    .where(eq(users.id, userId));
+  if (user?.ageTermsVersion === AI_MUSIC_AGE_TERMS_VERSION) return;
+  if (presentedVersion !== AI_MUSIC_AGE_TERMS_VERSION) {
+    throw new AIMusicAgeTermsRequiredError();
+  }
+  await db
+    .update(users)
+    .set({
+      age_terms_version: AI_MUSIC_AGE_TERMS_VERSION,
+      age_terms_accepted_at: new Date(),
+      updated_at: new Date(),
+    })
+    .where(eq(users.id, userId));
 }
 
 export async function createSoundtrackGeneration(input: {
@@ -148,6 +195,7 @@ export async function createSoundtrackGeneration(input: {
   idempotencyKey: string;
   soundMode: SoundMode;
   direction?: string | null;
+  ageTermsVersion?: string | null;
 }): Promise<{ row: ProjectSoundtrackGeneration; created: boolean }> {
   const direction = input.direction?.trim() || null;
   if (direction && direction.length > 300) throw new SoundtrackValidationError('Music description is too long');
@@ -166,6 +214,8 @@ export async function createSoundtrackGeneration(input: {
       eq(projectSoundtrackGenerations.idempotency_key, input.idempotencyKey),
     ));
   if (existing[0]) return { row: existing[0], created: false };
+
+  await ensureAIMusicAgeTermsAccepted(input.userId, input.ageTermsVersion);
 
   const id = randomUUID();
   try {
