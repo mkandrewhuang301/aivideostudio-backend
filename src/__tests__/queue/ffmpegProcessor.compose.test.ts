@@ -60,6 +60,7 @@ describe('buildComposeArgs', () => {
       assPath: null,
       textOverlayAssPath: null,
       fontsDir: '/app/assets/fonts',
+      lutsDir: '/app/assets/luts',
       outPath: '/tmp/out.mp4',
     });
     const graph = filterComplexOf(args);
@@ -90,6 +91,7 @@ describe('buildComposeArgs', () => {
       assPath: null,
       textOverlayAssPath: null,
       fontsDir: '/app/assets/fonts',
+      lutsDir: '/app/assets/luts',
       outPath: '/tmp/out.mp4',
     });
     const graph = filterComplexOf(args);
@@ -113,6 +115,7 @@ describe('buildComposeArgs', () => {
         assPath: null,
         textOverlayAssPath: null,
         fontsDir: '/app/assets/fonts',
+        lutsDir: '/app/assets/luts',
         outPath: '/tmp/out.mp4',
       });
       expect(filterComplexOf(args)).toContain(`scale=${expected}`);
@@ -153,6 +156,7 @@ describe('buildComposeArgs', () => {
         assPath: null,
         textOverlayAssPath: null,
         fontsDir: '/app/assets/fonts',
+        lutsDir: '/app/assets/luts',
         outPath: '/tmp/out.mp4',
       });
       expect(filterComplexOf(args)).toContain('scale=720:1280');
@@ -171,6 +175,7 @@ describe('buildComposeArgs', () => {
       assPath: null,
       textOverlayAssPath: '/tmp/ffmpeg-gen-1/textOverlays.ass',
       fontsDir: '/app/assets/fonts',
+      lutsDir: '/app/assets/luts',
       outPath: '/tmp/out.mp4',
     });
     const graph = filterComplexOf(args);
@@ -187,6 +192,7 @@ describe('buildComposeArgs', () => {
       assPath: null,
       textOverlayAssPath: null,
       fontsDir: '/app/assets/fonts',
+      lutsDir: '/app/assets/luts',
       outPath: '/tmp/out.mp4',
     });
     const graph = filterComplexOf(args);
@@ -207,6 +213,7 @@ describe('buildComposeArgs', () => {
       assPath: '/tmp/ffmpeg-gen-1/captions.ass',
       textOverlayAssPath: '/tmp/ffmpeg-gen-1/textOverlays.ass',
       fontsDir: '/app/assets/fonts',
+      lutsDir: '/app/assets/luts',
       outPath: '/tmp/out.mp4',
     });
     const graph = filterComplexOf(args);
@@ -230,6 +237,7 @@ describe('buildComposeArgs', () => {
       assPath: '/tmp/ffmpeg-gen-1/captions.ass',
       textOverlayAssPath: null,
       fontsDir: '/app/assets/fonts',
+      lutsDir: '/app/assets/luts',
       outPath: '/tmp/out.mp4',
     });
     const graph = filterComplexOf(args);
@@ -245,6 +253,7 @@ describe('buildComposeArgs', () => {
       assPath: null,
       textOverlayAssPath: null,
       fontsDir: '/app/assets/fonts',
+      lutsDir: '/app/assets/luts',
       outPath: '/tmp/out.mp4',
     });
     const graph = filterComplexOf(args);
@@ -264,6 +273,7 @@ describe('buildComposeArgs', () => {
       assPath: null,
       textOverlayAssPath: null,
       fontsDir: '/app/assets/fonts',
+      lutsDir: '/app/assets/luts',
       outPath: '/tmp/out.mp4',
     });
     const graph = filterComplexOf(args);
@@ -286,6 +296,7 @@ describe('buildComposeArgs', () => {
       assPath: null,
       textOverlayAssPath: null,
       fontsDir: '/app/assets/fonts',
+      lutsDir: '/app/assets/luts',
       outPath: '/tmp/out.mp4',
     });
     const graph = filterComplexOf(args);
@@ -303,6 +314,7 @@ describe('buildComposeArgs', () => {
       assPath: null,
       textOverlayAssPath: null,
       fontsDir: '/app/assets/fonts',
+      lutsDir: '/app/assets/luts',
       outPath: '/tmp/final.mp4',
     });
 
@@ -330,6 +342,7 @@ describe('buildComposeArgs', () => {
         assPath: null,
         textOverlayAssPath: null,
         fontsDir: '/app/assets/fonts',
+        lutsDir: '/app/assets/luts',
         outPath: '/tmp/out.mp4',
       });
       const graph = filterComplexOf(args);
@@ -354,6 +367,7 @@ describe('buildComposeArgs', () => {
         assPath: null,
         textOverlayAssPath: null,
         fontsDir: '/app/assets/fonts',
+        lutsDir: '/app/assets/luts',
         outPath: '/tmp/out.mp4',
       });
 
@@ -372,6 +386,7 @@ describe('buildComposeArgs', () => {
         assPath: null,
         textOverlayAssPath: null,
         fontsDir: '/app/assets/fonts',
+        lutsDir: '/app/assets/luts',
         outPath: '/tmp/out.mp4',
       });
       const graph = filterComplexOf(args);
@@ -392,6 +407,7 @@ describe('buildComposeArgs', () => {
         assPath: '/tmp/captions.ass',
         textOverlayAssPath: '/tmp/text.ass',
         fontsDir: '/app/assets/fonts',
+        lutsDir: '/app/assets/luts',
         outPath: '/tmp/out.mp4',
       });
       const graph = filterComplexOf(args);
@@ -415,6 +431,7 @@ describe('buildComposeArgs', () => {
         assPath: null,
         textOverlayAssPath: null,
         fontsDir: '/app/assets/fonts',
+        lutsDir: '/app/assets/luts',
         outPath: '/tmp/out.mp4',
       });
       const graph = filterComplexOf(args);
@@ -445,6 +462,7 @@ describe('buildComposeArgs', () => {
         assPath: null,
         textOverlayAssPath: null,
         fontsDir: '/app/assets/fonts',
+        lutsDir: '/app/assets/luts',
         outPath: '/tmp/out.mp4',
       });
       const graph = filterComplexOf(args);
@@ -464,6 +482,7 @@ describe('buildComposeArgs', () => {
         assPath: null,
         textOverlayAssPath: null,
         fontsDir: '/app/assets/fonts',
+        lutsDir: '/app/assets/luts',
         outPath: '/tmp/out.mp4',
       });
 
@@ -479,9 +498,130 @@ describe('buildComposeArgs', () => {
           assPath: null,
           textOverlayAssPath: null,
           fontsDir: '/app/assets/fonts',
+          lutsDir: '/app/assets/luts',
           outPath: '/tmp/out.mp4',
         }),
       ).toThrow(/nothing to export/);
+    });
+  });
+
+  // Studio color filters. The graph shape here was wrong twice on the way in and both mistakes
+  // were silent — the render succeeded and simply looked wrong — so these tests pin the exact
+  // shape rather than just asserting "lut3d appears somewhere".
+  describe('color filters', () => {
+    const oneFilter = (
+      over: Partial<NonNullable<ComposeSpec['filters']>[number]> = {},
+    ): NonNullable<ComposeSpec['filters']>[number] => ({
+      filterId: 'noir',
+      intensity: 1,
+      startOffsetSeconds: 2,
+      durationSeconds: 3,
+      ...over,
+    });
+
+    function graphFor(filters: NonNullable<ComposeSpec['filters']>): string {
+      return filterComplexOf(
+        buildComposeArgs({
+          spec: baseSpec({ filters }),
+          clipPaths: ['/tmp/clip0.mp4', '/tmp/clip1.mp4'],
+          audioPaths: [],
+          assPath: null,
+          textOverlayAssPath: null,
+          fontsDir: '/app/assets/fonts',
+          lutsDir: '/app/assets/luts',
+          outPath: '/tmp/out.mp4',
+        }),
+      );
+    }
+
+    it('adds nothing when the project has no filters, present-but-empty or absent', () => {
+      expect(graphFor([])).not.toContain('lut3d');
+      // Absent must behave identically to empty — snapshots built before this feature are
+      // replayed verbatim on re-export and have no `filters` key at all.
+      const args = buildComposeArgs({
+        spec: baseSpec(),
+        clipPaths: ['/tmp/clip0.mp4', '/tmp/clip1.mp4'],
+        audioPaths: [],
+        assPath: null,
+        textOverlayAssPath: null,
+        fontsDir: '/app/assets/fonts',
+        lutsDir: '/app/assets/luts',
+        outPath: '/tmp/out.mp4',
+      });
+      expect(filterComplexOf(args)).not.toContain('lut3d');
+    });
+
+    it('grades with a bare time-windowed lut3d at full intensity (no blend pass needed)', () => {
+      const graph = graphFor([oneFilter()]);
+      expect(graph).toContain(
+        "lut3d=file=/app/assets/luts/noir.cube:interp=tetrahedral:enable='between(t,2,5)'",
+      );
+      expect(graph).not.toContain('blend=');
+      expect(graph).not.toContain('split');
+    });
+
+    it('puts `enable` on the lut3d and NEVER on the blend', () => {
+      // A disabled multi-input filter passes through its FIRST input, which here is the graded
+      // branch — so `enable` on the blend would apply the grade everywhere EXCEPT the window,
+      // exactly inverted. Confirmed by rendering real frames.
+      const graph = graphFor([oneFilter({ intensity: 0.5 })]);
+      const blendPart = graph.split(';').find((p) => p.includes('blend='));
+      expect(blendPart).toBeDefined();
+      expect(blendPart).not.toContain('enable');
+      const lutPart = graph.split(';').find((p) => p.includes('lut3d'));
+      expect(lutPart).toContain("enable='between(t,2,5)'");
+    });
+
+    it('feeds blend the GRADED branch first, since blend input 0 is the top layer', () => {
+      // `[keep][graded]` is the intuitive reading and is wrong: normal mode at full opacity
+      // outputs the top layer, so that ordering emits the ungraded frame and the filter
+      // silently does nothing at all.
+      const graph = graphFor([oneFilter({ intensity: 0.4 })]);
+      expect(graph).toContain('[fgraded0][fkeep0]blend=all_mode=normal:all_opacity=0.4');
+    });
+
+    it('chains stacked filters in spec order, each reading the previous result', () => {
+      const graph = graphFor([
+        oneFilter({ filterId: 'noir' }),
+        oneFilter({ filterId: 'sunset', startOffsetSeconds: 0, durationSeconds: 9 }),
+      ]);
+      expect(graph).toContain('[vconcat]lut3d=file=/app/assets/luts/noir.cube');
+      expect(graph).toContain('[vfilt0]lut3d=file=/app/assets/luts/sunset.cube');
+    });
+
+    it('grades the footage BEFORE burning text, so a filter never tints the lettering', () => {
+      const args = buildComposeArgs({
+        spec: baseSpec({
+          filters: [oneFilter()],
+          textOverlays: [
+            {
+              text: 'hi',
+              xNorm: 0.5,
+              yNorm: 0.5,
+              widthNorm: 1,
+              rotation: 0,
+              startSeconds: 0,
+              endSeconds: 3,
+            },
+          ],
+        }),
+        clipPaths: ['/tmp/clip0.mp4', '/tmp/clip1.mp4'],
+        audioPaths: [],
+        assPath: null,
+        textOverlayAssPath: '/tmp/text.ass',
+        fontsDir: '/app/assets/fonts',
+        lutsDir: '/app/assets/luts',
+        outPath: '/tmp/out.mp4',
+      });
+      const graph = filterComplexOf(args);
+      expect(graph.indexOf('lut3d')).toBeLessThan(graph.indexOf('ass=filename=/tmp/text.ass'));
+      // The ass pass must consume the GRADED label, not the raw concat.
+      expect(graph).toContain('[vfilt0]ass=filename=/tmp/text.ass');
+    });
+
+    it('skips zero-length and zero-intensity filters instead of emitting a dead LUT pass', () => {
+      expect(graphFor([oneFilter({ durationSeconds: 0 })])).not.toContain('lut3d');
+      expect(graphFor([oneFilter({ intensity: 0 })])).not.toContain('lut3d');
     });
   });
 });

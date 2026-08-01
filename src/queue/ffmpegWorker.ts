@@ -151,6 +151,26 @@ export interface ComposeSpec {
   audioClips: ComposeAudioSpec[];
   captionCues: ComposeCaptionCue[];
   captionStyle: ComposeCaptionStyle;
+  /**
+   * Color filters, already in stack order (project_filters.z_index, then created_at).
+   *
+   * Optional so snapshots built before the feature — which are replayed verbatim on re-export —
+   * decode unchanged and produce a byte-identical graph.
+   */
+  filters?: ComposeFilterSpec[];
+}
+
+/**
+ * One color filter covering a window of the OUTPUT timeline. Unlike every other spec here it has
+ * no source media: `filterId` names a .cube in assets/luts, and the same id resolves to the same
+ * file in the iOS bundle so the on-device preview and this render agree.
+ */
+export interface ComposeFilterSpec {
+  filterId: string;
+  /** 0 = invisible, 1 = the full look. Blended against the ungraded frame. */
+  intensity: number;
+  startOffsetSeconds: number;
+  durationSeconds: number;
 }
 
 export interface ExplainerClipSpec {

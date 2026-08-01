@@ -1972,12 +1972,19 @@ export async function buildComposeSnapshot(projectId: string, userId: string): P
     .where(and(eq(projects.id, projectId), eq(projects.user_id, userId)));
   if (!projectRow) return null;
 
-  const [clipRows, textRows, audioRows, cueRows] = await Promise.all([
+  const [clipRows, filterRows, textRows, audioRows, cueRows] = await Promise.all([
     db
       .select()
       .from(projectClips)
       .where(and(eq(projectClips.project_id, projectId), isNull(projectClips.deleted_at)))
       .orderBy(projectClips.sort_order),
+    db
+      .select()
+      .from(projectFilters)
+      .where(and(eq(projectFilters.project_id, projectId), isNull(projectFilters.deleted_at)))
+      // Same stack order the editor renders in — the compose graph chains them in this sequence,
+      // so a filter with a higher z_index grades on top of the result beneath it.
+      .orderBy(asc(projectFilters.z_index), asc(projectFilters.created_at), asc(projectFilters.id)),
     db
       .select()
       .from(projectTextOverlays)
@@ -2085,5 +2092,17 @@ export async function buildComposeSnapshot(projectId: string, userId: string): P
     audioClips,
     captionCues,
     captionStyle,
+    // Omitted entirely when the project has none, so a filterless project's snapshot stays
+    // byte-identical to what it was before this feature and re-exports produce the same graph.
+    ...(filterRows.length > 0
+      ? {
+          filters: filterRows.map((f) => ({
+            filterId: f.filter_id,
+            intensity: f.intensity,
+            startOffsetSeconds: f.start_offset_seconds,
+            durationSeconds: f.duration_seconds,
+          })),
+        }
+      : {}),
   };
 }
