@@ -15,6 +15,7 @@ import {
   projects,
   projectClips,
   projectVideoOverlays,
+  projectFilters,
   projectTextOverlays,
   projectAudioClips,
   projectCaptionCues,
@@ -31,6 +32,7 @@ import type {
   ProjectClip,
   ProjectVideoOverlay,
   NewProjectVideoOverlay,
+  ProjectFilter,
   ProjectTextOverlay,
   ProjectAudioClip,
   ProjectCaptionCue,
@@ -153,6 +155,19 @@ async function purgeExpiredSoftDeletes(projectId: string): Promise<void> {
     }
     await db.delete(projectAudioClips).where(eq(projectAudioClips.id, audio.id));
   }
+
+  // Filters own no R2 object, so there is nothing to delete from storage first — the expired
+  // rows just go. Kept in the same reaper so the undo window means the same thing for every kind
+  // of timeline object.
+  await db
+    .delete(projectFilters)
+    .where(
+      and(
+        eq(projectFilters.project_id, projectId),
+        isNotNull(projectFilters.deleted_at),
+        lt(projectFilters.deleted_at, cutoff),
+      ),
+    );
 }
 
 // ─── Project CRUD ──────────────────────────────────────────────────────────────
@@ -214,6 +229,9 @@ export interface FullProjectState extends Omit<Project, 'thumbnail_r2_key'> {
   thumbnail_url: string | null;
   clips: ProjectClipWithUrl[];
   video_overlays: ProjectVideoOverlayWithUrl[];
+  // No presigning and no self-heal pass: a filter carries no media, only a catalog id and a
+  // timeline window, so the rows go out exactly as stored.
+  filters: ProjectFilter[];
   text_overlays: ProjectTextOverlay[];
   audio_clips: ProjectAudioClipWithUrl[];
   caption_cues: ProjectCaptionCueWithWords[];
@@ -238,7 +256,7 @@ export async function getProjectWithState(
     console.error('[projectService] purgeExpiredSoftDeletes failed (non-blocking):', err);
   }
 
-  const [clipRows, videoOverlayRows, textRows, audioRows, cueRows] = await Promise.all([
+  const [clipRows, videoOverlayRows, filterRows, textRows, audioRows, cueRows] = await Promise.all([
     db
       .select()
       .from(projectClips)
@@ -249,6 +267,13 @@ export async function getProjectWithState(
       .from(projectVideoOverlays)
       .where(and(eq(projectVideoOverlays.project_id, projectId), isNull(projectVideoOverlays.deleted_at)))
       .orderBy(asc(projectVideoOverlays.z_index), asc(projectVideoOverlays.created_at)),
+    db
+      .select()
+      .from(projectFilters)
+      .where(and(eq(projectFilters.project_id, projectId), isNull(projectFilters.deleted_at)))
+      // Stack order first, then creation, so two filters added at the same z_index render in a
+      // stable order across requests — the compose graph chains them in exactly this sequence.
+      .orderBy(asc(projectFilters.z_index), asc(projectFilters.created_at), asc(projectFilters.id)),
     db
       .select()
       .from(projectTextOverlays)
@@ -411,6 +436,7 @@ export async function getProjectWithState(
     thumbnail_url: thumbnailUrl,
     clips,
     video_overlays: videoOverlays,
+    filters: filterRows,
     text_overlays: textRows,
     audio_clips: audioClips,
     caption_cues: cueRows.map((c) => ({ ...c, words: wordsByCue[c.id] ?? [] })),
