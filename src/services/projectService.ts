@@ -542,6 +542,10 @@ export async function deleteProject(projectId: string, userId: string): Promise<
   await db.delete(projectSoundtrackGenerations).where(eq(projectSoundtrackGenerations.project_id, projectId));
   await db.delete(projectTextOverlays).where(eq(projectTextOverlays.project_id, projectId));
   await db.delete(projectVideoOverlays).where(eq(projectVideoOverlays.project_id, projectId));
+  // Must precede the projects delete — project_filters carries an FK to projects(id), so leaving
+  // it out makes deleting any project that ever had a filter fail outright. No R2 cleanup here:
+  // a filter row owns no object.
+  await db.delete(projectFilters).where(eq(projectFilters.project_id, projectId));
   await db.delete(projectClips).where(eq(projectClips.project_id, projectId));
   await db.delete(projects).where(eq(projects.id, projectId));
 
@@ -1154,6 +1158,136 @@ export async function restoreClip(projectId: string, userId: string, clipId: str
     .set({ deleted_at: null })
     .where(
       and(eq(projectClips.id, clipId), eq(projectClips.project_id, projectId), isNotNull(projectClips.deleted_at)),
+    )
+    .returning();
+  return row ?? null;
+}
+
+// ─── Filter CRUD (Studio color filters) ───────────────────────────────────────
+// A filter row is cheap — no media, no R2 object, no probe — so these are plain inserts and
+// updates with no copy-on-write step, unlike clips and overlays.
+
+/**
+ * Cap on live filters per project. Each one costs a full LUT pass per frame in the compose graph
+ * (and a CoreImage pass per frame in the on-device preview), so an unbounded stack is a real
+ * render-time and battery cost rather than just a row count.
+ */
+export const MAX_FILTERS_PER_PROJECT = 20;
+
+export async function addFilter(
+  projectId: string,
+  userId: string,
+  input: {
+    filter_id: string;
+    intensity?: number;
+    start_offset_seconds: number;
+    duration_seconds: number;
+    z_index?: number;
+  },
+): Promise<ProjectFilter | null> {
+  if (!(await isProjectOwned(projectId, userId))) return null;
+
+  // A new filter lands on top of the existing stack unless the caller pins a layer explicitly,
+  // which matches what tapping a filter in the picker should do.
+  let zIndex = input.z_index;
+  if (zIndex === undefined) {
+    const [top] = await db
+      .select({ z: projectFilters.z_index })
+      .from(projectFilters)
+      .where(and(eq(projectFilters.project_id, projectId), isNull(projectFilters.deleted_at)))
+      .orderBy(desc(projectFilters.z_index))
+      .limit(1);
+    zIndex = top ? top.z + 1 : 0;
+  }
+
+  const [row] = await db
+    .insert(projectFilters)
+    .values({
+      project_id: projectId,
+      filter_id: input.filter_id,
+      intensity: input.intensity ?? 1,
+      start_offset_seconds: input.start_offset_seconds,
+      duration_seconds: input.duration_seconds,
+      z_index: zIndex,
+    })
+    .returning();
+  return row ?? null;
+}
+
+export async function countFilters(projectId: string): Promise<number> {
+  const rows = await db
+    .select({ id: projectFilters.id })
+    .from(projectFilters)
+    .where(and(eq(projectFilters.project_id, projectId), isNull(projectFilters.deleted_at)));
+  return rows.length;
+}
+
+export async function updateFilter(
+  projectId: string,
+  userId: string,
+  filterId: string,
+  updates: Partial<{
+    filter_id: string;
+    intensity: number;
+    start_offset_seconds: number;
+    duration_seconds: number;
+    z_index: number;
+  }>,
+): Promise<ProjectFilter | null> {
+  if (!(await isProjectOwned(projectId, userId))) return null;
+  if (Object.keys(updates).length === 0) return null;
+
+  const [row] = await db
+    .update(projectFilters)
+    .set(updates)
+    .where(
+      and(
+        eq(projectFilters.id, filterId),
+        eq(projectFilters.project_id, projectId),
+        isNull(projectFilters.deleted_at),
+      ),
+    )
+    .returning();
+  return row ?? null;
+}
+
+export async function softDeleteFilter(
+  projectId: string,
+  userId: string,
+  filterId: string,
+): Promise<boolean> {
+  if (!(await isProjectOwned(projectId, userId))) return false;
+
+  const [row] = await db
+    .update(projectFilters)
+    .set({ deleted_at: new Date() })
+    .where(
+      and(
+        eq(projectFilters.id, filterId),
+        eq(projectFilters.project_id, projectId),
+        isNull(projectFilters.deleted_at),
+      ),
+    )
+    .returning({ id: projectFilters.id });
+  return !!row;
+}
+
+export async function restoreFilter(
+  projectId: string,
+  userId: string,
+  filterId: string,
+): Promise<ProjectFilter | null> {
+  if (!(await isProjectOwned(projectId, userId))) return null;
+
+  const [row] = await db
+    .update(projectFilters)
+    .set({ deleted_at: null })
+    .where(
+      and(
+        eq(projectFilters.id, filterId),
+        eq(projectFilters.project_id, projectId),
+        isNotNull(projectFilters.deleted_at),
+      ),
     )
     .returning();
   return row ?? null;

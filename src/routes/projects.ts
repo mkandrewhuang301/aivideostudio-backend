@@ -45,6 +45,12 @@ import {
   restoreVideoOverlay,
   splitVideoOverlay,
   MAX_VIDEO_OVERLAYS_PER_PROJECT,
+  addFilter,
+  updateFilter,
+  softDeleteFilter,
+  restoreFilter,
+  countFilters,
+  MAX_FILTERS_PER_PROJECT,
   addTextOverlay,
   updateTextOverlay,
   deleteTextOverlay,
@@ -73,6 +79,7 @@ import {
   setProjectCoverFromUpload,
 } from '../services/projectService';
 import { resequenceAudioClipSortOrder, resequenceClipSortOrder } from '../services/clipResequence';
+import { isKnownFilterId } from '../config/filters';
 
 export const projectsRouter = Router();
 
@@ -859,6 +866,190 @@ projectsRouter.post('/:id/clips/:clipId/restore', async (req: Request, res: Resp
   } catch (err) {
     console.error('[projects] Error restoring clip:', err);
     res.status(500).json({ error: 'Failed to restore clip' });
+  }
+});
+
+// ─── Studio color filters ────────────────────────────────────────────────────
+// A filter is a timeline object covering [start_offset_seconds, +duration_seconds). It owns no
+// media, so these routes are plain row CRUD — no upload, no copy-on-write, no probe.
+
+/** Shared validation for the numeric fields, so create and update cannot drift apart. */
+function validateFilterFields(body: Record<string, unknown>): string | null {
+  const { filter_id, intensity, start_offset_seconds, duration_seconds, z_index } = body;
+
+  if (filter_id !== undefined && !isKnownFilterId(filter_id)) {
+    // Rejected here rather than at render time: an unknown id becomes an unresolvable
+    // `lut3d=file=` path inside the compose worker, which fails the WHOLE export rather than
+    // just dropping one filter.
+    return 'filter_id must name a filter in the catalog';
+  }
+  if (
+    intensity !== undefined &&
+    (typeof intensity !== 'number' || !Number.isFinite(intensity) || intensity < 0 || intensity > 1)
+  ) {
+    return 'intensity must be a finite number between 0 and 1';
+  }
+  if (
+    start_offset_seconds !== undefined &&
+    (typeof start_offset_seconds !== 'number' ||
+      !Number.isFinite(start_offset_seconds) ||
+      start_offset_seconds < 0)
+  ) {
+    return 'start_offset_seconds must be a finite non-negative number';
+  }
+  if (
+    duration_seconds !== undefined &&
+    (typeof duration_seconds !== 'number' || !Number.isFinite(duration_seconds) || duration_seconds <= 0)
+  ) {
+    return 'duration_seconds must be a finite positive number';
+  }
+  if (z_index !== undefined && (typeof z_index !== 'number' || !Number.isInteger(z_index))) {
+    return 'z_index must be an integer';
+  }
+  return null;
+}
+
+// POST /api/projects/:id/filters — drop a filter onto the timeline.
+projectsRouter.post('/:id/filters', async (req: Request, res: Response) => {
+  if (!req.user?.dbUserId) {
+    res.status(401).json({ error: 'Not authenticated' });
+    return;
+  }
+  const projectId = req.params.id as string;
+  const body = (req.body ?? {}) as Record<string, unknown>;
+
+  if (!isKnownFilterId(body.filter_id)) {
+    res.status(400).json({ error: 'filter_id must name a filter in the catalog' });
+    return;
+  }
+  if (typeof body.duration_seconds !== 'number' || !Number.isFinite(body.duration_seconds) || body.duration_seconds <= 0) {
+    res.status(400).json({ error: 'duration_seconds must be a finite positive number' });
+    return;
+  }
+  const invalid = validateFilterFields(body);
+  if (invalid) {
+    res.status(400).json({ error: invalid });
+    return;
+  }
+
+  try {
+    // Ownership BEFORE the capacity count: counting first would answer "is this project full?"
+    // for a project the caller does not own, distinguishable as 409 vs 404.
+    const [ownedProject] = await db
+      .select({ id: projects.id })
+      .from(projects)
+      .where(and(eq(projects.id, projectId), eq(projects.user_id, req.user.dbUserId)));
+    if (!ownedProject) {
+      res.status(404).json({ error: 'Project not found' });
+      return;
+    }
+
+    if ((await countFilters(projectId)) >= MAX_FILTERS_PER_PROJECT) {
+      res.status(409).json({ error: `A project can hold at most ${MAX_FILTERS_PER_PROJECT} filters` });
+      return;
+    }
+
+    const filter = await addFilter(projectId, req.user.dbUserId, {
+      filter_id: body.filter_id,
+      intensity: body.intensity as number | undefined,
+      start_offset_seconds: (body.start_offset_seconds as number | undefined) ?? 0,
+      duration_seconds: body.duration_seconds,
+      z_index: body.z_index as number | undefined,
+    });
+    if (!filter) {
+      res.status(404).json({ error: 'Project not found' });
+      return;
+    }
+    res.status(201).json({ filter });
+  } catch (err) {
+    console.error('[projects] Error adding filter:', err);
+    res.status(500).json({ error: 'Failed to add filter' });
+  }
+});
+
+// PATCH /api/projects/:id/filters/:filterId — retime, restack, swap the look, or set intensity.
+projectsRouter.patch('/:id/filters/:filterId', async (req: Request, res: Response) => {
+  if (!req.user?.dbUserId) {
+    res.status(401).json({ error: 'Not authenticated' });
+    return;
+  }
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const invalid = validateFilterFields(body);
+  if (invalid) {
+    res.status(400).json({ error: invalid });
+    return;
+  }
+
+  const updates: Record<string, unknown> = {};
+  for (const key of ['filter_id', 'intensity', 'start_offset_seconds', 'duration_seconds', 'z_index']) {
+    if (body[key] !== undefined) updates[key] = body[key];
+  }
+  if (Object.keys(updates).length === 0) {
+    res.status(400).json({ error: 'No supported fields to update' });
+    return;
+  }
+
+  try {
+    const filter = await updateFilter(
+      req.params.id as string,
+      req.user.dbUserId,
+      req.params.filterId as string,
+      updates,
+    );
+    if (!filter) {
+      res.status(404).json({ error: 'Filter not found' });
+      return;
+    }
+    res.status(200).json({ filter });
+  } catch (err) {
+    console.error('[projects] Error updating filter:', err);
+    res.status(500).json({ error: 'Failed to update filter' });
+  }
+});
+
+// DELETE /api/projects/:id/filters/:filterId — soft-delete, so undo can restore it by id.
+projectsRouter.delete('/:id/filters/:filterId', async (req: Request, res: Response) => {
+  if (!req.user?.dbUserId) {
+    res.status(401).json({ error: 'Not authenticated' });
+    return;
+  }
+  try {
+    const ok = await softDeleteFilter(
+      req.params.id as string,
+      req.user.dbUserId,
+      req.params.filterId as string,
+    );
+    if (!ok) {
+      res.status(404).json({ error: 'Filter not found' });
+      return;
+    }
+    res.status(204).send();
+  } catch (err) {
+    console.error('[projects] Error deleting filter:', err);
+    res.status(500).json({ error: 'Failed to delete filter' });
+  }
+});
+
+// POST /api/projects/:id/filters/:filterId/restore — undo a filter delete.
+projectsRouter.post('/:id/filters/:filterId/restore', async (req: Request, res: Response) => {
+  if (!req.user?.dbUserId) {
+    res.status(401).json({ error: 'Not authenticated' });
+    return;
+  }
+  try {
+    const filter = await restoreFilter(
+      req.params.id as string,
+      req.user.dbUserId,
+      req.params.filterId as string,
+    );
+    if (!filter) {
+      res.status(404).json({ error: 'Filter not found, not deleted, or already purged' });
+      return;
+    }
+    res.status(200).json({ filter });
+  } catch (err) {
+    console.error('[projects] Error restoring filter:', err);
+    res.status(500).json({ error: 'Failed to restore filter' });
   }
 });
 
