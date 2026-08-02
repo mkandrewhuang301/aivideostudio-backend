@@ -23,6 +23,7 @@ import { buildAssFile, buildTextOverlayAss } from '../services/assCaptionBuilder
 import type {
   FfmpegJobData,
   ComposeSpec,
+  ComposeFilterSpec,
   ExplainerComposeSpec,
   SummaryComposeSpec,
   SummarySourceFraming,
@@ -107,6 +108,8 @@ export interface BuildComposeArgsInput {
   /** Path to a generated Text-overlay .ass file (G4), or null when spec.textOverlays is empty. */
   textOverlayAssPath: string | null;
   fontsDir: string;
+  /** Directory holding the generated .cube pack (assets/luts). Only read when spec.filters is non-empty. */
+  lutsDir: string;
   outPath: string;
 }
 
@@ -295,6 +298,87 @@ export function audioEndSeconds(spec: ComposeSpec): number {
 }
 
 /**
+ * Escapes a path for use inside a filter_complex argument, where `:` separates options and `\`
+ * escapes. Filter paths here are server-controlled (assets/luts + a catalog-validated id), so this
+ * is belt-and-braces rather than a live injection concern.
+ */
+function escapeFilterPath(p: string): string {
+  return p.replace(/\\/g, '\\\\').replace(/:/g, '\\:').replace(/'/g, "\\'");
+}
+
+/**
+ * Fixed-point formatting for a number embedded in a filter expression. Guards against exponential
+ * notation (`1e-7`), which ffmpeg's expression parser does not accept, and against the long
+ * float tails that make a generated graph impossible to eyeball in a test failure.
+ */
+function filterNum(value: number): string {
+  return Number.isFinite(value) ? value.toFixed(3).replace(/\.?0+$/, '') || '0' : '0';
+}
+
+/**
+ * Chains the project's color filters onto `inLabel` and returns the label carrying the result.
+ *
+ * Shape per filter, verified against ffmpeg 2026-08-01:
+ *
+ *   [in]split[keep][fx];
+ *   [fx]lut3d=file=P:interp=tetrahedral:enable='between(t,S,E)'[graded];
+ *   [graded][keep]blend=all_mode=normal:all_opacity=I[out]
+ *
+ * Two non-obvious details, both of which were wrong on the first attempt and caught by rendering
+ * actual frames:
+ *
+ *  1. `blend`'s FIRST input is the TOP layer. `[keep][graded]` (the intuitive reading) outputs the
+ *     UNGRADED frame at full opacity — the filter silently does nothing.
+ *  2. The `enable` belongs on the `lut3d`, NOT on the `blend`. A disabled multi-input filter passes
+ *     through its first input, which here is the graded branch — so putting `enable` on the blend
+ *     applies the grade for the whole video and drops it inside the window, exactly inverted.
+ *     With `enable` on the lut3d, outside the window both branches are the same pixels and the
+ *     blend is a no-op by construction.
+ *
+ * At full intensity the split/blend pair is skipped entirely: `lut3d` alone carries the `enable`,
+ * which is the common case and keeps the graph small.
+ */
+function appendFilterChain(
+  filterParts: string[],
+  inLabel: string,
+  filters: ComposeFilterSpec[],
+  lutsDir: string,
+): string {
+  let label = inLabel;
+
+  filters.forEach((filter, index) => {
+    const start = Math.max(0, filter.startOffsetSeconds);
+    const end = start + Math.max(0, filter.durationSeconds);
+    // A zero-length filter would produce an `enable` that is never true — skip it rather than
+    // emit a dead branch that still costs a full LUT pass per frame.
+    if (end <= start) return;
+
+    const intensity = Math.min(Math.max(filter.intensity ?? 1, 0), 1);
+    if (intensity <= 0) return;
+
+    const lut = escapeFilterPath(path.join(lutsDir, `${filter.filterId}.cube`));
+    const enable = `enable='between(t,${filterNum(start)},${filterNum(end)})'`;
+    const out = `vfilt${index}`;
+
+    if (intensity >= 0.999) {
+      filterParts.push(`[${label}]lut3d=file=${lut}:interp=tetrahedral:${enable}[${out}]`);
+    } else {
+      const keep = `fkeep${index}`;
+      const fx = `ffx${index}`;
+      const graded = `fgraded${index}`;
+      filterParts.push(`[${label}]split[${keep}][${fx}]`);
+      filterParts.push(`[${fx}]lut3d=file=${lut}:interp=tetrahedral:${enable}[${graded}]`);
+      filterParts.push(
+        `[${graded}][${keep}]blend=all_mode=normal:all_opacity=${filterNum(intensity)}[${out}]`,
+      );
+    }
+    label = out;
+  });
+
+  return label;
+}
+
+/**
  * Pure function: assembles the FULL ffmpeg argv array for the compose op (RESEARCH.md Pattern 1/2)
  * — never a shell string (T-13-11). Concatenates mixed-resolution/mixed-media clips via a single
  * filter_complex scale+pad+concat graph (NEVER the `-f concat` demuxer — Pitfall 2), chains a
@@ -305,7 +389,7 @@ export function audioEndSeconds(spec: ComposeSpec): number {
  * two ever visually overlap (matches the pre-existing caption-on-top precedence).
  */
 export function buildComposeArgs(input: BuildComposeArgsInput): string[] {
-  const { spec, clipPaths, audioPaths, assPath, textOverlayAssPath, fontsDir, outPath } = input;
+  const { spec, clipPaths, audioPaths, assPath, textOverlayAssPath, fontsDir, lutsDir, outPath } = input;
   const { width, height } = resolveComposeCanvas(spec);
 
   const args: string[] = ['-y'];
@@ -400,9 +484,15 @@ export function buildComposeArgs(input: BuildComposeArgsInput): string[] {
   const concatInputs = Array.from({ length: videoSegmentCount }, (_, i) => `[v${i}][a${i}]`).join('');
   filterParts.push(`${concatInputs}concat=n=${videoSegmentCount}:v=1:a=1[vconcat][aconcat]`);
 
+  let videoLabel = 'vconcat';
+
+  // Color filters, BEFORE any burn-in. A grade applies to the footage, not to the user's text and
+  // captions — chaining these after the `ass=` passes would tint the lettering along with the
+  // picture, which is not what any editor does and not what the picker preview shows.
+  videoLabel = appendFilterChain(filterParts, videoLabel, spec.filters ?? [], lutsDir);
+
   // Burn Text overlays via the generated ASS file (G4's buildTextOverlayAss) — native rotation
   // (\frz) + scale (\fs), unlike the old drawtext loop this replaces.
-  let videoLabel = 'vconcat';
   if (textOverlayAssPath && spec.textOverlays.length > 0) {
     filterParts.push(`[${videoLabel}]ass=filename=${textOverlayAssPath}:fontsdir=${fontsDir}[vtext]`);
     videoLabel = 'vtext';
@@ -776,7 +866,18 @@ export async function runFfmpegOp(data: FfmpegJobData): Promise<{ r2Key: string;
       // Bundled TTF (13-02), resolved relative to process cwd (repo root at Railway runtime) —
       // never depends on system fontconfig being present/configured (RESEARCH.md Pitfall 1).
       const fontsDir = path.resolve('assets/fonts');
-      const args = buildComposeArgs({ spec, clipPaths, audioPaths, assPath, textOverlayAssPath, fontsDir, outPath });
+      // Generated .cube pack, resolved the same cwd-relative way as the fonts above.
+      const lutsDir = path.resolve('assets/luts');
+      const args = buildComposeArgs({
+        spec,
+        clipPaths,
+        audioPaths,
+        assPath,
+        textOverlayAssPath,
+        fontsDir,
+        lutsDir,
+        outPath,
+      });
       await runFfmpeg(args);
 
       const r2Key = `generations/${generationId}.mp4`;

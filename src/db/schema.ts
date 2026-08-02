@@ -398,6 +398,47 @@ export const projectVideoOverlays = pgTable(
   }),
 );
 
+// ─── project_filters (Studio color filters) ──────────────────────────────────
+// A filter is its own timeline object, NOT a property of a clip. It covers an arbitrary
+// [start, start + duration) window on the project timeline, so one filter can span several clips
+// or cover only part of one, and several can stack on the same moment — the CapCut model the
+// feature was specced against.
+//
+// There is no media here and therefore no r2_key and no trim window: a filter is a pure lookup
+// applied to whatever frames sit under it. `filter_id` names a LUT in assets/luts (see
+// scripts/generate-filter-luts.mjs); the same id resolves to the same .cube file in the iOS
+// bundle, which is what keeps the live preview and the cloud export in agreement.
+//
+// `z_index` is the stack order when filters overlap in time — the "Layers" control on the pill's
+// contextual rail. Lower renders first, so a higher z_index grades on top of the result below it.
+// Soft-delete follows project_clips exactly (deleted_at, restore endpoint for undo); every read
+// path MUST filter deleted_at IS NULL.
+
+export const projectFilters = pgTable(
+  'project_filters',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    project_id: uuid('project_id')
+      .notNull()
+      .references(() => projects.id),
+    // Catalog id, e.g. 'noir' | 'tealorange'. Validated against assets/luts/catalog.json on write
+    // so a typo can never reach the compose worker as an unresolvable lut3d path.
+    filter_id: text('filter_id').notNull(),
+    // Blend weight against the ungraded frame: 0 = invisible, 1 = the full look.
+    intensity: doublePrecision('intensity').notNull().default(1),
+    start_offset_seconds: doublePrecision('start_offset_seconds').notNull().default(0),
+    duration_seconds: doublePrecision('duration_seconds').notNull(),
+    z_index: integer('z_index').notNull().default(0),
+    deleted_at: timestamp('deleted_at', { withTimezone: true }),
+    created_at: timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+  },
+  (table) => ({
+    projectIdIdx: index('project_filters_project_id_idx').on(table.project_id),
+  }),
+);
+
 // ─── project_text_overlays (Phase 13: Edit Studio) ────────────────────────────
 // Draggable Text overlays — normalized 0..1 position. v1 shipped a fixed single style (per
 // 13-RESEARCH.md Open Question 2); sketch 016 (2026-07-29, caption-text-style-sheets-plan.md)
@@ -800,6 +841,8 @@ export type ProjectClip = typeof projectClips.$inferSelect;
 export type NewProjectClip = typeof projectClips.$inferInsert;
 export type ProjectVideoOverlay = typeof projectVideoOverlays.$inferSelect;
 export type NewProjectVideoOverlay = typeof projectVideoOverlays.$inferInsert;
+export type ProjectFilter = typeof projectFilters.$inferSelect;
+export type NewProjectFilter = typeof projectFilters.$inferInsert;
 export type ProjectTextOverlay = typeof projectTextOverlays.$inferSelect;
 export type NewProjectTextOverlay = typeof projectTextOverlays.$inferInsert;
 export type ProjectSoundtrackGeneration = typeof projectSoundtrackGenerations.$inferSelect;

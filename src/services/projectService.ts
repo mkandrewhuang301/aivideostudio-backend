@@ -15,6 +15,7 @@ import {
   projects,
   projectClips,
   projectVideoOverlays,
+  projectFilters,
   projectTextOverlays,
   projectAudioClips,
   projectCaptionCues,
@@ -31,6 +32,7 @@ import type {
   ProjectClip,
   ProjectVideoOverlay,
   NewProjectVideoOverlay,
+  ProjectFilter,
   ProjectTextOverlay,
   ProjectAudioClip,
   ProjectCaptionCue,
@@ -153,6 +155,19 @@ async function purgeExpiredSoftDeletes(projectId: string): Promise<void> {
     }
     await db.delete(projectAudioClips).where(eq(projectAudioClips.id, audio.id));
   }
+
+  // Filters own no R2 object, so there is nothing to delete from storage first — the expired
+  // rows just go. Kept in the same reaper so the undo window means the same thing for every kind
+  // of timeline object.
+  await db
+    .delete(projectFilters)
+    .where(
+      and(
+        eq(projectFilters.project_id, projectId),
+        isNotNull(projectFilters.deleted_at),
+        lt(projectFilters.deleted_at, cutoff),
+      ),
+    );
 }
 
 // ─── Project CRUD ──────────────────────────────────────────────────────────────
@@ -214,6 +229,9 @@ export interface FullProjectState extends Omit<Project, 'thumbnail_r2_key'> {
   thumbnail_url: string | null;
   clips: ProjectClipWithUrl[];
   video_overlays: ProjectVideoOverlayWithUrl[];
+  // No presigning and no self-heal pass: a filter carries no media, only a catalog id and a
+  // timeline window, so the rows go out exactly as stored.
+  filters: ProjectFilter[];
   text_overlays: ProjectTextOverlay[];
   audio_clips: ProjectAudioClipWithUrl[];
   caption_cues: ProjectCaptionCueWithWords[];
@@ -238,7 +256,7 @@ export async function getProjectWithState(
     console.error('[projectService] purgeExpiredSoftDeletes failed (non-blocking):', err);
   }
 
-  const [clipRows, videoOverlayRows, textRows, audioRows, cueRows] = await Promise.all([
+  const [clipRows, videoOverlayRows, filterRows, textRows, audioRows, cueRows] = await Promise.all([
     db
       .select()
       .from(projectClips)
@@ -249,6 +267,13 @@ export async function getProjectWithState(
       .from(projectVideoOverlays)
       .where(and(eq(projectVideoOverlays.project_id, projectId), isNull(projectVideoOverlays.deleted_at)))
       .orderBy(asc(projectVideoOverlays.z_index), asc(projectVideoOverlays.created_at)),
+    db
+      .select()
+      .from(projectFilters)
+      .where(and(eq(projectFilters.project_id, projectId), isNull(projectFilters.deleted_at)))
+      // Stack order first, then creation, so two filters added at the same z_index render in a
+      // stable order across requests — the compose graph chains them in exactly this sequence.
+      .orderBy(asc(projectFilters.z_index), asc(projectFilters.created_at), asc(projectFilters.id)),
     db
       .select()
       .from(projectTextOverlays)
@@ -411,6 +436,7 @@ export async function getProjectWithState(
     thumbnail_url: thumbnailUrl,
     clips,
     video_overlays: videoOverlays,
+    filters: filterRows,
     text_overlays: textRows,
     audio_clips: audioClips,
     caption_cues: cueRows.map((c) => ({ ...c, words: wordsByCue[c.id] ?? [] })),
@@ -516,6 +542,10 @@ export async function deleteProject(projectId: string, userId: string): Promise<
   await db.delete(projectSoundtrackGenerations).where(eq(projectSoundtrackGenerations.project_id, projectId));
   await db.delete(projectTextOverlays).where(eq(projectTextOverlays.project_id, projectId));
   await db.delete(projectVideoOverlays).where(eq(projectVideoOverlays.project_id, projectId));
+  // Must precede the projects delete — project_filters carries an FK to projects(id), so leaving
+  // it out makes deleting any project that ever had a filter fail outright. No R2 cleanup here:
+  // a filter row owns no object.
+  await db.delete(projectFilters).where(eq(projectFilters.project_id, projectId));
   await db.delete(projectClips).where(eq(projectClips.project_id, projectId));
   await db.delete(projects).where(eq(projects.id, projectId));
 
@@ -1128,6 +1158,136 @@ export async function restoreClip(projectId: string, userId: string, clipId: str
     .set({ deleted_at: null })
     .where(
       and(eq(projectClips.id, clipId), eq(projectClips.project_id, projectId), isNotNull(projectClips.deleted_at)),
+    )
+    .returning();
+  return row ?? null;
+}
+
+// ─── Filter CRUD (Studio color filters) ───────────────────────────────────────
+// A filter row is cheap — no media, no R2 object, no probe — so these are plain inserts and
+// updates with no copy-on-write step, unlike clips and overlays.
+
+/**
+ * Cap on live filters per project. Each one costs a full LUT pass per frame in the compose graph
+ * (and a CoreImage pass per frame in the on-device preview), so an unbounded stack is a real
+ * render-time and battery cost rather than just a row count.
+ */
+export const MAX_FILTERS_PER_PROJECT = 20;
+
+export async function addFilter(
+  projectId: string,
+  userId: string,
+  input: {
+    filter_id: string;
+    intensity?: number;
+    start_offset_seconds: number;
+    duration_seconds: number;
+    z_index?: number;
+  },
+): Promise<ProjectFilter | null> {
+  if (!(await isProjectOwned(projectId, userId))) return null;
+
+  // A new filter lands on top of the existing stack unless the caller pins a layer explicitly,
+  // which matches what tapping a filter in the picker should do.
+  let zIndex = input.z_index;
+  if (zIndex === undefined) {
+    const [top] = await db
+      .select({ z: projectFilters.z_index })
+      .from(projectFilters)
+      .where(and(eq(projectFilters.project_id, projectId), isNull(projectFilters.deleted_at)))
+      .orderBy(desc(projectFilters.z_index))
+      .limit(1);
+    zIndex = top ? top.z + 1 : 0;
+  }
+
+  const [row] = await db
+    .insert(projectFilters)
+    .values({
+      project_id: projectId,
+      filter_id: input.filter_id,
+      intensity: input.intensity ?? 1,
+      start_offset_seconds: input.start_offset_seconds,
+      duration_seconds: input.duration_seconds,
+      z_index: zIndex,
+    })
+    .returning();
+  return row ?? null;
+}
+
+export async function countFilters(projectId: string): Promise<number> {
+  const rows = await db
+    .select({ id: projectFilters.id })
+    .from(projectFilters)
+    .where(and(eq(projectFilters.project_id, projectId), isNull(projectFilters.deleted_at)));
+  return rows.length;
+}
+
+export async function updateFilter(
+  projectId: string,
+  userId: string,
+  filterId: string,
+  updates: Partial<{
+    filter_id: string;
+    intensity: number;
+    start_offset_seconds: number;
+    duration_seconds: number;
+    z_index: number;
+  }>,
+): Promise<ProjectFilter | null> {
+  if (!(await isProjectOwned(projectId, userId))) return null;
+  if (Object.keys(updates).length === 0) return null;
+
+  const [row] = await db
+    .update(projectFilters)
+    .set(updates)
+    .where(
+      and(
+        eq(projectFilters.id, filterId),
+        eq(projectFilters.project_id, projectId),
+        isNull(projectFilters.deleted_at),
+      ),
+    )
+    .returning();
+  return row ?? null;
+}
+
+export async function softDeleteFilter(
+  projectId: string,
+  userId: string,
+  filterId: string,
+): Promise<boolean> {
+  if (!(await isProjectOwned(projectId, userId))) return false;
+
+  const [row] = await db
+    .update(projectFilters)
+    .set({ deleted_at: new Date() })
+    .where(
+      and(
+        eq(projectFilters.id, filterId),
+        eq(projectFilters.project_id, projectId),
+        isNull(projectFilters.deleted_at),
+      ),
+    )
+    .returning({ id: projectFilters.id });
+  return !!row;
+}
+
+export async function restoreFilter(
+  projectId: string,
+  userId: string,
+  filterId: string,
+): Promise<ProjectFilter | null> {
+  if (!(await isProjectOwned(projectId, userId))) return null;
+
+  const [row] = await db
+    .update(projectFilters)
+    .set({ deleted_at: null })
+    .where(
+      and(
+        eq(projectFilters.id, filterId),
+        eq(projectFilters.project_id, projectId),
+        isNotNull(projectFilters.deleted_at),
+      ),
     )
     .returning();
   return row ?? null;
@@ -1958,12 +2118,19 @@ export async function buildComposeSnapshot(projectId: string, userId: string): P
     .where(and(eq(projects.id, projectId), eq(projects.user_id, userId)));
   if (!projectRow) return null;
 
-  const [clipRows, textRows, audioRows, cueRows] = await Promise.all([
+  const [clipRows, filterRows, textRows, audioRows, cueRows] = await Promise.all([
     db
       .select()
       .from(projectClips)
       .where(and(eq(projectClips.project_id, projectId), isNull(projectClips.deleted_at)))
       .orderBy(projectClips.sort_order),
+    db
+      .select()
+      .from(projectFilters)
+      .where(and(eq(projectFilters.project_id, projectId), isNull(projectFilters.deleted_at)))
+      // Same stack order the editor renders in — the compose graph chains them in this sequence,
+      // so a filter with a higher z_index grades on top of the result beneath it.
+      .orderBy(asc(projectFilters.z_index), asc(projectFilters.created_at), asc(projectFilters.id)),
     db
       .select()
       .from(projectTextOverlays)
@@ -2074,5 +2241,17 @@ export async function buildComposeSnapshot(projectId: string, userId: string): P
     audioClips,
     captionCues,
     captionStyle,
+    // Omitted entirely when the project has none, so a filterless project's snapshot stays
+    // byte-identical to what it was before this feature and re-exports produce the same graph.
+    ...(filterRows.length > 0
+      ? {
+          filters: filterRows.map((f) => ({
+            filterId: f.filter_id,
+            intensity: f.intensity,
+            startOffsetSeconds: f.start_offset_seconds,
+            durationSeconds: f.duration_seconds,
+          })),
+        }
+      : {}),
   };
 }

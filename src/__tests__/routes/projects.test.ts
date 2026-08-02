@@ -266,6 +266,7 @@ describe('GET /api/projects/:id', () => {
         ]),
       ) // clips
       .mockReturnValueOnce(makeChain([])) // video overlays
+      .mockReturnValueOnce(makeChain([])) // filters
       .mockReturnValueOnce(makeChain([])) // text overlays
       .mockReturnValueOnce(
         makeChain([
@@ -300,6 +301,7 @@ describe('GET /api/projects/:id', () => {
         ]),
       ) // clips
       .mockReturnValueOnce(makeChain([])) // video overlays
+      .mockReturnValueOnce(makeChain([])) // filters
       .mockReturnValueOnce(makeChain([])) // text overlays
       .mockReturnValueOnce(makeChain([])) // audio clips
       .mockReturnValueOnce(makeChain([])); // caption cues
@@ -332,6 +334,7 @@ describe('GET /api/projects/:id', () => {
         ]),
       )
       .mockReturnValueOnce(makeChain([])) // video overlays
+      .mockReturnValueOnce(makeChain([])) // filters
       .mockReturnValueOnce(makeChain([]))
       .mockReturnValueOnce(makeChain([]))
       .mockReturnValueOnce(makeChain([]));
@@ -361,6 +364,7 @@ describe('GET /api/projects/:id', () => {
         ]),
       )
       .mockReturnValueOnce(makeChain([])) // video overlays
+      .mockReturnValueOnce(makeChain([])) // filters
       .mockReturnValueOnce(makeChain([]))
       .mockReturnValueOnce(makeChain([]))
       .mockReturnValueOnce(makeChain([]));
@@ -382,6 +386,7 @@ describe('GET /api/projects/:id', () => {
       .mockReturnValueOnce(makeChain([{ id: 'expired-audio', r2_key: 'projects/proj-1/audio/old.mp3' }])) // purge: expired audio
       .mockReturnValueOnce(makeChain([])) // clips (post-purge, none active)
       .mockReturnValueOnce(makeChain([])) // video overlays
+      .mockReturnValueOnce(makeChain([])) // filters
       .mockReturnValueOnce(makeChain([])) // text overlays
       .mockReturnValueOnce(makeChain([])) // audio clips (post-purge, none active)
       .mockReturnValueOnce(makeChain([])); // caption cues
@@ -398,7 +403,10 @@ describe('GET /api/projects/:id', () => {
     );
     expect(clipDeleteCall).toBeDefined();
     expect(audioDeleteCall).toBeDefined();
-    expect(dbMock.delete).toHaveBeenCalledTimes(2); // one hard-delete per expired row
+    // One hard-delete per expired media row (clip + audio), plus ONE bulk delete for expired
+    // filters. Filters own no R2 object, so they need no select-then-delete-per-row walk to
+    // collect keys first — a single ranged DELETE covers them.
+    expect(dbMock.delete).toHaveBeenCalledTimes(3);
   });
 
   it("doesn't leak a soft-deleted (but not-yet-purged) clip into the response", async () => {
@@ -411,6 +419,7 @@ describe('GET /api/projects/:id', () => {
       // is excluded at the query level, so the mocked "active clips" result is simply empty here.
       .mockReturnValueOnce(makeChain([]))
       .mockReturnValueOnce(makeChain([])) // video overlays
+      .mockReturnValueOnce(makeChain([])) // filters
       .mockReturnValueOnce(makeChain([]))
       .mockReturnValueOnce(makeChain([]))
       .mockReturnValueOnce(makeChain([]));
@@ -1406,6 +1415,7 @@ describe('POST /api/projects/:id/export', () => {
       .mockReturnValueOnce(makeChain([{ count: 1 }])) // clip count
       .mockReturnValueOnce(makeChain([baseProjectRow({ id: 'proj-1' })])) // buildComposeSnapshot's project row
       .mockReturnValueOnce(makeChain([baseClipRow()])) // clips
+      .mockReturnValueOnce(makeChain([])) // filters
       .mockReturnValueOnce(makeChain([])) // text overlays
       .mockReturnValueOnce(makeChain([])) // audio clips
       .mockReturnValueOnce(makeChain([])); // caption cues (empty => no word query)
@@ -1465,6 +1475,7 @@ describe('POST /api/projects/:id/export', () => {
           baseClipRow({ id: 'clip-second', sort_order: 1, width: 400, height: 400 }),
         ]),
       ) // clips — ordered by sort_order; only the FIRST clip's dims should be used
+      .mockReturnValueOnce(makeChain([])) // filters
       .mockReturnValueOnce(makeChain([])) // text overlays
       .mockReturnValueOnce(makeChain([])) // audio clips
       .mockReturnValueOnce(makeChain([])); // caption cues
@@ -1491,6 +1502,7 @@ describe('POST /api/projects/:id/export', () => {
       .mockReturnValueOnce(makeChain([{ count: 1 }]))
       .mockReturnValueOnce(makeChain([baseProjectRow({ id: 'proj-1', aspect_ratio: 'original' })]))
       .mockReturnValueOnce(makeChain([baseClipRow({ width: null, height: null })]))
+      .mockReturnValueOnce(makeChain([])) // filters
       .mockReturnValueOnce(makeChain([]))
       .mockReturnValueOnce(makeChain([]))
       .mockReturnValueOnce(makeChain([]));
@@ -1513,6 +1525,7 @@ describe('POST /api/projects/:id/export', () => {
       .mockReturnValueOnce(
         makeChain([baseClipRow({ trim_end_seconds: null, original_duration_seconds: null })]),
       ) // clips — no resolvable duration
+      .mockReturnValueOnce(makeChain([])) // filters
       .mockReturnValueOnce(makeChain([])) // text overlays
       .mockReturnValueOnce(makeChain([])) // audio clips
       .mockReturnValueOnce(makeChain([])); // caption cues
@@ -2884,5 +2897,172 @@ describe('smartUnpackOnImport', () => {
     expect(clip1Values).toHaveBeenCalledWith(
       expect.objectContaining({ sort_order: 1, trim_start_seconds: 40, trim_end_seconds: 46.5 }),
     );
+  });
+});
+
+// ─── Studio color filters ──────────────────────────────────────────────────────
+// A filter is a timeline object with no media, so these routes are plain row CRUD. The behaviour
+// worth pinning is the catalog validation: an unknown filter_id must be rejected at the API
+// boundary, because it reaches the compose worker as an unresolvable `lut3d=file=` path and takes
+// down the WHOLE export rather than degrading to one missing grade.
+
+describe('Studio color filters', () => {
+  function ownedProject() {
+    dbMock.select.mockReturnValueOnce(makeChain([{ id: 'proj-1' }]));
+  }
+
+  describe('POST /api/projects/:id/filters', () => {
+    it('returns 401 when unauthenticated', async () => {
+      const res = await request(unauthApp).post('/api/projects/proj-1/filters').send({});
+      expect(res.status).toBe(401);
+    });
+
+    it('creates a filter and returns 201 with the row', async () => {
+      ownedProject(); // route-level ownership
+      dbMock.select.mockReturnValueOnce(makeChain([])); // capacity count
+      ownedProject(); // ownership again inside addFilter
+      dbMock.select.mockReturnValueOnce(makeChain([])); // top-of-stack lookup
+      dbMock.insert.mockReturnValueOnce(makeChain([{ id: 'filt-1', filter_id: 'noir' }]));
+
+      const res = await request(app)
+        .post('/api/projects/proj-1/filters')
+        .send({ filter_id: 'noir', start_offset_seconds: 2, duration_seconds: 3 });
+
+      expect(res.status).toBe(201);
+      expect(res.body.filter.id).toBe('filt-1');
+    });
+
+    it('rejects a filter_id that is not in the catalog', async () => {
+      const res = await request(app)
+        .post('/api/projects/proj-1/filters')
+        .send({ filter_id: 'not-a-real-look', duration_seconds: 3 });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/catalog/);
+      // Never reaches the database.
+      expect(dbMock.insert).not.toHaveBeenCalled();
+    });
+
+    it('rejects a non-positive duration', async () => {
+      const res = await request(app)
+        .post('/api/projects/proj-1/filters')
+        .send({ filter_id: 'noir', duration_seconds: 0 });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/duration_seconds/);
+    });
+
+    it('rejects an intensity outside 0..1', async () => {
+      const res = await request(app)
+        .post('/api/projects/proj-1/filters')
+        .send({ filter_id: 'noir', duration_seconds: 3, intensity: 1.4 });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/intensity/);
+    });
+
+    it('stacks a new filter on top of the highest existing z_index', async () => {
+      ownedProject(); // route-level ownership
+      dbMock.select.mockReturnValueOnce(makeChain([])); // capacity count
+      ownedProject(); // ownership again inside addFilter
+      dbMock.select.mockReturnValueOnce(makeChain([{ z: 4 }])); // current top of stack
+      const valuesFn = jest.fn().mockReturnValue(makeChain([{ id: 'filt-2' }]));
+      dbMock.insert.mockReturnValueOnce({ values: valuesFn });
+
+      await request(app)
+        .post('/api/projects/proj-1/filters')
+        .send({ filter_id: 'sunset', duration_seconds: 3 });
+
+      expect(valuesFn).toHaveBeenCalledWith(expect.objectContaining({ z_index: 5 }));
+    });
+
+    it('refuses to exceed the per-project filter cap', async () => {
+      ownedProject();
+      dbMock.select.mockReturnValueOnce(makeChain(new Array(20).fill({ id: 'x' })));
+
+      const res = await request(app)
+        .post('/api/projects/proj-1/filters')
+        .send({ filter_id: 'noir', duration_seconds: 3 });
+
+      expect(res.status).toBe(409);
+      expect(dbMock.insert).not.toHaveBeenCalled();
+    });
+
+    it('404s on a project the caller does not own (IDOR guard)', async () => {
+      dbMock.select.mockReturnValueOnce(makeChain([])); // ownership check fails outright
+      const res = await request(app)
+        .post('/api/projects/someone-elses/filters')
+        .send({ filter_id: 'noir', duration_seconds: 3 });
+
+      expect(res.status).toBe(404);
+    });
+  });
+
+  describe('PATCH /api/projects/:id/filters/:filterId', () => {
+    it('updates intensity and returns the row', async () => {
+      ownedProject();
+      dbMock.update.mockReturnValueOnce(makeChain([{ id: 'filt-1', intensity: 0.5 }]));
+
+      const res = await request(app)
+        .patch('/api/projects/proj-1/filters/filt-1')
+        .send({ intensity: 0.5 });
+
+      expect(res.status).toBe(200);
+      expect(res.body.filter.intensity).toBe(0.5);
+    });
+
+    it('rejects swapping to an unknown filter_id', async () => {
+      const res = await request(app)
+        .patch('/api/projects/proj-1/filters/filt-1')
+        .send({ filter_id: 'nope' });
+
+      expect(res.status).toBe(400);
+      expect(dbMock.update).not.toHaveBeenCalled();
+    });
+
+    it('400s when the body carries no supported field', async () => {
+      const res = await request(app).patch('/api/projects/proj-1/filters/filt-1').send({ colour: 'blue' });
+      expect(res.status).toBe(400);
+    });
+
+    it('404s when the filter does not exist', async () => {
+      ownedProject();
+      dbMock.update.mockReturnValueOnce(makeChain([]));
+
+      const res = await request(app)
+        .patch('/api/projects/proj-1/filters/ghost')
+        .send({ intensity: 0.5 });
+
+      expect(res.status).toBe(404);
+    });
+  });
+
+  describe('DELETE + restore', () => {
+    it('soft-deletes and returns 204', async () => {
+      ownedProject();
+      dbMock.update.mockReturnValueOnce(makeChain([{ id: 'filt-1' }]));
+
+      const res = await request(app).delete('/api/projects/proj-1/filters/filt-1');
+      expect(res.status).toBe(204);
+      // Soft delete, never a row removal — undo restores it by id.
+      expect(dbMock.delete).not.toHaveBeenCalled();
+    });
+
+    it('restores a soft-deleted filter', async () => {
+      ownedProject();
+      dbMock.update.mockReturnValueOnce(makeChain([{ id: 'filt-1', deleted_at: null }]));
+
+      const res = await request(app).post('/api/projects/proj-1/filters/filt-1/restore');
+      expect(res.status).toBe(200);
+      expect(res.body.filter.id).toBe('filt-1');
+    });
+
+    it('404s restoring something that was never deleted', async () => {
+      ownedProject();
+      dbMock.update.mockReturnValueOnce(makeChain([]));
+
+      const res = await request(app).post('/api/projects/proj-1/filters/filt-1/restore');
+      expect(res.status).toBe(404);
+    });
   });
 });

@@ -40,6 +40,7 @@ import { videoBackgroundRemovalRouter } from './routes/videoBackgroundRemoval';
 import { privacyRouter } from './routes/privacy';
 import { termsRouter } from './routes/terms';
 import { ratesRouter } from './routes/rates';
+import { filtersRouter } from './routes/filters';
 import { presetsRouter } from './routes/presets';
 import { formatsRouter } from './routes/formats';
 import { charactersRouter } from './routes/characters';
@@ -135,6 +136,7 @@ app.use('/api/prompt', promptRouter);
 app.use('/privacy', privacyRouter);
 app.use('/terms', termsRouter);
 app.use('/rates', ratesRouter);
+app.use('/api/filters', filtersRouter);
 
 app.listen(config.port, () => {
   console.log(`[server] listening on port ${config.port} (${config.nodeEnv})`);
