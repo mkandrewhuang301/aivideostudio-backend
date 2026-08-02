@@ -76,6 +76,15 @@ describe('mergeUser', () => {
     expect(sqlText(1)).toContain('GREATEST');
   });
 
+  it('keeps the newest age and Terms attestation when a guest links an identity', async () => {
+    await mergeUser(SOURCE_DB_ID, TARGET_DB_ID, SOURCE_FIREBASE_UID);
+
+    const mergeSql = sqlText(1);
+    expect(mergeSql).toContain('age_terms_version');
+    expect(mergeSql).toContain('age_terms_accepted_at');
+    expect(mergeSql).toContain('source.age_terms_accepted_at > target.age_terms_accepted_at');
+  });
+
   it('deletes the anonymous Firebase user after the atomic database statement', async () => {
     await mergeUser(SOURCE_DB_ID, TARGET_DB_ID, SOURCE_FIREBASE_UID);
 

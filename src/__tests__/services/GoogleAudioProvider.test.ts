@@ -92,6 +92,38 @@ describe('GoogleAudioProvider', () => {
     });
   });
 
+  it('sends Lyria up to ten visual references through the Gemini Interactions input list', async () => {
+    const fetchMock = jest.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        output_audio: { data: Buffer.from('music').toString('base64'), mime_type: 'audio/mpeg' },
+      }),
+    });
+    (global as unknown as { fetch: jest.Mock }).fetch = fetchMock;
+    const references = Array.from({ length: 11 }, (_, index) => ({
+      mimeType: 'image/jpeg' as const,
+      data: Buffer.from(`image-${index}`),
+    }));
+
+    await googleRunLyria('lyria-3-pro-preview', 'Score these scenes.', references);
+
+    const request = fetchMock.mock.calls[0]![1] as { body: string };
+    const body = JSON.parse(request.body) as {
+      model: string;
+      input: Array<{ type: string; text?: string; mime_type?: string; data?: string }>;
+    };
+    expect(body.model).toBe('lyria-3-pro-preview');
+    expect(body.input).toHaveLength(11);
+    expect(body.input[0]).toEqual({ type: 'text', text: 'Score these scenes.' });
+    expect(body.input[1]).toEqual({
+      type: 'image',
+      mime_type: 'image/jpeg',
+      data: Buffer.from('image-0').toString('base64'),
+    });
+    expect(body.input[10]?.data).toBe(Buffer.from('image-9').toString('base64'));
+  });
+
   it('returns a credential-safe error for provider failures', async () => {
     (global as unknown as { fetch: jest.Mock }).fetch = jest.fn().mockResolvedValue({
       ok: false,

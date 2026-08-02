@@ -108,6 +108,8 @@ const OWNED_CLIP_ROW = {
   r2_key: 'clips/clip-1.mp4',
   media_type: 'video',
   original_duration_seconds: 10,
+  trim_start_seconds: 0,
+  trim_end_seconds: 10,
 };
 
 beforeEach(() => {
@@ -213,9 +215,42 @@ describe('verifyClipOwnership', () => {
 // than fall back to an estimate.
 
 describe('resolveBillableDuration', () => {
-  it('uses original_duration_seconds when present, without probing', async () => {
+  it('uses the trim window when the clip is untrimmed (whole clip visible)', async () => {
     await expect(resolveBillableDuration(OWNED_CLIP_ROW)).resolves.toBe(10);
     expect(mockProbe).not.toHaveBeenCalled();
+  });
+
+  // The headline fix (2026-07-31). Billing the full source charged a 5-minute upload trimmed to
+  // 5 visible seconds for 5 MINUTES of provider work.
+  it('bills only the VISIBLE window, not the full source', async () => {
+    await expect(resolveBillableDuration({
+      ...OWNED_CLIP_ROW,
+      original_duration_seconds: 300, // 5-minute upload…
+      trim_start_seconds: 120,
+      trim_end_seconds: 125,          // …trimmed to 5 visible seconds
+    })).resolves.toBe(5);
+
+    expect(computeBgRemovalCredits(5)).toBe(3); // 3 credits, not 126
+  });
+
+  it('ACCEPTS a long source whose visible window is under the cap', async () => {
+    // Previously rejected outright: the cap was checked against the 300s source, so the feature
+    // was unusable on long uploads however short the trim was.
+    await expect(resolveBillableDuration({
+      ...OWNED_CLIP_ROW,
+      original_duration_seconds: 300,
+      trim_start_seconds: 10,
+      trim_end_seconds: 40,
+    })).resolves.toBe(30);
+  });
+
+  it('falls back to original_duration_seconds when trim_end is null', async () => {
+    await expect(resolveBillableDuration({
+      ...OWNED_CLIP_ROW,
+      original_duration_seconds: 20,
+      trim_start_seconds: 0,
+      trim_end_seconds: null,
+    })).resolves.toBe(20);
   });
 
   it('self-heals a null duration via ffprobe and persists the probed value', async () => {
@@ -224,7 +259,11 @@ describe('resolveBillableDuration', () => {
     (mockDb.update as jest.Mock).mockReturnValueOnce(updateChain);
 
     await expect(
-      resolveBillableDuration({ ...OWNED_CLIP_ROW, original_duration_seconds: null }),
+      resolveBillableDuration({
+        ...OWNED_CLIP_ROW,
+        original_duration_seconds: null,
+        trim_end_seconds: null,
+      }),
     ).resolves.toBe(12.5);
 
     expect(mockProbe).toHaveBeenCalled();
@@ -234,19 +273,31 @@ describe('resolveBillableDuration', () => {
   it('THROWS when duration is unresolvable — never bills from a guess', async () => {
     mockProbe.mockResolvedValueOnce(null);
     await expect(
-      resolveBillableDuration({ ...OWNED_CLIP_ROW, original_duration_seconds: null }),
+      resolveBillableDuration({
+        ...OWNED_CLIP_ROW,
+        original_duration_seconds: null,
+        trim_end_seconds: null,
+      }),
     ).rejects.toBeInstanceOf(VideoBgRemovalValidationError);
   });
 
-  it('rejects a clip longer than the configured cap', async () => {
+  it('rejects a clip whose VISIBLE window exceeds the configured cap', async () => {
     await expect(
-      resolveBillableDuration({ ...OWNED_CLIP_ROW, original_duration_seconds: 240 }),
+      resolveBillableDuration({
+        ...OWNED_CLIP_ROW,
+        original_duration_seconds: 240,
+        trim_end_seconds: 240,
+      }),
     ).rejects.toBeInstanceOf(VideoBgRemovalValidationError);
   });
 
   it('rounds to 3 decimals', async () => {
     await expect(
-      resolveBillableDuration({ ...OWNED_CLIP_ROW, original_duration_seconds: 26.6666 }),
+      resolveBillableDuration({
+        ...OWNED_CLIP_ROW,
+        original_duration_seconds: 26.6666,
+        trim_end_seconds: 26.6666,
+      }),
     ).resolves.toBe(26.667);
   });
 });
@@ -395,6 +446,7 @@ describe('applyBackgroundRemovalToClip', () => {
   const JOB = {
     id: 'job-1',
     source_clip_id: 'clip-1',
+    duration_seconds: 5,
   } as unknown as VideoBackgroundRemovalJob;
 
   // db.execute builds the query descriptors that db.batch then runs as one Neon transaction, so
@@ -431,6 +483,23 @@ describe('applyBackgroundRemovalToClip', () => {
     await applyBackgroundRemovalToClip({ job: JOB, outputR2Key: 'out.mov' });
     expect(deepSql((mockDb.execute as jest.Mock).mock.calls[0][0])).toContain('COALESCE');
   });
+
+  // The processed media contains ONLY the visible window, so the clip has to be rebased onto it.
+  it('rebases the clip onto the processed window and captures the prior trim bounds', async () => {
+    wireHappyPath();
+    await applyBackgroundRemovalToClip({ job: JOB, outputR2Key: 'out.mov' });
+    const [capture, swap] = (mockDb.execute as jest.Mock).mock.calls.map((call) => deepSql(call[0]));
+
+    // All four undo values captured, not just the key.
+    expect(capture).toContain('source_prior_r2_key');
+    expect(capture).toContain('source_prior_trim_start_seconds');
+    expect(capture).toContain('source_prior_trim_end_seconds');
+    expect(capture).toContain('source_prior_original_duration_seconds');
+
+    expect(swap).toContain('trim_start_seconds = ');
+    expect(swap).toContain('trim_end_seconds = ');
+    expect(swap).toContain('original_duration_seconds = ');
+  });
 });
 
 // ─── Refund ───────────────────────────────────────────────────────────────────
@@ -464,6 +533,39 @@ describe('undoBackgroundRemoval', () => {
     source_prior_r2_key: 'clips/clip-1.mp4',
     output_r2_key: 'video-background-removal/job-1/output.mov',
   };
+
+  // A rebasing (Bria) job records source_prior_original_duration_seconds; undo must put all the
+  // trim bounds back, not just the media key.
+  it('restores the prior trim bounds for a job that rebased them', async () => {
+    (mockDb.select as jest.Mock).mockReturnValueOnce(makePlainSelectChain([{
+      ...COMPLETED_JOB,
+      source_prior_trim_start_seconds: 120,
+      source_prior_trim_end_seconds: 125,
+      source_prior_original_duration_seconds: 300,
+    }]));
+    (mockDb.execute as jest.Mock).mockResolvedValueOnce({ rows: [{ r2_key: 'clips/clip-1.mp4' }] });
+
+    await undoBackgroundRemoval('job-1', 'user-1');
+    const statement = deepSql((mockDb.execute as jest.Mock).mock.calls[0][0]);
+    expect(statement).toContain('trim_start_seconds = ');
+    expect(statement).toContain('trim_end_seconds = ');
+    expect(statement).toContain('original_duration_seconds = ');
+  });
+
+  // The Apple Vision on-device path processes the WHOLE file and never moves the trim bounds.
+  // Restoring bounds it never touched would corrupt the clip, so the fragment must stay empty.
+  it('does NOT touch trim bounds for a non-rebasing (on-device) job', async () => {
+    (mockDb.select as jest.Mock).mockReturnValueOnce(makePlainSelectChain([{
+      ...COMPLETED_JOB,
+      source_prior_original_duration_seconds: null,
+    }]));
+    (mockDb.execute as jest.Mock).mockResolvedValueOnce({ rows: [{ r2_key: 'clips/clip-1.mp4' }] });
+
+    await undoBackgroundRemoval('job-1', 'user-1');
+    const statement = deepSql((mockDb.execute as jest.Mock).mock.calls[0][0]);
+    expect(statement).not.toContain('trim_start_seconds');
+    expect(statement).not.toContain('original_duration_seconds');
+  });
 
   it('restores the original media', async () => {
     (mockDb.select as jest.Mock).mockReturnValueOnce(makePlainSelectChain([COMPLETED_JOB]));

@@ -28,7 +28,13 @@ jest.mock('../../config', () => ({
 }));
 
 import type { ComposeSpec } from '../../queue/ffmpegWorker';
-import { buildComposeArgs, resolveComposeCanvas } from '../../queue/ffmpegProcessor';
+import {
+  atempoChain,
+  audioTailSeconds,
+  buildComposeArgs,
+  resolveComposeCanvas,
+  speedSegments,
+} from '../../queue/ffmpegProcessor';
 
 function baseSpec(overrides: Partial<ComposeSpec> = {}): ComposeSpec {
   return {
@@ -65,7 +71,7 @@ describe('buildComposeArgs', () => {
     const graph = filterComplexOf(args);
 
     expect(graph.match(/scale=1080:1920/g)).toHaveLength(2);
-    expect(graph.match(/pad=1080:1920/g)).toHaveLength(2);
+    expect(graph.match(/pad=w='max\(iw,1080\)/g)).toHaveLength(2);
     expect(graph).toContain('concat=n=2:v=1:a=1');
 
     // Never the concat demuxer path.
@@ -96,6 +102,92 @@ describe('buildComposeArgs', () => {
 
     expect(graph).toContain('asetpts=PTS-STARTPTS,volume=0.35[a0]');
     expect(graph).toContain('asetpts=PTS-STARTPTS,volume=1[a1]');
+  });
+
+  it('applies per-clip scale and normalized position before cropping to the canvas', () => {
+    const spec = baseSpec({
+      clips: [{ ...baseSpec().clips[0], scale: 1.75, xNorm: 0.75, yNorm: 0.25 }],
+    });
+    const graph = filterComplexOf(buildComposeArgs({
+      spec,
+      clipPaths: ['/tmp/clip0.mp4'],
+      audioPaths: [],
+      assPath: null,
+      textOverlayAssPath: null,
+      fontsDir: '/app/assets/fonts',
+      outPath: '/tmp/out.mp4',
+    }));
+
+    expect(graph).toContain('scale=iw*1.75:ih*1.75');
+    expect(graph).toContain("pad=w='max(iw,1080)+2*abs(270)'");
+    expect(graph).toContain("h='max(ih,1920)+2*abs(-480)'");
+    expect(graph).toContain("x='(ow-iw)/2+270':y='(oh-ih)/2+-480'");
+    expect(graph).toContain('crop=1080:1920:(iw-1080)/2:(ih-1920)/2');
+  });
+
+  describe('clip speed', () => {
+    it('retimes uniform-speed video and pitch-preserving audio together', () => {
+      const spec = baseSpec({
+        clips: [{ ...baseSpec().clips[0], playbackRate: 2 }],
+      });
+      const graph = filterComplexOf(buildComposeArgs({
+        spec,
+        clipPaths: ['/tmp/clip0.mp4'],
+        audioPaths: [],
+        assPath: null,
+        textOverlayAssPath: null,
+        fontsDir: '/app/assets/fonts',
+        outPath: '/tmp/out.mp4',
+      }));
+
+      expect(graph).toContain('setpts=(PTS-STARTPTS)/2');
+      expect(graph).toContain('atempo=2.000000');
+      expect(speedSegments(4, 2).at(-1)?.renderedEnd).toBe(2);
+    });
+
+    it('samples a variable curve into the same bounded 16-slice graph used by iOS', () => {
+      const curve = [{ position: 0, rate: 0.5 }, { position: 1, rate: 2 }];
+      const segments = speedSegments(8, 1, curve);
+      expect(segments).toHaveLength(16);
+      expect(segments[0].sourceStart).toBe(0);
+      expect(segments.at(-1)?.sourceEnd).toBe(8);
+      expect(segments.every((segment) => segment.renderedEnd > segment.renderedStart)).toBe(true);
+
+      const spec = baseSpec({
+        clips: [{ ...baseSpec().clips[0], speedCurve: curve }],
+      });
+      const graph = filterComplexOf(buildComposeArgs({
+        spec,
+        clipPaths: ['/tmp/clip0.mp4'],
+        audioPaths: [],
+        assPath: null,
+        textOverlayAssPath: null,
+        fontsDir: '/app/assets/fonts',
+        outPath: '/tmp/out.mp4',
+      }));
+      expect(graph).toContain('concat=n=16:v=1:a=1[v0][a0]');
+    });
+
+    it('chains legal atempo stages for the full 0.1x...10x range', () => {
+      for (const rate of [0.1, 0.2, 0.5, 1, 2, 5, 10]) {
+        const factors = atempoChain(rate).split(',').map((part) => Number(part.split('=')[1]));
+        expect(factors.every((factor) => factor >= 0.5 && factor <= 2)).toBe(true);
+        expect(factors.reduce((product, factor) => product * factor, 1)).toBeCloseTo(rate, 5);
+      }
+    });
+
+    it('uses rendered speed duration when calculating a trailing independent-audio pad', () => {
+      const spec = baseSpec({
+        clips: [{ ...baseSpec().clips[0], playbackRate: 2 }],
+        audioClips: [{
+          r2Key: 'projects/p1/audio/a.m4a',
+          startOffsetSeconds: 0,
+          trimStartSeconds: 0,
+          trimEndSeconds: 3,
+        }],
+      });
+      expect(audioTailSeconds(spec)).toBe(1);
+    });
   });
 
   it('honors the 1080p-cap canvas table for every aspect ratio', () => {

@@ -33,8 +33,12 @@ import { db } from '../../db/client';
 import { r2 } from '../../storage/r2';
 import { aiMusicRouter } from '../../routes/aiMusic';
 import {
+  AI_MUSIC_AGE_TERMS_VERSION,
   attachSoundtrack,
+  createSoundtrackGeneration,
+  ensureAIMusicAgeTermsAccepted,
   fingerprintSnapshot,
+  getSoundtrackQuote,
   quoteSoundtrack,
   type SoundtrackProjectSnapshot,
 } from '../../services/soundtrackService';
@@ -89,6 +93,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   r2Mock.send.mockResolvedValue({});
   dbMock.insert.mockReturnValue(makeChain([]));
+  dbMock.update.mockReturnValue(makeChain([]));
   dbMock.batch.mockImplementation(async (queries: PromiseLike<unknown>[]) => Promise.all(queries));
 });
 
@@ -126,6 +131,87 @@ describe('AI Music quote and fingerprint', () => {
     };
     expect(fingerprintSnapshot(snapshot)).toBe(fingerprintSnapshot(structuredClone(snapshot)));
     expect(fingerprintSnapshot({ ...snapshot, duration_seconds: 5.1 })).not.toBe(fingerprintSnapshot(snapshot));
+  });
+
+  it('tells a guest to show the attestation until the current version is accepted', async () => {
+    dbMock.select
+      .mockReturnValueOnce(makeChain([{ id: 'project-1', title: 'Test' }]))
+      .mockReturnValueOnce(makeChain([{
+        id: 'clip-1',
+        type: 'video',
+        sortOrder: 0,
+        r2Key: 'projects/test/clip.mp4',
+        trimStart: 0,
+        trimEnd: 5,
+        originalDuration: 5,
+      }]))
+      .mockReturnValueOnce(makeChain([{ ageTermsVersion: null }]));
+
+    await expect(getSoundtrackQuote('project-1', 'user-1')).resolves.toMatchObject({
+      age_terms_required: true,
+      age_terms_version: AI_MUSIC_AGE_TERMS_VERSION,
+    });
+  });
+});
+
+describe('AI Music age and Terms attestation', () => {
+  it('blocks the real create path before the atomic credit query', async () => {
+    dbMock.select
+      .mockReturnValueOnce(makeChain([{ id: 'project-1', title: 'Test' }]))
+      .mockReturnValueOnce(makeChain([{
+        id: 'clip-1',
+        type: 'video',
+        sortOrder: 0,
+        r2Key: 'projects/test/clip.mp4',
+        trimStart: 0,
+        trimEnd: 5,
+        originalDuration: 5,
+      }]))
+      .mockReturnValueOnce(makeChain([]))
+      .mockReturnValueOnce(makeChain([{ ageTermsVersion: null }]));
+
+    await expect(createSoundtrackGeneration({
+      projectId: 'project-1',
+      userId: 'user-1',
+      idempotencyKey: 'request-1',
+      soundMode: 'instrumental',
+    })).rejects.toMatchObject({ name: 'AIMusicAgeTermsRequiredError' });
+
+    expect(dbMock.execute).not.toHaveBeenCalled();
+  });
+
+  it('rejects a new creation without recording or deducting anything', async () => {
+    dbMock.select.mockReturnValueOnce(makeChain([{ ageTermsVersion: null }]));
+
+    await expect(ensureAIMusicAgeTermsAccepted('user-1')).rejects.toMatchObject({
+      name: 'AIMusicAgeTermsRequiredError',
+      requiredVersion: AI_MUSIC_AGE_TERMS_VERSION,
+    });
+    expect(dbMock.update).not.toHaveBeenCalled();
+    expect(dbMock.execute).not.toHaveBeenCalled();
+  });
+
+  it('records the exact current version for a silent guest session', async () => {
+    dbMock.select.mockReturnValueOnce(makeChain([{ ageTermsVersion: null }]));
+
+    await ensureAIMusicAgeTermsAccepted('user-1', AI_MUSIC_AGE_TERMS_VERSION);
+
+    expect(dbMock.update).toHaveBeenCalledTimes(1);
+    const setCall = (dbMock.update.mock.results[0]?.value as { set: jest.Mock }).set;
+    expect(setCall).toHaveBeenCalledWith(expect.objectContaining({
+      age_terms_version: AI_MUSIC_AGE_TERMS_VERSION,
+      age_terms_accepted_at: expect.any(Date),
+    }));
+  });
+
+  it('does not rewrite acceptance that is already current', async () => {
+    dbMock.select.mockReturnValueOnce(makeChain([{
+      ageTermsVersion: AI_MUSIC_AGE_TERMS_VERSION,
+    }]));
+
+    await ensureAIMusicAgeTermsAccepted('user-1');
+
+    expect(dbMock.update).not.toHaveBeenCalled();
   });
 });
 

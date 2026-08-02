@@ -145,6 +145,24 @@ export async function mergeUser(
           total_generations = target.total_generations + source.total_generations,
           moderation_strikes = GREATEST(target.moderation_strikes, source.moderation_strikes),
           banned = target.banned OR source.banned,
+          age_terms_version = CASE
+            WHEN source.age_terms_accepted_at IS NOT NULL
+              AND (
+                target.age_terms_accepted_at IS NULL
+                OR source.age_terms_accepted_at > target.age_terms_accepted_at
+              )
+              THEN source.age_terms_version
+            ELSE target.age_terms_version
+          END,
+          age_terms_accepted_at = CASE
+            WHEN source.age_terms_accepted_at IS NOT NULL
+              AND (
+                target.age_terms_accepted_at IS NULL
+                OR source.age_terms_accepted_at > target.age_terms_accepted_at
+              )
+              THEN source.age_terms_accepted_at
+            ELSE target.age_terms_accepted_at
+          END,
           updated_at = now()
       FROM record_merge AS merge, users AS source
       WHERE target.id = merge.to_user_id
@@ -168,6 +186,8 @@ export async function mergeUser(
           moderation_strikes = 0,
           onboarding_preferences = NULL,
           face_consent_at = NULL,
+          age_terms_version = NULL,
+          age_terms_accepted_at = NULL,
           updated_at = now()
       FROM record_merge AS merge
       WHERE source.id = merge.from_user_id

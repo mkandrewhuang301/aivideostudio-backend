@@ -1299,6 +1299,18 @@ export async function insertProjectAudioClipWithCapacity(
             FROM project_audio_clips
             WHERE project_id = ${projectId}::uuid AND deleted_at IS NULL
           )`.as('sort_order'),
+          // Drizzle's INSERT ... SELECT requires the projection to match every table column in
+          // schema order. These mix/stem fields were added after this atomic capacity insert and
+          // relying on their table defaults makes Drizzle reject the query before PostgreSQL.
+          enabled: sql<boolean>`true`.as('enabled'),
+          gain: sql<number>`1`.as('gain'),
+          label: sql<string | null>`null`.as('label'),
+          prompt: sql<string | null>`null`.as('prompt'),
+          source_clip_id: sql<string | null>`null::uuid`.as('source_clip_id'),
+          separation_job_id: sql<string | null>`null::uuid`.as('separation_job_id'),
+          separation_role: sql<string | null>`null`.as('separation_role'),
+          parent_audio_clip_id: sql<string | null>`null::uuid`.as('parent_audio_clip_id'),
+          separation_depth: sql<number>`0`.as('separation_depth'),
           deleted_at: sql<Date | null>`null`.as('deleted_at'),
           created_at: sql<Date>`now()`.as('created_at'),
         })
@@ -1996,6 +2008,9 @@ export async function buildComposeSnapshot(projectId: string, userId: string): P
       trimStartSeconds: c.trim_start_seconds,
       trimEndSeconds,
       volume: c.volume,
+      scale: c.scale,
+      xNorm: c.x_norm,
+      yNorm: c.y_norm,
       playbackRate: c.playback_rate,
       speedCurve: c.speed_curve,
     };

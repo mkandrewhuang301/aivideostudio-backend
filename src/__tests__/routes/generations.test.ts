@@ -286,6 +286,7 @@ const VALID_BODY = {
 beforeEach(() => {
   jest.clearAllMocks();
   (db.execute as jest.Mock).mockResolvedValue({ rows: [] });
+  (getGenerationPresignedUrl as jest.Mock).mockResolvedValue('https://r2.example.com/presigned');
 });
 
 // ─── POST /api/generations — video ────────────────────────────────────────────
@@ -1246,6 +1247,29 @@ describe('POST /api/generations — reference URL re-signing', () => {
       'https://r2.example.com/fresh-signed-ref?X-Amz-Expires=3600', // re-signed
     ]);
   });
+
+  it('persists a direct generation reference so history cards retain its thumbnail', async () => {
+    (getGenerationById as jest.Mock).mockResolvedValue({
+      id: 'source-generation-id',
+      user_id: 'test-user-id',
+      status: 'completed',
+      r2_key: 'generations/test-user-id/source.png',
+    });
+
+    const res = await request(app).post('/api/generations').send({
+      ...VALID_BODY,
+      reference_images: ['https://r2.example.com/old-source-url.png'],
+      reference_image_generation_ids: ['source-generation-id'],
+    });
+
+    expect(res.status).toBe(200);
+    expect(createGeneration).toHaveBeenCalledWith(expect.objectContaining({
+      params: expect.objectContaining({
+        ref_image_generation_ids: ['source-generation-id'],
+        ref_video_generation_ids: [],
+      }),
+    }));
+  });
 });
 
 // ─── POST /api/generations — presets (09.1-04: presetResolver) ───────────────
@@ -1985,6 +2009,37 @@ describe('GET /api/generations', () => {
     expect(getGenerationPresignedUrl).toHaveBeenCalledWith('generations/gen-001.mp4');
     expect(res.body.items[1].video_url).toBeNull();
     expect(res.body.nextCursor).toBeNull();
+  });
+
+  it('returns reference_urls for references sourced directly from another generation', async () => {
+    (listGenerations as jest.Mock).mockResolvedValue([{
+      ...completedItem,
+      params: {
+        ref_image_generation_ids: ['source-generation-id'],
+        ref_video_generation_ids: [],
+      },
+    }]);
+    (db.select as jest.Mock).mockReturnValue({
+      from: jest.fn(() => ({
+        where: jest.fn().mockResolvedValue([{
+          id: 'source-generation-id',
+          user_id: 'test-user-id',
+          status: 'completed',
+          r2_key: 'generations/test-user-id/source.png',
+        }]),
+      })),
+    });
+    (getGenerationPresignedUrl as jest.Mock).mockImplementation((key: string) =>
+      Promise.resolve(`https://r2.example.com/signed/${key}`),
+    );
+
+    const res = await request(app).get('/api/generations');
+
+    expect(res.status).toBe(200);
+    expect(res.body.items[0].reference_urls).toEqual([{
+      url: 'https://r2.example.com/signed/generations/test-user-id/source.png',
+      isVideo: false,
+    }]);
   });
 
   it('returns 401 when no auth token', async () => {

@@ -60,6 +60,11 @@ export interface ComposeClipSpec {
   trimEndSeconds: number;
   /** Linear source-audio gain. Optional only for backward compatibility with already-queued jobs. */
   volume?: number;
+  /** Centered visual scale: 1 = aspect-fit, below 1 shrinks, above 1 crops. */
+  scale?: number;
+  /** Normalized center of the clip inside the output canvas. */
+  xNorm?: number;
+  yNorm?: number;
   /** Uniform source-speed multiplier. Defaults to 1 for already-queued jobs. */
   playbackRate?: number;
   /** Piecewise-linear source-speed curve. When valid, supersedes playbackRate. */

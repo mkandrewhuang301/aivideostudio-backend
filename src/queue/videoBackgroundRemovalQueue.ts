@@ -5,9 +5,18 @@
 // failure via a Redis NX guard (CLAUDE.md rule #5 idiom). Closest analog:
 // audioSeparationQueue.ts, whose Queue+Worker+on('failed') skeleton is copied.
 
+import { execFile } from 'child_process';
+import { promisify } from 'node:util';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { Job, Queue, Worker } from 'bullmq';
 import { config } from '../config';
-import { getGenerationPresignedUrl, uploadBufferToR2 } from '../services/archivalService';
+import {
+  getGenerationPresignedUrl,
+  getUploadPresignedUrl,
+  uploadBufferToR2,
+} from '../services/archivalService';
 import {
   applyBackgroundRemovalToClip,
   completeBgRemoval,
@@ -27,6 +36,8 @@ import type {
   VideoBackgroundRemovalResult,
 } from '../services/providers/VideoBackgroundRemovalProvider';
 import { redis } from '../redis/client';
+
+const execFileAsync = promisify(execFile);
 
 const QUEUE_NAME = 'video-background-removal';
 const connection = {
@@ -49,6 +60,66 @@ export const videoBackgroundRemovalQueue = new Queue<VideoBackgroundRemovalJobPa
   },
 });
 
+/**
+ * Downloads the source clip, cuts ONLY the visible (trimmed) window, uploads that slice under a
+ * job-scoped R2 key, and returns a short-lived presigned URL for the provider.
+ *
+ * This is what makes trimmed-window billing honest: the user is charged for
+ * `job.duration_seconds`, so that is exactly the span the provider is given. Sending the full
+ * source would bill a 5-minute upload for 5 minutes of work to produce 5 visible seconds — and
+ * would blow past the max-duration guard on any long source.
+ *
+ * `-ss` before `-i` seeks the input (fast); re-encoding rather than stream-copying is deliberate,
+ * since a copy would snap the cut to the nearest keyframe and desync the window the user was
+ * quoted for. Mirrors audioSeparationQueue.prepareTrimmedSeparationInput.
+ */
+async function prepareTrimmedRemovalInput(input: {
+  jobId: string;
+  r2Key: string;
+  trimStartSeconds: number;
+  durationSeconds: number;
+}): Promise<string> {
+  const tempDir = await mkdtemp(path.join(tmpdir(), 'video-bg-'));
+  try {
+    const ext = path.extname(input.r2Key) || '.mp4';
+    const sourcePath = path.join(tempDir, `source${ext}`);
+    const windowPath = path.join(tempDir, 'window.mp4');
+
+    const sourceUrl = await getGenerationPresignedUrl(input.r2Key);
+    const response = await fetch(sourceUrl);
+    if (!response.ok) {
+      throw new VideoBackgroundRemovalProviderError(
+        `Failed to download source clip (${response.status})`,
+        true,
+        'fetch_failed',
+      );
+    }
+    await writeFile(sourcePath, Buffer.from(await response.arrayBuffer()));
+
+    await execFileAsync('ffmpeg', [
+      '-y',
+      '-ss', String(Math.max(0, input.trimStartSeconds)),
+      '-t', String(Math.max(0.05, input.durationSeconds)),
+      '-i', sourcePath,
+      '-c:v', 'libx264',
+      '-preset', 'veryfast',
+      '-crf', '18',
+      '-pix_fmt', 'yuv420p',
+      '-c:a', 'aac',
+      '-movflags', '+faststart',
+      windowPath,
+    ]);
+
+    const inputKey = `video-background-removal/${input.jobId}/source-window.mp4`;
+    await uploadBufferToR2(await readFile(windowPath), inputKey, 'video/mp4');
+    // 1h upload TTL is enough for the provider to fetch; the generation TTL is overkill for this
+    // ephemeral key.
+    return getUploadPresignedUrl(inputKey);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+}
+
 export async function processVideoBackgroundRemoval(
   job: Job<VideoBackgroundRemovalJobPayload>,
 ): Promise<void> {
@@ -62,9 +133,11 @@ export async function processVideoBackgroundRemoval(
   // Re-read the source through the ownership-scoped path so a clip deleted between enqueue and
   // execution fails non-retryably instead of burning all three attempts.
   let sourceR2Key: string;
+  let trimStartSeconds: number;
   try {
     const clip = await verifyClipOwnership(row.source_clip_id, row.user_id);
     sourceR2Key = clip.r2_key;
+    trimStartSeconds = clip.trim_start_seconds ?? 0;
   } catch (error) {
     if (error instanceof VideoBgRemovalNotFoundError) {
       job.discard();
@@ -77,9 +150,20 @@ export async function processVideoBackgroundRemoval(
     throw error;
   }
 
-  // The WHOLE source clip is processed, not the trimmed window — see the timebase-preservation
-  // rationale in videoBackgroundRemovalService.ts's header. This is also exactly what was billed.
-  const videoUrl = await getGenerationPresignedUrl(sourceR2Key);
+  // Only the VISIBLE window goes to the provider — the exact span the user was quoted and
+  // charged for (row.duration_seconds).
+  let videoUrl: string;
+  try {
+    videoUrl = await prepareTrimmedRemovalInput({
+      jobId: id,
+      r2Key: sourceR2Key,
+      trimStartSeconds,
+      durationSeconds: row.duration_seconds,
+    });
+  } catch (error) {
+    if (error instanceof VideoBackgroundRemovalProviderError && !error.retryable) job.discard();
+    throw error;
+  }
 
   let result: VideoBackgroundRemovalResult;
   try {

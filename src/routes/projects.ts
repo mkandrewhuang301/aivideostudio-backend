@@ -649,6 +649,9 @@ projectsRouter.patch('/:id/clips/:clipId', async (req: Request, res: Response) =
     trim_start_seconds,
     trim_end_seconds,
     volume,
+    scale,
+    x_norm,
+    y_norm,
     playback_rate,
     speed_curve,
   } = req.body ?? {};
@@ -693,6 +696,27 @@ projectsRouter.patch('/:id/clips/:clipId', async (req: Request, res: Response) =
         return;
       }
       setValues.volume = volume;
+    }
+    if (scale !== undefined) {
+      if (typeof scale !== 'number' || !Number.isFinite(scale) || scale < 0.25 || scale > 4) {
+        res.status(400).json({ error: 'scale must be a finite number between 0.25 and 4' });
+        return;
+      }
+      setValues.scale = scale;
+    }
+    if (x_norm !== undefined) {
+      if (typeof x_norm !== 'number' || !Number.isFinite(x_norm) || x_norm < 0 || x_norm > 1) {
+        res.status(400).json({ error: 'x_norm must be a finite number between 0 and 1' });
+        return;
+      }
+      setValues.x_norm = x_norm;
+    }
+    if (y_norm !== undefined) {
+      if (typeof y_norm !== 'number' || !Number.isFinite(y_norm) || y_norm < 0 || y_norm > 1) {
+        res.status(400).json({ error: 'y_norm must be a finite number between 0 and 1' });
+        return;
+      }
+      setValues.y_norm = y_norm;
     }
     if (playback_rate !== undefined) {
       if (
@@ -1520,6 +1544,9 @@ projectsRouter.post('/:id/audio', audioUpload.single('file'), async (req: Reques
     const startOffsetSeconds = parseOptionalNumber(req.body?.start_offset_seconds);
     const trimStartSeconds = parseOptionalNumber(req.body?.trim_start_seconds);
     const trimEndSeconds = parseOptionalNumber(req.body?.trim_end_seconds);
+    const displayName = typeof req.body?.display_name === 'string'
+      ? req.body.display_name.trim() || undefined
+      : undefined;
 
     let r2Key: string;
     let sourceType: 'upload' | 'preset';
@@ -1580,9 +1607,12 @@ projectsRouter.post('/:id/audio', audioUpload.single('file'), async (req: Reques
     const audioClip = await addAudioClip(projectId, req.user.dbUserId, {
       r2Key,
       sourceType,
+      displayName,
       startOffsetSeconds,
       trimStartSeconds,
-      trimEndSeconds,
+      // An untrimmed upload spans the whole probed file. Persist that resolved end so both old
+      // and new clients draw the correct pill width immediately after the mutation response.
+      trimEndSeconds: trimEndSeconds ?? originalDurationSeconds,
       originalDurationSeconds,
     });
     if (!audioClip) {

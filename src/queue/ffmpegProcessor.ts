@@ -26,6 +26,7 @@ import type {
   ExplainerComposeSpec,
   SummaryComposeSpec,
   SummarySourceFraming,
+  SpeedCurvePoint,
 } from './ffmpegWorker';
 
 const execFileAsync = promisify(execFile);
@@ -109,6 +110,160 @@ export interface BuildComposeArgsInput {
   outPath: string;
 }
 
+export interface SpeedSegment {
+  sourceStart: number;
+  sourceEnd: number;
+  renderedStart: number;
+  renderedEnd: number;
+  rate: number;
+}
+
+function normalizedPlaybackRate(rate: number | null | undefined): number {
+  if (rate == null || !Number.isFinite(rate)) return 1;
+  return Math.min(Math.max(rate, 0.1), 10);
+}
+
+/**
+ * Canonical speed-curve normalization. The iOS composition builder intentionally mirrors this
+ * exact contract so preview, timeline math, and server export use the same safe curve.
+ */
+export function normalizedSpeedCurve(
+  points: SpeedCurvePoint[] | null | undefined,
+): SpeedCurvePoint[] | null {
+  if (!points || points.length < 2) return null;
+  const sorted = points
+    .filter((point) => Number.isFinite(point.position) && Number.isFinite(point.rate))
+    .map((point) => ({
+      position: Math.min(Math.max(point.position, 0), 1),
+      rate: normalizedPlaybackRate(point.rate),
+    }))
+    .sort((a, b) => a.position - b.position);
+
+  const deduplicated: SpeedCurvePoint[] = [];
+  for (const point of sorted) {
+    const last = deduplicated.at(-1);
+    if (last && Math.abs(last.position - point.position) < 0.0001) {
+      deduplicated[deduplicated.length - 1] = point;
+    } else {
+      deduplicated.push(point);
+    }
+  }
+  if (deduplicated.length < 2) return null;
+  if (deduplicated[0].position > 0) {
+    deduplicated.unshift({ position: 0, rate: deduplicated[0].rate });
+  } else {
+    deduplicated[0].position = 0;
+  }
+  const last = deduplicated[deduplicated.length - 1];
+  if (last.position < 1) {
+    deduplicated.push({ position: 1, rate: last.rate });
+  } else {
+    last.position = 1;
+  }
+  return deduplicated;
+}
+
+/**
+ * Piecewise-constant approximation of a linearly-interpolated curve. Sixteen source slices per
+ * clip keeps the graph bounded while looking smooth; this exact midpoint sampling rule is shared
+ * with EditorCompositionBuilder on iOS.
+ */
+export function speedSegments(
+  sourceDuration: number,
+  playbackRate = 1,
+  speedCurve?: SpeedCurvePoint[] | null,
+): SpeedSegment[] {
+  if (!Number.isFinite(sourceDuration) || sourceDuration <= 0) return [];
+  const curve = normalizedSpeedCurve(speedCurve);
+  if (!curve) {
+    const rate = normalizedPlaybackRate(playbackRate);
+    return [{
+      sourceStart: 0,
+      sourceEnd: sourceDuration,
+      renderedStart: 0,
+      renderedEnd: sourceDuration / rate,
+      rate,
+    }];
+  }
+
+  const segments: SpeedSegment[] = [];
+  let renderedCursor = 0;
+  for (let pointIndex = 0; pointIndex < curve.length - 1; pointIndex++) {
+    const lower = curve[pointIndex];
+    const upper = curve[pointIndex + 1];
+    const fractionSpan = upper.position - lower.position;
+    if (fractionSpan <= 0) continue;
+    const subdivisions = Math.max(1, Math.ceil(fractionSpan * 16));
+    for (let subdivision = 0; subdivision < subdivisions; subdivision++) {
+      const localStart = subdivision / subdivisions;
+      const localEnd = (subdivision + 1) / subdivisions;
+      const fractionStart = lower.position + fractionSpan * localStart;
+      const fractionEnd = lower.position + fractionSpan * localEnd;
+      const midpoint = (localStart + localEnd) / 2;
+      const rate = normalizedPlaybackRate(lower.rate + (upper.rate - lower.rate) * midpoint);
+      const sourceStart = fractionStart * sourceDuration;
+      const sourceEnd = fractionEnd * sourceDuration;
+      const renderedDuration = (sourceEnd - sourceStart) / rate;
+      segments.push({
+        sourceStart,
+        sourceEnd,
+        renderedStart: renderedCursor,
+        renderedEnd: renderedCursor + renderedDuration,
+        rate,
+      });
+      renderedCursor += renderedDuration;
+    }
+  }
+  return segments;
+}
+
+function renderedClipDuration(clip: ComposeSpec['clips'][number]): number {
+  const sourceDuration = Math.max(0, clip.trimEndSeconds - clip.trimStartSeconds);
+  return speedSegments(sourceDuration, clip.playbackRate, clip.speedCurve).at(-1)?.renderedEnd ?? 0;
+}
+
+/** ffmpeg's atempo accepts 0.5...2.0 per stage, so extreme 0.1x...10x rates need chaining. */
+export function atempoChain(rate: number): string {
+  let remaining = normalizedPlaybackRate(rate);
+  const factors: number[] = [];
+  while (remaining < 0.5 - 1e-9) {
+    factors.push(0.5);
+    remaining /= 0.5;
+  }
+  while (remaining > 2 + 1e-9) {
+    factors.push(2);
+    remaining /= 2;
+  }
+  factors.push(remaining);
+  return factors.map((factor) => `atempo=${factor.toFixed(6)}`).join(',');
+}
+
+function filterNumber(value: number): string {
+  return Number(value.toFixed(6)).toString();
+}
+
+/** Aspect-fit followed by per-clip scale/position and a crop back to the project canvas. */
+function clipCanvasFilter(
+  width: number,
+  height: number,
+  requestedScale?: number,
+  requestedXNorm?: number,
+  requestedYNorm?: number,
+): string {
+  const scale = Math.min(Math.max(requestedScale ?? 1, 0.25), 4);
+  const xNorm = Math.min(Math.max(requestedXNorm ?? 0.5, 0), 1);
+  const yNorm = Math.min(Math.max(requestedYNorm ?? 0.5, 0), 1);
+  const dx = filterNumber((xNorm - 0.5) * width);
+  const dy = filterNumber((yNorm - 0.5) * height);
+  return [
+    `scale=${width}:${height}:force_original_aspect_ratio=decrease`,
+    `scale=iw*${filterNumber(scale)}:ih*${filterNumber(scale)}`,
+    `pad=w='max(iw,${width})+2*abs(${dx})':h='max(ih,${height})+2*abs(${dy})':x='(ow-iw)/2+${dx}':y='(oh-ih)/2+${dy}':color=black`,
+    `crop=${width}:${height}:(iw-${width})/2:(ih-${height})/2`,
+    'setsar=1',
+  ].join(',');
+}
+
 /**
  * How far the project's audio runs past its last video frame, in seconds — 0 whenever the video is
  * the longest thing in the project (the common case).
@@ -124,7 +279,7 @@ export function audioTailSeconds(spec: ComposeSpec): number {
   // padding on top of that would double-count the tail and produce a file twice as long.
   if (spec.clips.length === 0) return 0;
   const videoEnd = spec.clips.reduce(
-    (sum, clip) => sum + Math.max(0, clip.trimEndSeconds - clip.trimStartSeconds),
+    (sum, clip) => sum + renderedClipDuration(clip),
     0,
   );
   return Math.max(0, audioEndSeconds(spec) - videoEnd);
@@ -178,23 +333,49 @@ export function buildComposeArgs(input: BuildComposeArgsInput): string[] {
   // Per-clip video/audio input args + normalize (trim/scale/pad) filter chains.
   spec.clips.forEach((clip, i) => {
     const clipPath = clipPaths[i];
-    const duration = Math.max(0, clip.trimEndSeconds - clip.trimStartSeconds);
+    const sourceDuration = Math.max(0, clip.trimEndSeconds - clip.trimStartSeconds);
+    const segments = speedSegments(sourceDuration, clip.playbackRate, clip.speedCurve);
+    const duration = segments.at(-1)?.renderedEnd ?? 0;
     if (clip.mediaType === 'image') {
       // No native duration/audio track on a still image — loop it for the clip's trim duration
       // and synthesize a silent audio stream so concat's a=1 (uniform audio-stream-per-input
       // requirement) stays satisfied alongside the real video clips.
       args.push('-loop', '1', '-t', String(duration), '-i', clipPath);
       filterParts.push(
-        `[${i}:v]setpts=PTS-STARTPTS,scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1[v${i}]`,
+        `[${i}:v]setpts=PTS-STARTPTS,${clipCanvasFilter(width, height, clip.scale, clip.xNorm, clip.yNorm)}[v${i}]`,
       );
       filterParts.push(`anullsrc=channel_layout=stereo:sample_rate=44100:duration=${duration}[a${i}]`);
     } else {
       args.push('-i', clipPath);
+      const volume = Math.min(Math.max(clip.volume ?? 1, 0), 1);
+      const hasAdjustedSpeed =
+        normalizedSpeedCurve(clip.speedCurve) !== null
+        || Math.abs(normalizedPlaybackRate(clip.playbackRate) - 1) > 0.000001;
+      if (!hasAdjustedSpeed) {
+        // Preserve the pre-speed graph exactly for legacy/default jobs.
+        filterParts.push(
+          `[${i}:v]trim=start=${clip.trimStartSeconds}:end=${clip.trimEndSeconds},setpts=PTS-STARTPTS,${clipCanvasFilter(width, height, clip.scale, clip.xNorm, clip.yNorm)}[v${i}]`,
+        );
+        filterParts.push(
+          `[${i}:a]atrim=start=${clip.trimStartSeconds}:end=${clip.trimEndSeconds},asetpts=PTS-STARTPTS,volume=${volume}[a${i}]`,
+        );
+        return;
+      }
+      segments.forEach((segment, segmentIndex) => {
+        const sourceStart = clip.trimStartSeconds + segment.sourceStart;
+        const sourceEnd = clip.trimStartSeconds + segment.sourceEnd;
+        filterParts.push(
+          `[${i}:v]trim=start=${filterNumber(sourceStart)}:end=${filterNumber(sourceEnd)},setpts=(PTS-STARTPTS)/${filterNumber(segment.rate)},${clipCanvasFilter(width, height, clip.scale, clip.xNorm, clip.yNorm)}[v${i}s${segmentIndex}]`,
+        );
+        filterParts.push(
+          `[${i}:a]atrim=start=${filterNumber(sourceStart)}:end=${filterNumber(sourceEnd)},asetpts=PTS-STARTPTS,${atempoChain(segment.rate)},volume=${volume}[a${i}s${segmentIndex}]`,
+        );
+      });
+      const speedConcatInputs = segments
+        .map((_, segmentIndex) => `[v${i}s${segmentIndex}][a${i}s${segmentIndex}]`)
+        .join('');
       filterParts.push(
-        `[${i}:v]trim=start=${clip.trimStartSeconds}:end=${clip.trimEndSeconds},setpts=PTS-STARTPTS,scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1[v${i}]`,
-      );
-      filterParts.push(
-        `[${i}:a]atrim=start=${clip.trimStartSeconds}:end=${clip.trimEndSeconds},asetpts=PTS-STARTPTS,volume=${Math.min(Math.max(clip.volume ?? 1, 0), 1)}[a${i}]`,
+        `${speedConcatInputs}concat=n=${segments.length}:v=1:a=1[v${i}][a${i}]`,
       );
     }
   });

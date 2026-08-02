@@ -36,6 +36,7 @@ import {
   projectCaptionCues,
   projectCaptionWords,
   projectClips,
+  projectVideoOverlays,
   projects,
   projectTextOverlays,
   referenceUploads,
@@ -50,6 +51,7 @@ const tableNames = new Map<unknown, string>([
   [projectAudioClips, 'project_audio_clips'],
   [audioSeparationJobs, 'audio_separation_jobs'],
   [projectTextOverlays, 'project_text_overlays'],
+  [projectVideoOverlays, 'project_video_overlays'],
   [projectClips, 'project_clips'],
   [projects, 'projects'],
   [reports, 'reports'],
@@ -103,7 +105,14 @@ it('deletes every owned R2 key, batches DB deletes in FK order, then deletes Fir
   ]);
 
   const collectionSql = JSON.stringify(mockExecute.mock.calls[1][0]);
-  for (const source of ['generations', 'reference_uploads', 'projects', 'project_clips', 'project_audio_clips']) {
+  for (const source of [
+    'generations',
+    'reference_uploads',
+    'projects',
+    'project_clips',
+    'project_video_overlays',
+    'project_audio_clips',
+  ]) {
     expect(collectionSql).toContain(source);
   }
 
@@ -115,6 +124,7 @@ it('deletes every owned R2 key, batches DB deletes in FK order, then deletes Fir
     'project_audio_clips',
     'audio_separation_jobs',
     'project_text_overlays',
+    'project_video_overlays',
     'project_clips',
     'projects',
     'reports',
@@ -151,6 +161,7 @@ it('pseudonymizes the user and preserves CyberTipline-held generation media on a
     'project_audio_clips',
     'audio_separation_jobs',
     'project_text_overlays',
+    'project_video_overlays',
     'project_clips',
     'projects',
     'reports',

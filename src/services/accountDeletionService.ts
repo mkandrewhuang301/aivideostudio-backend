@@ -9,6 +9,7 @@ import {
   projectCaptionCues,
   projectCaptionWords,
   projectClips,
+  projectVideoOverlays,
   projects,
   projectTextOverlays,
   referenceUploads,
@@ -39,6 +40,10 @@ async function collectUserR2Keys(dbUserId: string): Promise<string[]> {
     UNION ALL
     SELECT pc.r2_key FROM project_clips pc
       INNER JOIN projects p ON p.id = pc.project_id
+      WHERE p.user_id = ${dbUserId}::uuid
+    UNION ALL
+    SELECT pvo.r2_key FROM project_video_overlays pvo
+      INNER JOIN projects p ON p.id = pvo.project_id
       WHERE p.user_id = ${dbUserId}::uuid
     UNION ALL
     SELECT pa.r2_key FROM project_audio_clips pa
@@ -106,6 +111,9 @@ export async function deleteUserAccount(
     // must clear before the job rows they point at.
     db.delete(audioSeparationJobs).where(eq(audioSeparationJobs.user_id, dbUserId)),
     db.delete(projectTextOverlays).where(sql`${projectTextOverlays.project_id} IN (
+      SELECT id FROM projects WHERE user_id = ${dbUserId}::uuid
+    )`),
+    db.delete(projectVideoOverlays).where(sql`${projectVideoOverlays.project_id} IN (
       SELECT id FROM projects WHERE user_id = ${dbUserId}::uuid
     )`),
     db.delete(projectClips).where(sql`${projectClips.project_id} IN (

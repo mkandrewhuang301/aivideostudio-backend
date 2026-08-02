@@ -340,6 +340,11 @@ export const projectClips = pgTable(
     trim_end_seconds: doublePrecision('trim_end_seconds'), // nullable
     // Linear source-audio gain for this clip: 0 = muted, 1 = original level.
     volume: doublePrecision('volume').notNull().default(1),
+    // Centered visual scale inside the project canvas. 1 = aspect-fit, <1 shrinks, >1 crops.
+    scale: doublePrecision('scale').notNull().default(1),
+    // Normalized clip center inside the project canvas. Legacy clips remain centered.
+    x_norm: doublePrecision('x_norm').notNull().default(0.5),
+    y_norm: doublePrecision('y_norm').notNull().default(0.5),
     // Normal source-speed multiplier. A non-null speed_curve supersedes this value.
     playback_rate: doublePrecision('playback_rate').notNull().default(1),
     // Variable source-speed control points: [{ position: 0...1, rate: 0.1...10 }].
@@ -706,6 +711,12 @@ export const videoBackgroundRemovalJobs = pgTable(
     provider_request_id: text('provider_request_id'),
     output_r2_key: text('output_r2_key'),
     source_prior_r2_key: text('source_prior_r2_key'),
+    // Undo state for the trim rebase. Bria processes only the clip's VISIBLE window, so the
+    // processed media's timebase starts at 0 and the clip's trim bounds are rewritten to match.
+    // These capture the pre-rebase values so undo restores the clip exactly.
+    source_prior_trim_start_seconds: doublePrecision('source_prior_trim_start_seconds'),
+    source_prior_trim_end_seconds: doublePrecision('source_prior_trim_end_seconds'),
+    source_prior_original_duration_seconds: doublePrecision('source_prior_original_duration_seconds'),
     failure_code: text('failure_code'),
     failure_reason: text('failure_reason'),
     retry_count: integer('retry_count').notNull().default(0),

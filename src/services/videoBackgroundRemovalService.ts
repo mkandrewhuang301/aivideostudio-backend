@@ -49,6 +49,8 @@ export interface OwnedVideoClip {
   r2_key: string;
   media_type: string;
   original_duration_seconds: number | null;
+  trim_start_seconds: number;
+  trim_end_seconds: number | null;
 }
 
 /**
@@ -94,6 +96,8 @@ export async function verifyClipOwnership(clipId: string, userId: string): Promi
       r2_key: projectClips.r2_key,
       media_type: projectClips.media_type,
       original_duration_seconds: projectClips.original_duration_seconds,
+      trim_start_seconds: projectClips.trim_start_seconds,
+      trim_end_seconds: projectClips.trim_end_seconds,
     })
     .from(projectClips)
     .innerJoin(projects, eq(projectClips.project_id, projects.id))
@@ -107,21 +111,28 @@ export async function verifyClipOwnership(clipId: string, userId: string): Promi
 }
 
 /**
- * Resolves the clip's FULL source duration in explicit seconds (CLAUDE.md rule #7 — never bill
- * from a placeholder or a provider-side "auto" duration).
+ * Resolves the clip's VISIBLE (trimmed) duration in explicit seconds — what the user actually
+ * sees, what the provider is asked to process, and what they are billed for (CLAUDE.md rule #7 —
+ * never bill from a placeholder or a provider-side "auto" duration).
  *
- * `original_duration_seconds` is nullable on legacy rows, so this self-heals via ffprobe against a
- * presigned URL and persists the result. A clip whose duration cannot be resolved at all THROWS
- * rather than falling back to an estimate — this is a per-second-billed provider, so an
- * unverifiable duration must block the charge instead of guessing at it.
+ * Deliberately the trimmed window, NOT the full source. Billing the full source meant a 5-minute
+ * upload trimmed to 5 visible seconds cost 126 credits for work the user never sees, and — worse —
+ * tripped the max-duration guard below, so long sources were refused outright however short the
+ * visible window was. The worker cuts this exact window before dispatching, so quote, charge, and
+ * provider input all describe the same span.
+ *
+ * `original_duration_seconds` is nullable on legacy rows, so a missing trim_end self-heals via
+ * ffprobe against a presigned URL and persists the result. A clip whose duration cannot be
+ * resolved at all THROWS rather than falling back to an estimate — this is a per-second-billed
+ * provider, so an unverifiable duration must block the charge instead of guessing at it.
  */
 export async function resolveBillableDuration(clip: OwnedVideoClip): Promise<number> {
-  let duration = clip.original_duration_seconds;
+  let end = clip.trim_end_seconds ?? clip.original_duration_seconds;
 
-  if (duration == null || duration <= 0) {
+  if (end == null || end <= 0) {
     const probed = await probeDurationSeconds(await getGenerationPresignedUrl(clip.r2_key));
     if (probed != null && probed > 0) {
-      duration = probed;
+      end = clip.trim_end_seconds ?? probed;
       await db
         .update(projectClips)
         .set({ original_duration_seconds: probed })
@@ -129,9 +140,14 @@ export async function resolveBillableDuration(clip: OwnedVideoClip): Promise<num
     }
   }
 
+  const start = Math.max(0, clip.trim_start_seconds ?? 0);
+  const duration = end == null ? null : end - start;
+
   if (duration == null || duration <= 0) {
     throw new VideoBgRemovalValidationError('clip has no resolvable duration');
   }
+  // The cap now bounds the VISIBLE window, so a long source with a short trim is allowed — only
+  // an actually-long span of provider work is refused.
   if (duration > config.videoBgRemovalMaxDurationSeconds) {
     throw new VideoBgRemovalValidationError(
       `Clip is too long for background removal (max ${config.videoBgRemovalMaxDurationSeconds}s)`,
@@ -379,19 +395,40 @@ export async function applyBackgroundRemovalToClip(input: {
   job: VideoBackgroundRemovalJob;
   outputR2Key: string;
 }): Promise<{ sourcePriorR2Key: string | null }> {
+  // Capture r2_key AND the trim bounds together: the processed media contains ONLY the visible
+  // window, so the swap below rebases the clip to [0, duration]. Undo needs all four values to
+  // put the clip back exactly as it was (e.g. a 300s source shown as [120, 130]).
   const captureQuery = db.execute(sql`
     UPDATE video_background_removal_jobs
     SET source_prior_r2_key = COALESCE(
-      source_prior_r2_key,
-      (SELECT r2_key FROM project_clips WHERE id = ${input.job.source_clip_id}::uuid)
-    )
+          source_prior_r2_key,
+          (SELECT r2_key FROM project_clips WHERE id = ${input.job.source_clip_id}::uuid)
+        ),
+        source_prior_trim_start_seconds = COALESCE(
+          source_prior_trim_start_seconds,
+          (SELECT trim_start_seconds FROM project_clips WHERE id = ${input.job.source_clip_id}::uuid)
+        ),
+        source_prior_trim_end_seconds = COALESCE(
+          source_prior_trim_end_seconds,
+          (SELECT trim_end_seconds FROM project_clips WHERE id = ${input.job.source_clip_id}::uuid)
+        ),
+        source_prior_original_duration_seconds = COALESCE(
+          source_prior_original_duration_seconds,
+          (SELECT original_duration_seconds FROM project_clips WHERE id = ${input.job.source_clip_id}::uuid)
+        )
     WHERE id = ${input.job.id}::uuid
     RETURNING source_prior_r2_key
   `);
 
+  // Rebase to the processed window. The clip's VISIBLE length is unchanged, so its footprint on
+  // the project timeline — and therefore every overlay/caption anchor — is identical; only the
+  // clip's own source coordinates move.
   const swapMediaQuery = db.execute(sql`
     UPDATE project_clips
-    SET r2_key = ${input.outputR2Key}
+    SET r2_key = ${input.outputR2Key},
+        trim_start_seconds = 0,
+        trim_end_seconds = ${input.job.duration_seconds},
+        original_duration_seconds = ${input.job.duration_seconds}
     WHERE id = ${input.job.source_clip_id}::uuid AND deleted_at IS NULL
   `);
 
@@ -461,7 +498,7 @@ export async function undoBackgroundRemoval(
   // otherwise changed the clip's media, this undo is stale and must not clobber the newer state.
   const result = await db.execute(sql`
     UPDATE project_clips
-    SET r2_key = ${job.source_prior_r2_key}
+    SET r2_key = ${job.source_prior_r2_key}${trimRestoreFragment(job)}
     WHERE id = ${job.source_clip_id}::uuid
       AND deleted_at IS NULL
       AND r2_key = ${job.output_r2_key}
@@ -471,6 +508,32 @@ export async function undoBackgroundRemoval(
     throw new VideoBgRemovalValidationError('Clip media has changed since this job — undo is stale');
   }
   return { restoredR2Key: job.source_prior_r2_key };
+}
+
+/**
+ * Trailing SET fragment that puts the clip's trim bounds back where they were, for jobs that
+ * rebased them.
+ *
+ * Empty for jobs that did NOT rebase: the Apple Vision on-device path processes the whole local
+ * file and leaves trim bounds alone, and pre-2026-07-31 Bria jobs predate the capture columns.
+ * `source_prior_original_duration_seconds` is the discriminator — only a rebasing job records it.
+ * Restoring bounds those jobs never moved would corrupt the clip.
+ */
+function trimRestoreFragment(job: VideoBackgroundRemovalJob) {
+  if (job.source_prior_original_duration_seconds == null) return sql``;
+  return sql`,
+        trim_start_seconds = ${job.source_prior_trim_start_seconds ?? 0},
+        trim_end_seconds = ${job.source_prior_trim_end_seconds},
+        original_duration_seconds = ${job.source_prior_original_duration_seconds}`;
+}
+
+/** Mirror of trimRestoreFragment: re-applies the processed window's rebased bounds. */
+function trimReapplyFragment(job: VideoBackgroundRemovalJob) {
+  if (job.source_prior_original_duration_seconds == null) return sql``;
+  return sql`,
+        trim_start_seconds = 0,
+        trim_end_seconds = ${job.duration_seconds},
+        original_duration_seconds = ${job.duration_seconds}`;
 }
 
 /**
@@ -490,7 +553,7 @@ export async function redoBackgroundRemoval(
 
   const result = await db.execute(sql`
     UPDATE project_clips
-    SET r2_key = ${job.output_r2_key}
+    SET r2_key = ${job.output_r2_key}${trimReapplyFragment(job)}
     WHERE id = ${job.source_clip_id}::uuid
       AND deleted_at IS NULL
       AND r2_key = ${job.source_prior_r2_key}

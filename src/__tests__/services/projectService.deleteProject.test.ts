@@ -37,6 +37,7 @@ import {
   projectCaptionCues,
   projectCaptionWords,
   projectClips,
+  projectVideoOverlays,
   projectMusicSuggestionCache,
   projects,
   projectSoundtrackGenerations,
@@ -57,13 +58,15 @@ const tableNames = new Map<unknown, string>([
   [audioSeparationJobs, 'audio_separation_jobs'],
   [projectSoundtrackGenerations, 'project_soundtrack_generations'],
   [projectTextOverlays, 'project_text_overlays'],
+  [projectVideoOverlays, 'project_video_overlays'],
   [projectClips, 'project_clips'],
   [projects, 'projects'],
 ]);
 
 /**
  * deleteProject issues its reads as one Promise.all of six builder chains, in a fixed order:
- * project row, then clips / audio clips / caption cues / soundtracks / voiceovers / separations.
+ * project row, then clips / video overlays / audio clips / caption cues / soundtracks /
+ * voiceovers / separations.
  * Queue the rows each chain should resolve to in that same order.
  */
 function wireSelects(rowSets: unknown[][]) {
@@ -94,6 +97,7 @@ function fullProjectRowSets(): unknown[][] {
   return [
     PROJECT_ROW,
     [{ r2_key: 'projects/p1/clips/a.mp4' }, { r2_key: 'projects/p1/clips/b.mp4' }],
+    [{ r2_key: 'projects/p1/overlays/pip.mp4' }],
     [{ r2_key: 'projects/p1/sep/target.mp3' }, { r2_key: 'projects/p1/sep/residual.mp3' }],
     [{ id: 'cue-1' }, { id: 'cue-2' }],
     [{ raw_r2_key: 'projects/p1/music/raw.wav', final_r2_key: 'projects/p1/music/final.m4a' }],
@@ -166,7 +170,7 @@ describe('deleteProject — FK-safe delete ordering', () => {
 
   it('skips the caption-words delete entirely when the project has no cues', async () => {
     const rowSets = fullProjectRowSets();
-    rowSets[3] = []; // no caption cues
+    rowSets[4] = []; // no caption cues
     wireSelects(rowSets);
 
     await deleteProject(PROJECT_ID, USER_ID);
@@ -184,6 +188,7 @@ describe('deleteProject — R2 key collection', () => {
     expect(deletedR2Keys()).toEqual(expect.arrayContaining([
       'projects/p1/clips/a.mp4',
       'projects/p1/clips/b.mp4',
+      'projects/p1/overlays/pip.mp4',
       'projects/p1/sep/target.mp3',
       'projects/p1/sep/residual.mp3',
       'projects/p1/music/raw.wav',
@@ -196,7 +201,7 @@ describe('deleteProject — R2 key collection', () => {
 
   it('collects stem keys from a job whose stems were never attached (no audio-clip row points at them)', async () => {
     const rowSets = fullProjectRowSets();
-    rowSets[2] = []; // separation completed but attach never ran — zero audio clips
+    rowSets[3] = []; // separation completed but attach never ran — zero audio clips
     wireSelects(rowSets);
 
     await deleteProject(PROJECT_ID, USER_ID);
@@ -220,9 +225,9 @@ describe('deleteProject — R2 key collection', () => {
 
   it('ignores null r2 keys from rows whose media never materialized', async () => {
     const rowSets = fullProjectRowSets();
-    rowSets[4] = [{ raw_r2_key: 'projects/p1/music/raw.wav', final_r2_key: null }];
-    rowSets[5] = [{ raw_r2_key: null, final_r2_key: null }];
-    rowSets[6] = [{ target_r2_key: null, residual_r2_key: null }];
+    rowSets[5] = [{ raw_r2_key: 'projects/p1/music/raw.wav', final_r2_key: null }];
+    rowSets[6] = [{ raw_r2_key: null, final_r2_key: null }];
+    rowSets[7] = [{ target_r2_key: null, residual_r2_key: null }];
     wireSelects(rowSets);
 
     await deleteProject(PROJECT_ID, USER_ID);

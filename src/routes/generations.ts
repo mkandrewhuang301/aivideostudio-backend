@@ -76,7 +76,7 @@ import { falImageToolQueue } from '../queue/falImageToolQueue';
 import { getFalWebhookUrl, getReplicateWebhookUrl } from '../config';
 import type { GenerationInput } from '../services/providers/ModelProvider';
 import { db } from '../db/client';
-import { referenceUploads } from '../db/schema';
+import { generations, referenceUploads } from '../db/schema';
 import { eq, inArray, and, sql } from 'drizzle-orm';
 import type { FormatDef, FormatDurationTier, ExplainerVisualMethod } from '../config/formats';
 import { probeVideoFrameCount } from '../services/mediaProbe';
@@ -939,6 +939,15 @@ generationsRouter.post('/', promptModerationMiddleware, presetResolver, formatRe
             // feed/detail reference_urls, Remix restore, and webhook retry all read it.
             has_reference: (resolved.referenceImages?.length ?? 0) > 0,
             ref_upload_ids: resolved.refUploadIds ?? [],
+            // References promoted directly from a completed generation do not have a
+            // reference_uploads row. Keep their owning generation ids so feed/detail can
+            // re-sign and render the input thumbnail after the optimistic card is replaced.
+            ref_image_generation_ids: (refImageGenerationIds ?? []).filter(
+              (id): id is string => typeof id === 'string' && id.length > 0,
+            ),
+            ref_video_generation_ids: (refVideoGenerationIds ?? []).filter(
+              (id): id is string => typeof id === 'string' && id.length > 0,
+            ),
           }
         : resolved.mediaType === 'avatar'
         ? { avatar_image: resolved.avatarImage, avatar_driving_video: resolved.avatarDrivingVideo, estimated_duration: resolved.durationSeconds }
@@ -958,6 +967,12 @@ generationsRouter.post('/', promptModerationMiddleware, presetResolver, formatRe
             audio_enabled: resolved.audioEnabled,
             has_reference: ((resolved.referenceImages?.length ?? 0) + (resolved.referenceVideos?.length ?? 0)) > 0,
             ref_upload_ids: resolved.refUploadIds ?? [],
+            ref_image_generation_ids: (refImageGenerationIds ?? []).filter(
+              (id): id is string => typeof id === 'string' && id.length > 0,
+            ),
+            ref_video_generation_ids: (refVideoGenerationIds ?? []).filter(
+              (id): id is string => typeof id === 'string' && id.length > 0,
+            ),
           };
 
     // Stamp preset_id + preset_input_upload_ids (set by presetResolver) onto the row — needed for
@@ -1370,10 +1385,34 @@ generationsRouter.get('/', async (req: Request, res: Response) => {
       : [];
     const refUploadMap = Object.fromEntries(refUploadRows.map((r) => [r.id, r]));
 
+    // A reference can also point straight at a prior generation (the card's Reference action),
+    // in which case no reference_uploads row exists. Resolve those sources in one ownership-
+    // scoped batch so polling does not erase the optimistic card's thumbnail.
+    const allSourceGenerationIds = items.flatMap((item) => {
+      const p = item.params as Record<string, unknown> | null;
+      const imageIds = Array.isArray(p?.ref_image_generation_ids) ? p.ref_image_generation_ids : [];
+      const videoIds = Array.isArray(p?.ref_video_generation_ids) ? p.ref_video_generation_ids : [];
+      return [...imageIds, ...videoIds].filter((id): id is string => typeof id === 'string');
+    });
+    const sourceGenerationRows = allSourceGenerationIds.length > 0
+      ? await db.select().from(generations).where(and(
+          inArray(generations.id, allSourceGenerationIds),
+          eq(generations.user_id, req.user.dbUserId),
+          eq(generations.status, 'completed'),
+        ))
+      : [];
+    const sourceGenerationMap = Object.fromEntries(sourceGenerationRows.map((row) => [row.id, row]));
+
     const enriched = await Promise.all(
       items.map(async (item) => {
         const p = item.params as Record<string, unknown> | null;
         const refIds: string[] = Array.isArray(p?.ref_upload_ids) ? p!.ref_upload_ids as string[] : [];
+        const refImageGenerationIds: string[] = Array.isArray(p?.ref_image_generation_ids)
+          ? p!.ref_image_generation_ids.filter((id): id is string => typeof id === 'string')
+          : [];
+        const refVideoGenerationIds: string[] = Array.isArray(p?.ref_video_generation_ids)
+          ? p!.ref_video_generation_ids.filter((id): id is string => typeof id === 'string')
+          : [];
         const presetInputIds = Array.isArray(p?.preset_input_upload_ids)
           ? p!.preset_input_upload_ids as unknown[]
           : [];
@@ -1389,6 +1428,20 @@ generationsRouter.get('/', async (req: Request, res: Response) => {
               return { url, isVideo: row.mime_type.startsWith('video/') };
             }),
         );
+        const generationReferenceUrls = await Promise.all([
+          ...refImageGenerationIds
+            .filter((id) => sourceGenerationMap[id]?.r2_key)
+            .map(async (id) => ({
+              url: await getGenerationPresignedUrl(sourceGenerationMap[id].r2_key!),
+              isVideo: false,
+            })),
+          ...refVideoGenerationIds
+            .filter((id) => sourceGenerationMap[id]?.r2_key)
+            .map(async (id) => ({
+              url: await getGenerationPresignedUrl(sourceGenerationMap[id].r2_key!),
+              isVideo: true,
+            })),
+        ]);
         const presetInputUrls = await Promise.all(
           presetInputIds.map(async (id) => {
             if (typeof id !== 'string' || !refUploadMap[id]) return null;
@@ -1414,7 +1467,9 @@ generationsRouter.get('/', async (req: Request, res: Response) => {
           video_url: item.status === 'completed' && item.r2_key
             ? await getGenerationPresignedUrl(item.r2_key)
             : null,
-          reference_urls: referenceUrls.length > 0 ? referenceUrls : null,
+          reference_urls: [...referenceUrls, ...generationReferenceUrls].length > 0
+            ? [...referenceUrls, ...generationReferenceUrls]
+            : null,
           preset_input_urls: presetInputUrls.some(Boolean) ? presetInputUrls : null,
           magic_editor_mask_url: magicEditorMaskId && refUploadMap[magicEditorMaskId]
             ? await getUploadPresignedUrl(refUploadMap[magicEditorMaskId].r2_key)
@@ -1437,14 +1492,21 @@ generationsRouter.get('/', async (req: Request, res: Response) => {
 // SECURITY: getGenerationById filters WHERE user_id = dbUserId (T-07-02-01 mitigated)
 generationsRouter.get('/:id', async (req: Request, res: Response) => {
   if (!req.user?.dbUserId) { res.status(401).json({ error: 'Not authenticated' }); return; }
+  const userId = req.user.dbUserId;
   try {
-    const item = await getGenerationById(req.params.id as string, req.user.dbUserId);
+    const item = await getGenerationById(req.params.id as string, userId);
     if (!item) { res.status(404).json({ error: 'Not found' }); return; }
     const video_url = item.status === 'completed' && item.r2_key
       ? await getGenerationPresignedUrl(item.r2_key)
       : null;
     const p = item.params as Record<string, unknown> | null;
     const refIds: string[] = Array.isArray(p?.ref_upload_ids) ? p!.ref_upload_ids as string[] : [];
+    const refImageGenerationIds: string[] = Array.isArray(p?.ref_image_generation_ids)
+      ? p!.ref_image_generation_ids.filter((id): id is string => typeof id === 'string')
+      : [];
+    const refVideoGenerationIds: string[] = Array.isArray(p?.ref_video_generation_ids)
+      ? p!.ref_video_generation_ids.filter((id): id is string => typeof id === 'string')
+      : [];
     const presetInputIds = Array.isArray(p?.preset_input_upload_ids)
       ? p!.preset_input_upload_ids as unknown[]
       : [];
@@ -1466,6 +1528,18 @@ generationsRouter.get('/:id', async (req: Request, res: Response) => {
           isVideo: referenceRowMap[id].mime_type.startsWith('video/'),
         })))
       : null;
+    const sourceGenerationReferences = await Promise.all([
+      ...refImageGenerationIds.map(async (id) => {
+        const source = await getGenerationById(id, userId);
+        if (!source || source.status !== 'completed' || !source.r2_key) return null;
+        return { url: await getGenerationPresignedUrl(source.r2_key), isVideo: false };
+      }),
+      ...refVideoGenerationIds.map(async (id) => {
+        const source = await getGenerationById(id, userId);
+        if (!source || source.status !== 'completed' || !source.r2_key) return null;
+        return { url: await getGenerationPresignedUrl(source.r2_key), isVideo: true };
+      }),
+    ]);
     const preset_input_urls = presetInputIds.length > 0
       ? await Promise.all(presetInputIds.map(async (id) => {
           if (typeof id !== 'string' || !referenceRowMap[id]) return null;
@@ -1501,7 +1575,15 @@ generationsRouter.get('/:id', async (req: Request, res: Response) => {
       ...presetSafeSerialization(item),
       video_url,
       takes,
-      reference_urls,
+      reference_urls: [
+        ...(reference_urls ?? []),
+        ...sourceGenerationReferences.filter((ref) => ref !== null),
+      ].length > 0
+        ? [
+            ...(reference_urls ?? []),
+            ...sourceGenerationReferences.filter((ref) => ref !== null),
+          ]
+        : null,
       preset_input_urls: preset_input_urls?.some(Boolean) ? preset_input_urls : null,
       magic_editor_mask_url: magicEditorMaskId && referenceRowMap[magicEditorMaskId]
         ? await getUploadPresignedUrl(referenceRowMap[magicEditorMaskId].r2_key)

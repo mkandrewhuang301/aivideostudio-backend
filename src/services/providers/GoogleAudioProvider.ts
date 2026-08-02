@@ -1,4 +1,5 @@
 import { config } from '../../config';
+import type { MusicReferenceImage } from './MusicGenerationProvider';
 
 const INTERACTIONS_URL = 'https://generativelanguage.googleapis.com/v1beta/interactions';
 const API_REVISION = '2026-05-20';
@@ -162,9 +163,23 @@ export async function googleRunTts(
   }, 'audio/l16', MAX_TTS_BYTES, TTS_TIMEOUT_MS);
 }
 
-export async function googleRunLyria(modelId: string, prompt: string): Promise<GoogleAudioResult> {
+export async function googleRunLyria(
+  modelId: string,
+  prompt: string,
+  referenceImages: MusicReferenceImage[] = [],
+): Promise<GoogleAudioResult> {
+  const input = referenceImages.length === 0
+    ? prompt
+    : [
+        { type: 'text', text: prompt },
+        ...referenceImages.slice(0, 10).map((image) => ({
+          type: 'image',
+          mime_type: image.mimeType,
+          data: image.data.toString('base64'),
+        })),
+      ];
   return createAudioInteraction('Lyria', {
     model: modelId,
-    input: prompt,
+    input,
   }, 'audio/mpeg', MAX_MUSIC_BYTES, LYRIA_TIMEOUT_MS);
 }

@@ -94,7 +94,7 @@ describe('GET /api/me', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockGetUserWithBalance.mockResolvedValue(BALANCE_STUB);
-    mockExecute.mockResolvedValue({ rows: [{ face_consent_at: null }] });
+    mockExecute.mockResolvedValue({ rows: [{ face_consent_at: null, age_terms_version: null }] });
   });
 
   it('returns 200 with user and balance fields for authenticated user', async () => {
@@ -145,6 +145,25 @@ describe('GET /api/me', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.has_face_consent).toBe(false);
+  });
+
+  it('requires AI Music age terms until the current version is accepted', async () => {
+    mockExecute.mockResolvedValue({ rows: [{ face_consent_at: null, age_terms_version: null }] });
+    const res = await request(buildApp(AUTHED_USER)).get('/api/me');
+
+    expect(res.status).toBe(200);
+    expect(res.body.ai_music_age_terms_required).toBe(true);
+    expect(res.body.ai_music_age_terms_version).toBe('2026-07-30');
+  });
+
+  it('does not require AI Music age terms again for the accepted version', async () => {
+    mockExecute.mockResolvedValue({
+      rows: [{ face_consent_at: null, age_terms_version: '2026-07-30' }],
+    });
+    const res = await request(buildApp(AUTHED_USER)).get('/api/me');
+
+    expect(res.status).toBe(200);
+    expect(res.body.ai_music_age_terms_required).toBe(false);
   });
 
   // Paywall tiers (paywall-tiers-plan.md item 5): tier + parallel_limit derived from

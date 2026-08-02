@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { CopyObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
 import { and, desc, eq, isNull, sql } from 'drizzle-orm';
 import { config } from '../config';
+import { AI_MUSIC_AGE_TERMS_VERSION } from '../config/aiMusicTerms';
 import { db } from '../db/client';
 import {
   projectAudioClips,
@@ -16,7 +17,7 @@ import { r2, R2_BUCKET } from '../storage/r2';
 import { insertProjectAudioClipWithCapacity } from './projectService';
 
 export type SoundMode = 'instrumental' | 'vocals';
-export const AI_MUSIC_AGE_TERMS_VERSION = '2026-07-30';
+export { AI_MUSIC_AGE_TERMS_VERSION } from '../config/aiMusicTerms';
 
 export interface SoundtrackClipSnapshot {
   id: string;

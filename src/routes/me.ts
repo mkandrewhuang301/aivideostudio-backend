@@ -11,6 +11,7 @@ import { deleteUserAccount } from '../services/accountDeletionService';
 import { grantIfEligible } from '../services/freeCreditGrantService';
 import { getFirebaseAdmin } from '../firebase';
 import { MergeError, mergeUser } from '../services/userMergeService';
+import { AI_MUSIC_AGE_TERMS_VERSION } from '../config/aiMusicTerms';
 
 export const meRouter = Router();
 
@@ -38,12 +39,21 @@ meRouter.get('/', async (req: Request, res: Response) => {
   try {
     const balance = await getUserWithBalance(req.user.dbUserId);
 
-    // SC2: expose whether the user has already attested to face-input consent so the iOS
-    // client can gate the face-input sheet. Server-authoritative (client sheet is UX only).
-    const consentRow = await db.execute(sql`SELECT face_consent_at FROM users WHERE id = ${req.user.dbUserId}::uuid`);
+    // Expose server-authoritative first-use attestations so clients can show their confirmation
+    // rows before a create attempt. The create routes still enforce both values independently.
+    const consentRow = await db.execute(sql`
+      SELECT face_consent_at, age_terms_version
+      FROM users
+      WHERE id = ${req.user.dbUserId}::uuid
+    `);
+    const consent = consentRow?.rows?.[0] as {
+      face_consent_at: string | null;
+      age_terms_version: string | null;
+    } | undefined;
     const hasFaceConsent = Boolean(
-      (consentRow?.rows?.[0] as { face_consent_at: string | null } | undefined)?.face_consent_at
+      consent?.face_consent_at
     );
+    const aiMusicAgeTermsRequired = consent?.age_terms_version !== AI_MUSIC_AGE_TERMS_VERSION;
 
     // Paywall tiers (paywall-tiers-plan.md item 5): expose the resolved tier + its concurrency
     // cap so the client can label locked models/surface "X in progress" without hardcoding the
@@ -60,6 +70,8 @@ meRouter.get('/', async (req: Request, res: Response) => {
       tier,
       parallel_limit: tier ? CONCURRENCY_LIMIT[tier] : null,
       has_face_consent: hasFaceConsent,
+      ai_music_age_terms_required: aiMusicAgeTermsRequired,
+      ai_music_age_terms_version: AI_MUSIC_AGE_TERMS_VERSION,
     });
   } catch (error) {
     console.error('[me] Error fetching user balance:', error);
