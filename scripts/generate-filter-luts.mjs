@@ -242,6 +242,120 @@ const FILTERS = [
     grade: (c) =>
       splitTone(saturate(gamma(c, 0.94), 0.98), [0.06, -0.01, 0.09], [0.04, 0.0, 0.06], 1),
   },
+
+  // ── Second pass (2026-08-02): broaden each category. Same primitives, no new machinery —
+  // every look here is still a pure grade baked to a table, so parity with ffmpeg is unchanged.
+  {
+    id: 'bright',
+    name: 'Bright',
+    category: 'featured',
+    grade: (c) => saturate(gamma(sCurve(c, 0.12), 1.12), 1.04),
+  },
+  {
+    id: 'soft',
+    name: 'Soft',
+    category: 'featured',
+    // Lifted blacks + gentle desaturation: the flattering low-contrast look for close-ups.
+    grade: (c) => saturate(lift(sCurve(c, 0.1), 0.05), 0.94),
+  },
+  {
+    id: 'punch',
+    name: 'Punch',
+    category: 'featured',
+    grade: (c) => saturate(contrast(sCurve(c, 0.3), 1.18), 1.28),
+  },
+  {
+    id: 'crisp',
+    name: 'Crisp',
+    category: 'featured',
+    // Cool-neutral with deep blacks — reads "clean digital" rather than filmic.
+    grade: (c) => contrast(gain(sCurve(c, 0.22), [0.98, 1.0, 1.04]), 1.1),
+  },
+
+  {
+    id: 'inkwell',
+    name: 'Inkwell',
+    category: 'mono',
+    // High-contrast black and white: crushed blacks, bright whites, no tint at all.
+    grade: (c) => contrast(saturate(sCurve(c, 0.3), 0), 1.3),
+  },
+  {
+    id: 'platinum',
+    name: 'Platinum',
+    category: 'mono',
+    // Flat, gallery-print greyscale — lifted floor and softened highlights.
+    grade: (c) => lift(contrast(saturate(c, 0), 0.86), 0.1),
+  },
+  {
+    id: 'selenium',
+    name: 'Selenium',
+    category: 'mono',
+    // Cool-toned darkroom print, the counterpart to Sepia's warmth.
+    grade: (c) => toneMap(sCurve(c, 0.2), [0.82, 0.94, 1.16], 1),
+  },
+
+  {
+    id: 'super8',
+    name: 'Super 8',
+    category: 'film',
+    grade: (c) =>
+      splitTone(saturate(lift(gamma(c, 1.05), 0.08), 0.9), [0.05, 0.02, -0.02], [0.07, 0.03, -0.03], 1),
+  },
+  {
+    id: 'cinestill',
+    name: 'Cinestill',
+    category: 'film',
+    // Warm highlight bloom over cool shadows — the tungsten-film night look.
+    grade: (c) => splitTone(saturate(sCurve(c, 0.18), 1.06), [-0.02, 0.0, 0.07], [0.09, 0.03, -0.02], 1),
+  },
+  {
+    id: 'vintage',
+    name: 'Vintage',
+    category: 'film',
+    grade: (c) => saturate(lift(toneMap(sCurve(c, 0.14), [1.12, 1.02, 0.86], 0.35), 0.07), 0.88),
+  },
+
+  {
+    id: 'blockbuster',
+    name: 'Blockbuster',
+    category: 'cinematic',
+    // Teal/orange's louder cousin: stronger split plus a contrast push.
+    grade: (c) =>
+      contrast(splitTone(saturate(c, 1.12), [-0.04, 0.01, 0.1], [0.1, 0.03, -0.05], 1), 1.12),
+  },
+  {
+    id: 'moonlight',
+    name: 'Moonlight',
+    category: 'cinematic',
+    grade: (c) => splitTone(saturate(gamma(c, 0.88), 0.86), [-0.02, 0.01, 0.12], [0.0, 0.02, 0.08], 1),
+  },
+  {
+    id: 'desert',
+    name: 'Desert',
+    category: 'cinematic',
+    // Sun-baked warm highlights with dusty, desaturated shadows.
+    grade: (c) => saturate(splitTone(sCurve(c, 0.2), [0.05, 0.03, -0.02], [0.12, 0.06, -0.04], 1), 0.96),
+  },
+
+  {
+    id: 'candy',
+    name: 'Candy',
+    category: 'vibe',
+    grade: (c) => saturate(splitTone(sCurve(c, 0.16), [0.06, -0.01, 0.06], [0.08, 0.02, 0.04], 1), 1.3),
+  },
+  {
+    id: 'neon',
+    name: 'Neon',
+    category: 'vibe',
+    grade: (c) =>
+      saturate(contrast(splitTone(c, [0.08, -0.03, 0.12], [0.0, 0.04, 0.1], 1), 1.16), 1.42),
+  },
+  {
+    id: 'forest',
+    name: 'Forest',
+    category: 'vibe',
+    grade: (c) => saturate(gain(sCurve(c, 0.18), [0.94, 1.06, 0.96]), 1.08),
+  },
 ];
 
 // ─── emit ────────────────────────────────────────────────────────────────────

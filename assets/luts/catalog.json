@@ -98,5 +98,85 @@
     "id": "dusk",
     "name": "Dusk",
     "category": "vibe"
+  },
+  {
+    "id": "bright",
+    "name": "Bright",
+    "category": "featured"
+  },
+  {
+    "id": "soft",
+    "name": "Soft",
+    "category": "featured"
+  },
+  {
+    "id": "punch",
+    "name": "Punch",
+    "category": "featured"
+  },
+  {
+    "id": "crisp",
+    "name": "Crisp",
+    "category": "featured"
+  },
+  {
+    "id": "inkwell",
+    "name": "Inkwell",
+    "category": "mono"
+  },
+  {
+    "id": "platinum",
+    "name": "Platinum",
+    "category": "mono"
+  },
+  {
+    "id": "selenium",
+    "name": "Selenium",
+    "category": "mono"
+  },
+  {
+    "id": "super8",
+    "name": "Super 8",
+    "category": "film"
+  },
+  {
+    "id": "cinestill",
+    "name": "Cinestill",
+    "category": "film"
+  },
+  {
+    "id": "vintage",
+    "name": "Vintage",
+    "category": "film"
+  },
+  {
+    "id": "blockbuster",
+    "name": "Blockbuster",
+    "category": "cinematic"
+  },
+  {
+    "id": "moonlight",
+    "name": "Moonlight",
+    "category": "cinematic"
+  },
+  {
+    "id": "desert",
+    "name": "Desert",
+    "category": "cinematic"
+  },
+  {
+    "id": "candy",
+    "name": "Candy",
+    "category": "vibe"
+  },
+  {
+    "id": "neon",
+    "name": "Neon",
+    "category": "vibe"
+  },
+  {
+    "id": "forest",
+    "name": "Forest",
+    "category": "vibe"
   }
 ]
