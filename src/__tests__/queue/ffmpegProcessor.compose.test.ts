@@ -117,6 +117,7 @@ describe('buildComposeArgs', () => {
       assPath: null,
       textOverlayAssPath: null,
       fontsDir: '/app/assets/fonts',
+      lutsDir: '/app/assets/luts',
       outPath: '/tmp/out.mp4',
     }));
 
@@ -139,6 +140,7 @@ describe('buildComposeArgs', () => {
         assPath: null,
         textOverlayAssPath: null,
         fontsDir: '/app/assets/fonts',
+        lutsDir: '/app/assets/luts',
         outPath: '/tmp/out.mp4',
       }));
 
@@ -165,6 +167,7 @@ describe('buildComposeArgs', () => {
         assPath: null,
         textOverlayAssPath: null,
         fontsDir: '/app/assets/fonts',
+        lutsDir: '/app/assets/luts',
         outPath: '/tmp/out.mp4',
       }));
       expect(graph).toContain('concat=n=16:v=1:a=1[v0][a0]');
