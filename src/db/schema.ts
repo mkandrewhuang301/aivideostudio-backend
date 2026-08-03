@@ -14,6 +14,7 @@ import {
   type AnyPgColumn,
 } from 'drizzle-orm/pg-core';
 import { sql, desc } from 'drizzle-orm';
+import type { Adjustments } from '../config/adjustmentLut';
 
 // ─── Enums ────────────────────────────────────────────────────────────────────
 
@@ -398,7 +399,7 @@ export const projectVideoOverlays = pgTable(
   }),
 );
 
-// ─── project_filters (Studio color filters) ──────────────────────────────────
+// ─── project_filters (Studio color filters + Adjust) ──────────────────────────
 // A filter is its own timeline object, NOT a property of a clip. It covers an arbitrary
 // [start, start + duration) window on the project timeline, so one filter can span several clips
 // or cover only part of one, and several can stack on the same moment — the CapCut model the
@@ -408,6 +409,18 @@ export const projectVideoOverlays = pgTable(
 // applied to whatever frames sit under it. `filter_id` names a LUT in assets/luts (see
 // scripts/generate-filter-luts.mjs); the same id resolves to the same .cube file in the iOS
 // bundle, which is what keeps the live preview and the cloud export in agreement.
+//
+// 2026-08-02 (Adjust tab, ~/.planning/notes/2026-08-02-adjust-tab-plan.md): `filter_id` became
+// nullable and `adjustments` was added so this same row can ALSO carry a compiled adjustment
+// stack (brightness/contrast/...) instead of, or on top of, a bundled look:
+//   filter_id set,  adjustments null -> today's bundled look (unchanged).
+//   filter_id null, adjustments set  -> an adjustment stack.
+//   both set                        -> a bundled look with tweaks on top.
+// `adjustments` is compiled into a 17^3 LUT at render time by src/config/adjustmentLut.ts (and its
+// byte-identical Swift port) rather than applied as image operations — see that file's doc
+// comment for why. Every read/write path that assumed `filter_id` was always present must be
+// checked; see routes/projects.ts's validateFilterFields and services/projectService.ts's
+// addFilter/updateFilter.
 //
 // `z_index` is the stack order when filters overlap in time — the "Layers" control on the pill's
 // contextual rail. Lower renders first, so a higher z_index grades on top of the result below it.
@@ -422,8 +435,11 @@ export const projectFilters = pgTable(
       .notNull()
       .references(() => projects.id),
     // Catalog id, e.g. 'noir' | 'tealorange'. Validated against assets/luts/catalog.json on write
-    // so a typo can never reach the compose worker as an unresolvable lut3d path.
-    filter_id: text('filter_id').notNull(),
+    // so a typo can never reach the compose worker as an unresolvable lut3d path. Nullable since
+    // an adjustment-only row (see 2026-08-02 note above) has no catalog look to name.
+    filter_id: text('filter_id'),
+    // Compiled Adjust stack (brightness/contrast/...), nullable — see 2026-08-02 note above.
+    adjustments: jsonb('adjustments').$type<Adjustments>(),
     // Blend weight against the ungraded frame: 0 = invisible, 1 = the full look.
     intensity: doublePrecision('intensity').notNull().default(1),
     start_offset_seconds: doublePrecision('start_offset_seconds').notNull().default(0),

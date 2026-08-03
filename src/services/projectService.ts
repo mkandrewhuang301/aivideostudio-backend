@@ -38,6 +38,7 @@ import type {
   ProjectCaptionCue,
   ProjectCaptionWord,
 } from '../db/schema';
+import type { Adjustments } from '../config/adjustmentLut';
 import { eq, and, asc, desc, lt, or, sql, inArray, isNull, isNotNull } from 'drizzle-orm';
 import { getUploadPresignedUrl } from './archivalService';
 import { extractVideoFrame } from './frameExtractor';
@@ -1178,7 +1179,10 @@ export async function addFilter(
   projectId: string,
   userId: string,
   input: {
-    filter_id: string;
+    // 2026-08-02 Adjust tab: at least one of filter_id/adjustments must be present — the route
+    // layer enforces that (routes/projects.ts) so this stays a plain insert with no re-validation.
+    filter_id?: string;
+    adjustments?: Adjustments;
     intensity?: number;
     start_offset_seconds: number;
     duration_seconds: number;
@@ -1204,7 +1208,8 @@ export async function addFilter(
     .insert(projectFilters)
     .values({
       project_id: projectId,
-      filter_id: input.filter_id,
+      filter_id: input.filter_id ?? null,
+      adjustments: input.adjustments ?? null,
       intensity: input.intensity ?? 1,
       start_offset_seconds: input.start_offset_seconds,
       duration_seconds: input.duration_seconds,
@@ -1227,7 +1232,8 @@ export async function updateFilter(
   userId: string,
   filterId: string,
   updates: Partial<{
-    filter_id: string;
+    filter_id: string | null;
+    adjustments: Adjustments | null;
     intensity: number;
     start_offset_seconds: number;
     duration_seconds: number;
@@ -2246,7 +2252,11 @@ export async function buildComposeSnapshot(projectId: string, userId: string): P
     ...(filterRows.length > 0
       ? {
           filters: filterRows.map((f) => ({
-            filterId: f.filter_id,
+            // 2026-08-02 Adjust tab: filter_id is nullable now (adjustment-only rows have no
+            // catalog look) — omit rather than pass null through, matching how the rest of this
+            // snapshot omits absent optional fields.
+            filterId: f.filter_id ?? undefined,
+            adjustments: (f.adjustments as Adjustments | null) ?? undefined,
             intensity: f.intensity,
             startOffsetSeconds: f.start_offset_seconds,
             durationSeconds: f.duration_seconds,

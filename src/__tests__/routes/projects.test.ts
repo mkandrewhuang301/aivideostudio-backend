@@ -3065,4 +3065,119 @@ describe('Studio color filters', () => {
       expect(res.status).toBe(404);
     });
   });
+
+  // 2026-08-02 Adjust tab: project_filters gained a nullable filter_id + an `adjustments` jsonb
+  // column (~/.planning/notes/2026-08-02-adjust-tab-plan.md). filter_id set + adjustments null is
+  // the pre-existing bundled-look row above; these pin the two NEW row shapes — adjustments-only,
+  // and both set (a look with tweaks on top) — plus the validation that keeps a typo'd or
+  // out-of-range control from ever reaching the compose worker's generated LUT.
+  describe('Adjust (adjustments on project_filters)', () => {
+    describe('POST /api/projects/:id/filters', () => {
+      it('creates an adjustment-only row (no filter_id) and returns 201', async () => {
+        ownedProject();
+        dbMock.select.mockReturnValueOnce(makeChain([])); // capacity count
+        ownedProject();
+        dbMock.select.mockReturnValueOnce(makeChain([])); // top-of-stack lookup
+        dbMock.insert.mockReturnValueOnce(
+          makeChain([{ id: 'filt-adj-1', filter_id: null, adjustments: { brightness: 0.3 } }]),
+        );
+
+        const res = await request(app)
+          .post('/api/projects/proj-1/filters')
+          .send({ adjustments: { brightness: 0.3 }, duration_seconds: 3 });
+
+        expect(res.status).toBe(201);
+        expect(res.body.filter.id).toBe('filt-adj-1');
+      });
+
+      it('creates a row carrying both a bundled look and adjustment tweaks', async () => {
+        ownedProject();
+        dbMock.select.mockReturnValueOnce(makeChain([]));
+        ownedProject();
+        dbMock.select.mockReturnValueOnce(makeChain([]));
+        dbMock.insert.mockReturnValueOnce(
+          makeChain([{ id: 'filt-both', filter_id: 'noir', adjustments: { contrast: -0.2 } }]),
+        );
+
+        const res = await request(app)
+          .post('/api/projects/proj-1/filters')
+          .send({ filter_id: 'noir', adjustments: { contrast: -0.2 }, duration_seconds: 3 });
+
+        expect(res.status).toBe(201);
+        expect(res.body.filter.id).toBe('filt-both');
+      });
+
+      it('rejects a row with neither filter_id nor adjustments', async () => {
+        const res = await request(app)
+          .post('/api/projects/proj-1/filters')
+          .send({ duration_seconds: 3 });
+
+        expect(res.status).toBe(400);
+        expect(res.body.error).toMatch(/filter_id or adjustments/);
+        expect(dbMock.insert).not.toHaveBeenCalled();
+      });
+
+      it('rejects an unknown adjustments key', async () => {
+        const res = await request(app)
+          .post('/api/projects/proj-1/filters')
+          .send({ adjustments: { brightnes: 0.3 }, duration_seconds: 3 });
+
+        expect(res.status).toBe(400);
+        expect(res.body.error).toMatch(/brightnes/);
+        expect(dbMock.insert).not.toHaveBeenCalled();
+      });
+
+      it('rejects a signed-range control outside -1..1', async () => {
+        const res = await request(app)
+          .post('/api/projects/proj-1/filters')
+          .send({ adjustments: { saturation: 1.2 }, duration_seconds: 3 });
+
+        expect(res.status).toBe(400);
+        expect(res.body.error).toMatch(/saturation/);
+      });
+
+      it('rejects fade outside its 0..1 range (unlike the other -1..1 controls)', async () => {
+        const res = await request(app)
+          .post('/api/projects/proj-1/filters')
+          .send({ adjustments: { fade: -0.1 }, duration_seconds: 3 });
+
+        expect(res.status).toBe(400);
+        expect(res.body.error).toMatch(/fade/);
+      });
+
+      it('rejects a non-finite adjustments value', async () => {
+        const res = await request(app)
+          .post('/api/projects/proj-1/filters')
+          .send({ adjustments: { brightness: Infinity }, duration_seconds: 3 });
+
+        expect(res.status).toBe(400);
+        expect(res.body.error).toMatch(/brightness/);
+      });
+    });
+
+    describe('PATCH /api/projects/:id/filters/:filterId', () => {
+      it('converts a bundled-look row into an adjustment stack via filter_id: null + adjustments', async () => {
+        ownedProject();
+        dbMock.update.mockReturnValueOnce(
+          makeChain([{ id: 'filt-1', filter_id: null, adjustments: { hue: 0.1 } }]),
+        );
+
+        const res = await request(app)
+          .patch('/api/projects/proj-1/filters/filt-1')
+          .send({ filter_id: null, adjustments: { hue: 0.1 } });
+
+        expect(res.status).toBe(200);
+        expect(res.body.filter.filter_id).toBeNull();
+      });
+
+      it('rejects an unknown adjustments key on update', async () => {
+        const res = await request(app)
+          .patch('/api/projects/proj-1/filters/filt-1')
+          .send({ adjustments: { notARealControl: 1 } });
+
+        expect(res.status).toBe(400);
+        expect(dbMock.update).not.toHaveBeenCalled();
+      });
+    });
+  });
 });

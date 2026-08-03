@@ -27,6 +27,7 @@ import { db } from '../db/client';
 import { sql } from 'drizzle-orm';
 import { runFfmpegOp } from './ffmpegProcessor';
 import { hiveScanQueue } from './hiveScanWorker';
+import type { Adjustments } from '../config/adjustmentLut';
 
 const QUEUE_NAME = 'ffmpeg-postprocess';
 export const FFMPEG_ATTEMPTS = 3;
@@ -169,9 +170,19 @@ export interface ComposeSpec {
  * One color filter covering a window of the OUTPUT timeline. Unlike every other spec here it has
  * no source media: `filterId` names a .cube in assets/luts, and the same id resolves to the same
  * file in the iOS bundle so the on-device preview and this render agree.
+ *
+ * 2026-08-02 (Adjust tab): `filterId` became optional and `adjustments` was added so this same
+ * spec can carry a compiled adjustment stack (brightness/contrast/...) instead of, or on top of, a
+ * bundled look — mirrors project_filters' filter_id/adjustments nullability exactly. `adjustments`
+ * is compiled to a 17^3 LUT at render time (src/config/adjustmentLut.ts, its byte-identical Swift
+ * port on iOS) rather than applied as image operations — see that file for why. At least one of
+ * `filterId`/`adjustments` is non-null for any row that reaches this spec; ffmpegProcessor.ts's
+ * appendFilterChain skips a row where neither resolves to a LUT.
  */
 export interface ComposeFilterSpec {
-  filterId: string;
+  filterId?: string;
+  /** Compiled Adjust stack for this row, if any. See doc comment above. */
+  adjustments?: Adjustments;
   /** 0 = invisible, 1 = the full look. Blended against the ungraded frame. */
   intensity: number;
   startOffsetSeconds: number;

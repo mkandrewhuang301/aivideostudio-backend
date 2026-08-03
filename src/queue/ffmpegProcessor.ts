@@ -29,6 +29,7 @@ import type {
   SummarySourceFraming,
   SpeedCurvePoint,
 } from './ffmpegWorker';
+import { buildAdjustmentCube, isIdentityAdjustment } from '../config/adjustmentLut';
 
 const execFileAsync = promisify(execFile);
 
@@ -110,6 +111,16 @@ export interface BuildComposeArgsInput {
   fontsDir: string;
   /** Directory holding the generated .cube pack (assets/luts). Only read when spec.filters is non-empty. */
   lutsDir: string;
+  /**
+   * Directory where THIS job's adjustment-generated .cube files were already written (2026-08-02
+   * Adjust tab) — the caller must write one file per adjustment-carrying filter row via
+   * `buildAdjustmentCube` BEFORE calling this function, at `adjustment-${rowIndex}.cube` under
+   * this directory (runFfmpegOp does this using the job's own temp dir). This function itself
+   * stays pure — it only emits the `lut3d=file=` path, it never touches the filesystem. Defaults
+   * to `lutsDir` when omitted, which is harmless since that default is only ever consulted for
+   * rows that carry no `adjustments`.
+   */
+  adjustmentCubesDir?: string;
   outPath: string;
 }
 
@@ -337,12 +348,20 @@ function filterNum(value: number): string {
  *
  * At full intensity the split/blend pair is skipped entirely: `lut3d` alone carries the `enable`,
  * which is the common case and keeps the graph small.
+ *
+ * 2026-08-02 (Adjust tab): a row can now resolve to ONE cube (a bundled look OR an adjustment
+ * stack) or TWO chained in series (a look with adjustment tweaks on top — project_filters'
+ * "both set" case). Each row still contributes exactly one `enable`/intensity gate around
+ * whichever cube(s) it resolves to; every cube inside that gate carries its own `enable` too
+ * (multi-input `lut3d` passthrough is per-filter, not per-chain), so a two-cube row can't leak
+ * grading past its window on the inner stage.
  */
 function appendFilterChain(
   filterParts: string[],
   inLabel: string,
   filters: ComposeFilterSpec[],
   lutsDir: string,
+  adjustmentCubesDir: string,
 ): string {
   let label = inLabel;
 
@@ -356,18 +375,43 @@ function appendFilterChain(
     const intensity = Math.min(Math.max(filter.intensity ?? 1, 0), 1);
     if (intensity <= 0) return;
 
-    const lut = escapeFilterPath(path.join(lutsDir, `${filter.filterId}.cube`));
+    // The bundled look's cube (if any) grades first, so "a look with tweaks on top" reads exactly
+    // as the name says — adjustments act on what the look produced, not the other way round.
+    const lutPaths: string[] = [];
+    if (filter.filterId) {
+      lutPaths.push(path.join(lutsDir, `${filter.filterId}.cube`));
+    }
+    if (filter.adjustments && !isIdentityAdjustment(filter.adjustments)) {
+      lutPaths.push(path.join(adjustmentCubesDir, `adjustment-${index}.cube`));
+    }
+    // Neither a resolvable filterId nor a non-identity adjustment stack — mirrors the
+    // zero-length/zero-intensity skips above rather than emitting a dead pass-through branch.
+    if (lutPaths.length === 0) return;
+
     const enable = `enable='between(t,${filterNum(start)},${filterNum(end)})'`;
     const out = `vfilt${index}`;
 
+    // Applies every cube this row resolved to, in series, onto `srcLabel`. Each stage carries its
+    // own `enable` — see the doc comment above — and only the LAST stage's output takes `dstLabel`.
+    const applyLutsInSeries = (srcLabel: string, dstLabel: string): void => {
+      let cur = srcLabel;
+      lutPaths.forEach((lutPath, lutIndex) => {
+        const lut = escapeFilterPath(lutPath);
+        const isLast = lutIndex === lutPaths.length - 1;
+        const stageOut = isLast ? dstLabel : `${dstLabel}s${lutIndex}`;
+        filterParts.push(`[${cur}]lut3d=file=${lut}:interp=tetrahedral:${enable}[${stageOut}]`);
+        cur = stageOut;
+      });
+    };
+
     if (intensity >= 0.999) {
-      filterParts.push(`[${label}]lut3d=file=${lut}:interp=tetrahedral:${enable}[${out}]`);
+      applyLutsInSeries(label, out);
     } else {
       const keep = `fkeep${index}`;
       const fx = `ffx${index}`;
       const graded = `fgraded${index}`;
       filterParts.push(`[${label}]split[${keep}][${fx}]`);
-      filterParts.push(`[${fx}]lut3d=file=${lut}:interp=tetrahedral:${enable}[${graded}]`);
+      applyLutsInSeries(fx, graded);
       filterParts.push(
         `[${graded}][${keep}]blend=all_mode=normal:all_opacity=${filterNum(intensity)}[${out}]`,
       );
@@ -390,6 +434,7 @@ function appendFilterChain(
  */
 export function buildComposeArgs(input: BuildComposeArgsInput): string[] {
   const { spec, clipPaths, audioPaths, assPath, textOverlayAssPath, fontsDir, lutsDir, outPath } = input;
+  const adjustmentCubesDir = input.adjustmentCubesDir ?? lutsDir;
   const { width, height } = resolveComposeCanvas(spec);
 
   const args: string[] = ['-y'];
@@ -489,7 +534,7 @@ export function buildComposeArgs(input: BuildComposeArgsInput): string[] {
   // Color filters, BEFORE any burn-in. A grade applies to the footage, not to the user's text and
   // captions — chaining these after the `ass=` passes would tint the lettering along with the
   // picture, which is not what any editor does and not what the picker preview shows.
-  videoLabel = appendFilterChain(filterParts, videoLabel, spec.filters ?? [], lutsDir);
+  videoLabel = appendFilterChain(filterParts, videoLabel, spec.filters ?? [], lutsDir, adjustmentCubesDir);
 
   // Burn Text overlays via the generated ASS file (G4's buildTextOverlayAss) — native rotation
   // (\frz) + scale (\fs), unlike the old drawtext loop this replaces.
@@ -868,6 +913,20 @@ export async function runFfmpegOp(data: FfmpegJobData): Promise<{ r2Key: string;
       const fontsDir = path.resolve('assets/fonts');
       // Generated .cube pack, resolved the same cwd-relative way as the fonts above.
       const lutsDir = path.resolve('assets/luts');
+
+      // 2026-08-02 Adjust tab: an adjustment row has no static .cube in assets/luts — its table is
+      // parameters, compiled fresh per job. Write one file per adjustment-carrying row into THIS
+      // job's own temp dir (never assets/luts, which is a shared, read-only, static pack) before
+      // buildComposeArgs runs, at the exact `adjustment-${rowIndex}.cube` path appendFilterChain
+      // expects. Identity stacks are skipped — nothing to grade, mirrors the zero-intensity skip.
+      await Promise.all(
+        (spec.filters ?? []).map(async (filter, index) => {
+          if (!filter.adjustments || isIdentityAdjustment(filter.adjustments)) return;
+          const cubePath = path.join(tempDir, `adjustment-${index}.cube`);
+          await writeFile(cubePath, buildAdjustmentCube(filter.adjustments), 'utf-8');
+        }),
+      );
+
       const args = buildComposeArgs({
         spec,
         clipPaths,
@@ -876,6 +935,7 @@ export async function runFfmpegOp(data: FfmpegJobData): Promise<{ r2Key: string;
         textOverlayAssPath,
         fontsDir,
         lutsDir,
+        adjustmentCubesDir: tempDir,
         outPath,
       });
       await runFfmpeg(args);

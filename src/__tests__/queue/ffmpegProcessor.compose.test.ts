@@ -719,4 +719,107 @@ describe('buildComposeArgs', () => {
       expect(graphFor([oneFilter({ intensity: 0 })])).not.toContain('lut3d');
     });
   });
+
+  // 2026-08-02 Adjust tab: adjustments compile to a LUT and ride the SAME appendFilterChain a
+  // bundled look uses (~/.planning/notes/2026-08-02-adjust-tab-plan.md). buildComposeArgs itself
+  // stays pure — it never writes the .cube, it only emits the `lut3d=file=` path the caller
+  // (runFfmpegOp) is responsible for having already written to `adjustmentCubesDir` beforehand.
+  describe('Adjust (adjustments -> generated LUT)', () => {
+    const oneAdjustment = (
+      over: Partial<NonNullable<ComposeSpec['filters']>[number]> = {},
+    ): NonNullable<ComposeSpec['filters']>[number] => ({
+      filterId: undefined,
+      adjustments: { brightness: 0.5 },
+      intensity: 1,
+      startOffsetSeconds: 2,
+      durationSeconds: 3,
+      ...over,
+    });
+
+    function graphForWithCubesDir(
+      filters: NonNullable<ComposeSpec['filters']>,
+      adjustmentCubesDir?: string,
+    ): string {
+      return filterComplexOf(
+        buildComposeArgs({
+          spec: baseSpec({ filters }),
+          clipPaths: ['/tmp/clip0.mp4', '/tmp/clip1.mp4'],
+          audioPaths: [],
+          assPath: null,
+          textOverlayAssPath: null,
+          fontsDir: '/app/assets/fonts',
+          lutsDir: '/app/assets/luts',
+          adjustmentCubesDir,
+          outPath: '/tmp/out.mp4',
+        }),
+      );
+    }
+
+    it('grades with the generated cube at adjustmentCubesDir/adjustment-{rowIndex}.cube', () => {
+      const graph = graphForWithCubesDir([oneAdjustment()], '/tmp/ffmpeg-gen-1');
+      expect(graph).toContain(
+        "lut3d=file=/tmp/ffmpeg-gen-1/adjustment-0.cube:interp=tetrahedral:enable='between(t,2,5)'",
+      );
+    });
+
+    it('falls back to lutsDir when adjustmentCubesDir is omitted', () => {
+      const graph = graphForWithCubesDir([oneAdjustment()]);
+      expect(graph).toContain('lut3d=file=/app/assets/luts/adjustment-0.cube');
+    });
+
+    it('skips an identity adjustment set exactly like a zero-intensity filter', () => {
+      const graph = graphForWithCubesDir(
+        [oneAdjustment({ adjustments: {} })],
+        '/tmp/ffmpeg-gen-1',
+      );
+      expect(graph).not.toContain('lut3d');
+    });
+
+    it('omits the row entirely when neither filterId nor a non-identity adjustment set is present', () => {
+      const graph = graphForWithCubesDir(
+        [oneAdjustment({ filterId: undefined, adjustments: undefined })],
+        '/tmp/ffmpeg-gen-1',
+      );
+      expect(graph).not.toContain('lut3d');
+    });
+
+    it('blends the adjustment LUT against the ungraded frame at partial intensity, same as a bundled look', () => {
+      const graph = graphForWithCubesDir(
+        [oneAdjustment({ intensity: 0.4 })],
+        '/tmp/ffmpeg-gen-1',
+      );
+      expect(graph).toContain('split[fkeep0][ffx0]');
+      expect(graph).toContain(
+        "[ffx0]lut3d=file=/tmp/ffmpeg-gen-1/adjustment-0.cube:interp=tetrahedral:enable='between(t,2,5)'[fgraded0]",
+      );
+      expect(graph).toContain('[fgraded0][fkeep0]blend=all_mode=normal:all_opacity=0.4');
+    });
+
+    it('chains the bundled look BEFORE the adjustment stack when a row carries both (a look with tweaks on top)', () => {
+      const graph = graphForWithCubesDir(
+        [oneAdjustment({ filterId: 'noir' })],
+        '/tmp/ffmpeg-gen-1',
+      );
+      // The look's cube grades first, feeding into an intermediate label the adjustment cube then
+      // consumes — both gated on the SAME window, and only the final stage takes the row's [vfilt0]
+      // output label.
+      expect(graph).toContain(
+        "[vconcat]lut3d=file=/app/assets/luts/noir.cube:interp=tetrahedral:enable='between(t,2,5)'[vfilt0s0]",
+      );
+      expect(graph).toContain(
+        "[vfilt0s0]lut3d=file=/tmp/ffmpeg-gen-1/adjustment-0.cube:interp=tetrahedral:enable='between(t,2,5)'[vfilt0]",
+      );
+    });
+
+    it('indexes the generated cube filename by the row\'s position in spec.filters, not by count of adjustment rows', () => {
+      const graph = graphForWithCubesDir(
+        [
+          { filterId: 'noir', intensity: 1, startOffsetSeconds: 2, durationSeconds: 3 },
+          oneAdjustment({ startOffsetSeconds: 0, durationSeconds: 9 }),
+        ],
+        '/tmp/ffmpeg-gen-1',
+      );
+      expect(graph).toContain('lut3d=file=/tmp/ffmpeg-gen-1/adjustment-1.cube');
+    });
+  });
 });

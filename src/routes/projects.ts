@@ -80,6 +80,8 @@ import {
 } from '../services/projectService';
 import { resequenceAudioClipSortOrder, resequenceClipSortOrder } from '../services/clipResequence';
 import { isKnownFilterId } from '../config/filters';
+import { validateAdjustments } from '../config/adjustmentValidation';
+import type { Adjustments } from '../config/adjustmentLut';
 
 export const projectsRouter = Router();
 
@@ -899,13 +901,21 @@ projectsRouter.post('/:id/clips/:clipId/restore', async (req: Request, res: Resp
 
 /** Shared validation for the numeric fields, so create and update cannot drift apart. */
 function validateFilterFields(body: Record<string, unknown>): string | null {
-  const { filter_id, intensity, start_offset_seconds, duration_seconds, z_index } = body;
+  const { filter_id, adjustments, intensity, start_offset_seconds, duration_seconds, z_index } = body;
 
-  if (filter_id !== undefined && !isKnownFilterId(filter_id)) {
+  // `null` is a legal, explicit value for both filter_id and adjustments — it clears that half of
+  // the row (2026-08-02 Adjust tab: filter_id null + adjustments set is an adjustment-only row,
+  // and vice versa). Only a truthy filter_id is checked against the catalog; only a truthy
+  // adjustments object is checked against the range/unknown-key rules.
+  if (filter_id !== undefined && filter_id !== null && !isKnownFilterId(filter_id)) {
     // Rejected here rather than at render time: an unknown id becomes an unresolvable
     // `lut3d=file=` path inside the compose worker, which fails the WHOLE export rather than
     // just dropping one filter.
     return 'filter_id must name a filter in the catalog';
+  }
+  if (adjustments !== undefined && adjustments !== null) {
+    const invalidAdjustments = validateAdjustments(adjustments);
+    if (invalidAdjustments) return invalidAdjustments;
   }
   if (
     intensity !== undefined &&
@@ -942,7 +952,15 @@ projectsRouter.post('/:id/filters', async (req: Request, res: Response) => {
   const projectId = req.params.id as string;
   const body = (req.body ?? {}) as Record<string, unknown>;
 
-  if (!isKnownFilterId(body.filter_id)) {
+  // A row must carry a bundled look, an adjustment stack, or both (2026-08-02 Adjust tab) — one
+  // with neither would render as a no-op pass that costs a compose-graph node for nothing.
+  const hasFilterId = body.filter_id !== undefined && body.filter_id !== null;
+  const hasAdjustments = body.adjustments !== undefined && body.adjustments !== null;
+  if (!hasFilterId && !hasAdjustments) {
+    res.status(400).json({ error: 'filter_id or adjustments is required' });
+    return;
+  }
+  if (hasFilterId && !isKnownFilterId(body.filter_id)) {
     res.status(400).json({ error: 'filter_id must name a filter in the catalog' });
     return;
   }
@@ -974,7 +992,8 @@ projectsRouter.post('/:id/filters', async (req: Request, res: Response) => {
     }
 
     const filter = await addFilter(projectId, req.user.dbUserId, {
-      filter_id: body.filter_id,
+      filter_id: hasFilterId ? (body.filter_id as string) : undefined,
+      adjustments: hasAdjustments ? (body.adjustments as Adjustments) : undefined,
       intensity: body.intensity as number | undefined,
       start_offset_seconds: (body.start_offset_seconds as number | undefined) ?? 0,
       duration_seconds: body.duration_seconds,
@@ -1005,7 +1024,7 @@ projectsRouter.patch('/:id/filters/:filterId', async (req: Request, res: Respons
   }
 
   const updates: Record<string, unknown> = {};
-  for (const key of ['filter_id', 'intensity', 'start_offset_seconds', 'duration_seconds', 'z_index']) {
+  for (const key of ['filter_id', 'adjustments', 'intensity', 'start_offset_seconds', 'duration_seconds', 'z_index']) {
     if (body[key] !== undefined) updates[key] = body[key];
   }
   if (Object.keys(updates).length === 0) {
